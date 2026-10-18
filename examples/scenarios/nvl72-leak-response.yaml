@@ -1,0 +1,49 @@
+# A leak in an NVL72 rack, both ways NICo sees one (docs/stacks/nvidia-dsx-os.md — The two leak
+# paths). Path 1: a tray's own detector over Redfish; NICo shuts that tray down. Path 2: a BMS
+# rack leak point over DSX Exchange; NICo raises an alert that blocks allocation and powers nothing
+# off. The scenario asserts NICo's documented default policy (Q18).
+# Conforms to docs/spec/13-schemas.md (Scenario). ILLUSTRATIVE: nothing runs this yet.
+apiVersion: dc-twin/v1alpha1
+kind: Scenario
+metadata:
+  name: nvl72-leak-response
+spec:
+  estate:
+    requires:
+      formats: [nvidia/gb300-nvl72]
+      capabilities: [redfish/leak-detectors, "facility/bms:nvidia/dsx-exchange"]
+  stack:
+    components: [nico, dsx-exchange]
+    accessors:
+      machine: nico.machine
+      alerts: nico.alerts
+  timeout: 30m
+  steps:
+    - wait:
+        for: 'model.select("a03/compute-tray-*").all(d, accessors.machine(d.identity.serial).state == "Ready")'
+        within: 20m
+
+    # Path 1 — the tray's own leak detector.
+    - fault: { id: tray, select: "a03/compute-tray-07", inject: generic/leak/tray-detector }
+    - expect:
+        within: 3m
+        all:
+          - redfish: { select: "a03/compute-tray-07", property: "Chassis/*/ThermalSubsystem/LeakDetection/LeakDetectors/*/DetectorState", equals: Leak }
+          - event:   { canonical: power.off.graceful, from: stack, on: "a03/compute-tray-07" }
+          - redfish: { select: "a03/compute-tray-07", property: "Systems/*/PowerState", equals: "Off" }
+          - not: { event: { canonical: power.off.graceful, on: "a03/compute-tray-{01..06}" } }
+          - not: { event: { canonical: power.off.graceful, on: "a03/compute-tray-{08..18}" } }
+
+    # Path 2 — a BMS rack leak point.
+    - fault: { id: rack, select: "a03/leak-point-01", inject: generic/leak/rack-point }
+    - expect:
+        within: 2m
+        all:
+          - bms:      { topic: "BMS/v1/PUB/Value/Rack/RackLeakDetect/#", value: true }
+          - accessor: { alias: alerts, args: { rack: a03 }, equals: { kind: RackLeak, preventAllocations: true } }
+          - not: { event: { canonical: power.off.graceful, on: "a03/compute-tray-{01..06}" } }
+          - not: { event: { canonical: power.off.graceful, on: "a03/compute-tray-{08..18}" } }
+
+    - fault: { clear: tray }
+    - fault: { clear: rack }
+  report: fidelity

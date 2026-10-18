@@ -1,0 +1,75 @@
+# One GB300 NVL72 rack with its network, power and cooling — the M4/M5 target estate.
+# Conforms to docs/spec/13-schemas.md (Estate). ILLUSTRATIVE: nothing reads this file yet, and the
+# packs it pins do not exist yet.
+apiVersion: dc-twin/v1alpha1
+kind: Estate
+metadata:
+  name: gb300-nvl72-rack
+spec:
+  seed: 1729
+  clock: wall                       # a stack is installed and two trays are vm (D22)
+
+  packs:
+    - generic@0.1.0
+    - nvidia@0.1.0
+    - liteon@0.1.0                  # power-shelf dialect NICo recognises
+
+  fidelity:
+    default: model
+    overrides:                      # last match wins
+      - { select: "a03/compute-tray-{01,02}", level: vm, os: stack }   # NICo installs them; aarch64 → arm64 host (Q17)
+
+  sites:
+    - name: site-1
+      halls:
+        - name: hall-a
+          rows:
+            - name: a
+              positions: 10
+              racks:
+                - name: a03
+                  position: 3
+                  format: nvidia/gb300-nvl72
+                  params: { shelves: 8, powerShelf: liteon/power-shelf-33kw }
+                  feeds: [A, B]
+                - name: a10
+                  position: 10
+                  format: generic/network-rack
+                  params: { ufm: nvidia/ufm-appliance, ibRails: 4, roceRails: 0 }
+
+  networks:
+    oob:          { role: management,   dhcp: stack, fabric: oob }
+    provisioning: { role: provisioning, dhcp: stack, fabric: frontend }
+    frontend:     { role: frontend,     fabric: frontend }
+    backend:      { role: scale-out,    fabric: backend }
+    service:      { role: service,      cidr: 10.90.0.0/24, dhcp: none }   # NICo's site controller, the artifact mirror
+
+  fabrics:
+    - name: oob
+      template: oob-flat
+      nos: none                     # model switches with the twin relay (D20, D21)
+    - name: frontend
+      template: clos-2tier
+      nos: sonic-vs
+      params: { leafsPerRack: 2, spines: 2, underlay: bgp-unnumbered, overlay: evpn, relay: { linkSelection: twin } }
+      placeIn: "a10"                # the NVL72 rack has no free U for its leaves
+    - name: backend
+      template: rail-optimised
+      technology: infiniband        # no packet path; ports, GUIDs and partitions behind UFM REST
+      manager: nvidia/ufm
+      params: { rails: 4 }
+      select: "a03"
+
+  facility:
+    power:
+      feeds: [{ name: A, capacityW: 300000 }, { name: B, capacityW: 300000 }]
+    cooling:
+      loops: [{ name: cdu-1, profile: generic/cdu-inrow, racks: [a03], capacityKW: 200 }]
+    bms:  { dialect: nvidia/dsx-exchange }
+    grid: { dialect: nvidia/dsx-flex }
+
+  stacks:
+    - name: nvidia-dsx-os@0.1.0
+      components: [nico, nvsentinel, dsx-exchange, fleet-intelligence]
+      options: { dpuMode: false }   # zero-DPU until Q1 closes
+      impersonators: []             # conformance estate: nothing impersonated

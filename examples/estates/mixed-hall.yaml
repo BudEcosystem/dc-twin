@@ -1,0 +1,78 @@
+# A mixed hall: rack-scale NVIDIA, 8-GPU servers from three vendors, and a control-plane rack.
+# It shows that one estate holds several formats and vendors, and it is a TWIN-ONLY estate: no
+# stack is installed, every device is model and every fabric is nos: none, so it may run on the
+# virtual clock and replay exactly (D22). To test a stack on it, add `stacks:` and set
+# `clock: wall`; to ingest its hosts with NICo at model fidelity, enable the machine-a-tron
+# impersonator and expect an `impersonated` result (D24).
+# Conforms to docs/spec/13-schemas.md. ILLUSTRATIVE: the amd and intel packs come after DSX OS.
+apiVersion: dc-twin/v1alpha1
+kind: Estate
+metadata:
+  name: mixed-hall
+spec:
+  seed: 42
+  clock: virtual
+
+  packs:
+    - generic@0.1.0
+    - nvidia@0.1.0
+    - liteon@0.1.0
+    - amd@0.1.0                     # after DSX OS (10 — M8)
+    - intel@0.1.0                   # after DSX OS (10 — M9)
+    - oem-dell@0.1.0
+    - oem-supermicro@0.1.0
+
+  fidelity:
+    default: model
+
+  sites:
+    - name: site-1
+      halls:
+        - name: hall-b
+          rows:
+            - name: a
+              positions: 6
+              racks:
+                - { name: a01, position: 1, format: nvidia/gb200-nvl72 }
+                - { name: a02, position: 2, format: nvidia/gb200-nvl72 }
+                - name: a03                     # NVL36x2: one scale-up domain across a03 and a04
+                  position: 3
+                  format: nvidia/gb200-nvl36x2
+                  params: { peer: a04, computeTrays: 9 }   # 9 trays of 4 GPUs (partition guide v1.2)
+                - name: a04
+                  position: 4
+                  format: nvidia/gb200-nvl36x2
+                  params: { peer: a03, computeTrays: 9 }
+            - name: b
+              positions: 6
+              racks:
+                - { name: b01, position: 1, format: generic/hgx-8gpu, params: { server: oem-dell/xe9680-h100, servers: 4 } }
+                - { name: b02, position: 2, format: generic/oam-8gpu, params: { server: amd/instinct-mi355x-platform, servers: 4 } }
+                - { name: b03, position: 3, format: generic/gaudi3-8, params: { server: intel/gaudi3-hls, servers: 4 } }
+            - name: c
+              positions: 4
+              racks:
+                - { name: c01, position: 1, format: generic/cpu-rack, params: { server: oem-dell/r760, servers: 12 } }
+                - { name: c02, position: 2, format: generic/network-rack, params: { ibRails: 4, roceRails: 8 } }
+
+  networks:
+    oob:          { role: management,   dhcp: twin, cidr: 10.30.0.0/20, fabric: oob }   # no stack: the labelled twin DHCP
+    provisioning: { role: provisioning, dhcp: twin, cidr: 10.40.0.0/20, fabric: frontend }
+    frontend:     { role: frontend,     fabric: frontend }
+    backend-ib:   { role: scale-out,    fabric: backend-ib }
+    backend-roce: { role: scale-out,    fabric: backend-roce }
+
+  fabrics:
+    - { name: oob,      template: oob-flat,   nos: none }
+    - { name: frontend, template: clos-2tier, nos: none, params: { leafsPerRack: 2, spines: 4 }, placeIn: "c02" }
+    - { name: backend-ib,   template: rail-optimised, technology: infiniband,    nos: none, manager: nvidia/ufm, select: "a0*" }
+    - { name: backend-roce, template: rail-optimised, technology: ethernet-roce, nos: none, params: { rails: 8 }, select: "b0*" }
+
+  facility:
+    power:
+      feeds: [{ name: A, capacityW: 900000 }, { name: B, capacityW: 900000 }]
+    cooling:
+      loops: [{ name: cdu-a, profile: generic/cdu-inrow, racks: [a01, a02, a03, a04], capacityKW: 600 }]
+    bms: { dialect: nvidia/dsx-exchange }
+
+  stacks: []
