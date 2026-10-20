@@ -114,7 +114,7 @@ extend with hooks. Preconditions are CEL over `device`, `rack` and `estate` ([14
 |---|---|
 | `power` | The off / powering-on / on / powering-off state machine; reset types (On, ForceOff, GracefulShutdown, ForceRestart, PowerCycle); preconditions on other devices; durations; AC cycle. At `vm` the power state is **observed** from libvirt once the request is issued ([D19](11-decisions.md#d19--model-fields-are-owned-or-observed-observers-reconcile-the-substrate)) |
 | `boot` | POST time, boot order and one-time overrides, PXE, HTTP, virtual media and disk. At `model` the boot walk ([05](05-interfaces.md#boot-and-addressing)); at `vm` delegated to OVMF, with boot order and Secure Boot written to NVRAM on the next reset and read back by the observer |
-| `firmware` | Inventory; staged updates; apply on reset, on AC cycle or immediately; failure and rollback; per-component versions against the profile's baseline |
+| `firmware` | Inventory; staged updates; apply on reset, on AC cycle or immediately; failure and rollback; per-component versions against the profile's baseline. An update's task runs in the BMC: a BMC that goes down while it runs (reset, power loss, hang) loses it, aborted with nothing staged ([D53](11-decisions.md#d53--a-firmware-update-task-lives-in-its-bmc-and-is-lost-when-the-bmc-goes-down)) |
 | `settings` | BIOS/UEFI attributes applied on the next boot; lockdown |
 | `accounts` | BMC users, password change on first login, sessions, certificates; rotations are recorded so a scenario can assert the stack rotated them |
 | `sensors` | Derived values that track a target with a first-order lag. Targets derive from power, the coolant loop and ambient temperature. Thresholds raise committed health events |

@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -24,6 +23,7 @@ import (
 	"github.com/BudEcosystem/dc-twin/internal/schema"
 	"github.com/BudEcosystem/dc-twin/internal/substrate/qemu"
 	"github.com/BudEcosystem/dc-twin/internal/twin"
+	"github.com/insomniacslk/dhcp/dhcpv4"
 )
 
 // A BlueField at `vm` fidelity has an Arm: a QEMU machine (aarch64, edk2) that runs what a
@@ -58,10 +58,11 @@ import (
 //     (DPF's cloud-init brings it up by that name); the Arm's OOB NIC is virtio. After the
 //     installer finishes, the twin adds a systemd .link file matching the NIC's MAC to the
 //     installed root file system (armdisk.go), once, while the disk is at rest and clean.
-//   - The out-of-band address (armdhcp.go): the Arm's NIC is cabled to the DPU's management
-//     switch port, which it shares with the BMC as on a BlueField; the twin relay serves one
-//     client per port, so the Arm's DHCP is answered on its cable with an address in the BMC's
-//     segment that the site DHCP never hands out.
+//   - Nothing for the out-of-band address: the Arm's NIC is cabled to the DPU's management
+//     switch port, which it shares with the BMC as on a BlueField, and is plugged into that
+//     port's twin relay by its own MAC as a second client behind the port. The relay delivers
+//     each reply to the client its chaddr names within the port, so the Arm leases from the
+//     network's DHCP server (the twin site DHCP, or the stack's) and the BMC keeps its own lease.
 //   - Reboots. QEMU runs with -no-reboot, so a reset the guest asks for ends the process and the
 //     twin starts the next boot (GRUB's entry, re-read): the observation is a reset, not a power
 //     cycle.
@@ -129,7 +130,9 @@ type arm struct {
 	reqs   chan armRequest
 
 	mu         sync.Mutex
-	relay      *armRelay
+	lease      string // the Arm's OOB address, from its last DHCPACK, and the server that gave it
+	leaseFrom  string
+	dhcpAcks   int
 	cur        *qemu.Machine
 	kind       string // what cur runs: firmware | installer | os
 	cause      uint64
@@ -198,6 +201,10 @@ func num(v any) (float64, bool) {
 	return 0, false
 }
 
+// Specialised: the adapter runs only BlueFields' Arms, so where it accepts a DPU it claims it
+// before the vm adapter, which would run any machine (adapter.ClaimSubstrate).
+func (a *Adapter) Specialised() {}
+
 // Accepts runs a BlueField's Arm at vm fidelity where QEMU can run its guest and the tools the
 // Arm's boot needs are installed (adapter.Substrate).
 func (a *Adapter) Accepts(est *schema.Estate, d *model.Device, allowTCG bool) error {
@@ -263,20 +270,13 @@ func (a *Adapter) newArm(f *front) (*arm, error) {
 	if m.cable, err = qemu.ListenCable(filepath.Join(m.run, "oob.sock")); err != nil {
 		return nil, err
 	}
-	var svcs []netsim.Service
-	if s := strings.TrimSpace(a.rt.Outputs["siteServices"]); s != "" {
-		if svcs, err = netsim.ParseServices(s); err != nil {
-			m.cable.Close()
-			return nil, fmt.Errorf("the stack's siteServices output: %w", err)
-		}
-	}
 	bmcPort := m.bmcPort()
 	ref := d.Path + ":oob"
 	if bmcPort != nil {
 		ref = bmcPort.Ref
 	}
-	m.hp, err = netsim.NewHostPort(m.cable, netsim.HostPortConfig{Ref: ref, MAC: m.mac, Plug: m.plug, Services: svcs,
-		Routes: a.rt.Net.Routes, Observe: m.flow, Log: a.rt.Log})
+	m.hp, err = netsim.NewHostPort(m.cable, netsim.HostPortConfig{Ref: ref, MAC: m.mac, Plug: m.plug, Services: a.services,
+		Routes: a.rt.Net.Routes, Observe: m.flow, OnDHCP: m.dhcp, Log: a.rt.Log})
 	if err != nil {
 		m.cable.Close()
 		return nil, err
@@ -337,53 +337,44 @@ func (a *Adapter) armMAC(f *front) (net.HardwareAddr, string) {
 	return out, "the BMC port's MAC + 1 (no captured oob0 interface)"
 }
 
-// plug gives the Arm's port its relay once the BMC holds a lease (netsim retries it on the
-// Arm's DHCP until it succeeds).
+// plug plugs the Arm's NIC into the twin relay of its BMC's switch port, as a second DHCP client
+// behind that port by its own MAC (netsim retries it on the Arm's DHCP until it succeeds: the
+// dhcp adapter may start later). The relay serves both clients of the port, telling their replies
+// apart by chaddr, so the Arm's DHCP is the network's: the twin site DHCP's, or on a `dhcp:
+// stack` network the stack's server, which then sees the Arm's MAC behind the BMC's port.
 func (m *arm) plug() (netsim.PortRelay, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.relay != nil {
-		return m.relay, nil
-	}
 	p := m.bmcPort()
 	if p == nil {
 		return nil, errors.New("the DPU has no management port")
 	}
-	var lease *model.Lease
-	var network netip.Prefix
-	var dhcpMode string
-	var gwMAC net.HardwareAddr
-	m.a.eng.Read(func(md *model.Model) {
-		if m.dev.State.Lease != nil {
-			l := *m.dev.State.Lease
-			lease = &l
-		}
-		if md.Estate != nil {
-			n := md.Estate.Spec.Networks[p.Network]
-			dhcpMode = n.DHCP
-			network, _ = netip.ParsePrefix(n.CIDR)
-		}
-		if p.Link != nil {
-			if q := p.Link.Peer(p); q != nil {
-				gwMAC, _ = net.ParseMAC(q.MAC)
-			}
-		}
-	})
-	if dhcpMode == "stack" {
-		return nil, fmt.Errorf("network %s's DHCP is the stack's, which would answer the Arm; the twin relay serves one client per switch port", p.Network)
+	return m.a.rt.Net.PlugRelay(p.Ref, m.mac)
+}
+
+// dhcp follows the Arm's DHCP through its port: each address a DHCPACK gives it is observed
+// once, with the server that gave it.
+func (m *arm) dhcp(dir string, payload []byte) {
+	if dir != "reply" {
+		return
 	}
-	if lease == nil || lease.IP == "" {
-		return nil, errors.New("the BMC has no lease yet")
+	msg, err := dhcpv4.FromBytes(payload)
+	if err != nil || msg.MessageType() != dhcpv4.MessageTypeAck || msg.ClientHWAddr.String() != m.mac.String() {
+		return
 	}
-	if len(gwMAC) != 6 {
-		gwMAC = net.HardwareAddr{0x02, 0xdc, 0x7e, 0x00, 0x00, 0x02}
+	ip, server := msg.YourIPAddr.String(), ""
+	if sid := msg.ServerIdentifier(); sid != nil {
+		server = sid.String()
 	}
-	r, err := newArmRelay(m.mac, lease.IP, lease.Gateway, network, gwMAC)
-	if err != nil {
-		return nil, err
+	m.mu.Lock()
+	changed := ip != m.lease
+	m.lease, m.leaseFrom = ip, server
+	m.dhcpAcks++
+	m.mu.Unlock()
+	if changed {
+		// not the field "lease": that is the BMC's, on the same device path, and its watchers
+		// (the front's certificate, the redfish adapter's routes) must not take the Arm's for it
+		m.observe("oob.lease", ip, fmt.Sprintf("the Arm's oob_net0 (%s) was leased %s by %s, through the twin relay of its BMC's switch port", m.mac, ip, server),
+			0, map[string]any{"ip": ip, "server": server, "mac": m.mac.String()})
 	}
-	m.relay = r
-	return r, nil
 }
 
 // flow counts what the Arm reached through its segment gateway.
@@ -872,7 +863,7 @@ func (m *arm) close() {
 }
 
 // reportLines are the Arm's lines in the fidelity report. The port's relay is asked before the
-// Arm's lock is taken: the port holds its own lock when it plugs (m.plug takes the Arm's).
+// Arm's lock is taken, so the port's lock is never taken under the Arm's.
 func (m *arm) reportLines() []string {
 	server, why := m.hp.Relay()
 	m.mu.Lock()
@@ -899,14 +890,16 @@ func (m *arm) reportLines() []string {
 		out = append(out, "Arm's last command line: "+m.cmdline)
 	}
 	out = append(out, "Arm's OOB MAC "+m.mac.String()+" ("+m.macSrc+")")
-	if m.relay != nil {
-		req, acks := m.relay.stats()
-		out = append(out, fmt.Sprintf("Arm's OOB address %s via %s: %d DHCP requests, %d ACKs — answered by the bluefield adapter on the Arm's cable, not by the twin relay (one client per switch port); the port saw %d DHCP requests, delivered %d replies, opened %d TCP flows, refused %d, dropped %d frames",
-			m.relay.addr, m.relay.gw, req, acks, m.hp.DHCPRequests.Load(), m.hp.DHCPReplies.Load(), m.hp.TCPFlows.Load(), m.hp.TCPRefused.Load(), m.hp.Dropped.Load()))
-	} else if why != "" {
+	switch {
+	case m.lease != "":
+		out = append(out, fmt.Sprintf("Arm's OOB address %s from %s (%s), through the twin relay of its BMC's switch port, a second client behind the port by its own MAC: %d ACKs; the port relayed %d DHCP requests, delivered %d replies, opened %d TCP flows, refused %d, dropped %d frames",
+			m.lease, m.leaseFrom, server, m.dhcpAcks, m.hp.DHCPRequests.Load(), m.hp.DHCPReplies.Load(), m.hp.TCPFlows.Load(), m.hp.TCPRefused.Load(), m.hp.Dropped.Load()))
+	case why != "":
 		out = append(out, "Arm's OOB address: none ("+why+")")
-	} else {
-		out = append(out, "Arm's OOB DHCP: "+server)
+	case server != "":
+		out = append(out, fmt.Sprintf("Arm's OOB address: none yet; its DHCP is relayed to %s (%d requests, %d replies)", server, m.hp.DHCPRequests.Load(), m.hp.DHCPReplies.Load()))
+	default:
+		out = append(out, "Arm's OOB address: none yet (no DHCP from the Arm)")
 	}
 	if m.linkNote != "" {
 		out = append(out, "Arm's OOB port name: "+m.linkNote)

@@ -68,9 +68,11 @@ type PortRelay interface {
 	Close() error
 }
 
-// RelayDirectory plugs a host's port (its ref, "device:port") into the twin relay of its
-// segment, or says why it cannot.
-type RelayDirectory func(ref string) (PortRelay, error)
+// RelayDirectory plugs a DHCP client behind a host's port (its ref, "device:port") into the twin
+// relay of its segment, or says why it cannot. client is the client's hardware address; nil is the
+// port's own MAC. A port may carry more than one client, as a BlueField's out-of-band port carries
+// its BMC and its Arm: the relay tells their replies apart by chaddr within the port (D52).
+type RelayDirectory func(ref string, client net.HardwareAddr) (PortRelay, error)
 
 // ErrNoRelays is PlugRelay's error while no DHCP adapter has registered its relays.
 var ErrNoRelays = errors.New("no DHCP adapter runs, so no twin relay serves the segment")
@@ -89,13 +91,14 @@ func (n *Net) SetRelayDirectory(d RelayDirectory) {
 	relayDirs.Store(n, d)
 }
 
-// PlugRelay plugs a host's port into the twin relay of its segment.
-func (n *Net) PlugRelay(ref string) (PortRelay, error) {
+// PlugRelay plugs a DHCP client behind a host's port into the twin relay of its segment: the
+// port's own (client nil), or another client sharing the port, by its hardware address.
+func (n *Net) PlugRelay(ref string, client net.HardwareAddr) (PortRelay, error) {
 	v, ok := relayDirs.Load(n)
 	if !ok {
 		return nil, ErrNoRelays
 	}
-	return v.(RelayDirectory)(ref)
+	return v.(RelayDirectory)(ref, client)
 }
 
 // Service is a stack service at the site address a site routes to it, and where it runs on this

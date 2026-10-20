@@ -104,7 +104,7 @@ func (m *machine) cableNICs(d *model.Device, svcs []netsim.Service) error {
 		cfg := netsim.HostPortConfig{Ref: ref, MAC: mac, Services: svcs, Routes: m.a.rt.Net.Routes, Log: m.a.log,
 			Observe: n.flow, OnDHCP: n.dhcp, Uplink: m.a.uplink}
 		if p.Link != nil {
-			cfg.Plug = func() (netsim.PortRelay, error) { return m.a.rt.Net.PlugRelay(ref) }
+			cfg.Plug = func() (netsim.PortRelay, error) { return m.a.rt.Net.PlugRelay(ref, nil) }
 		}
 		hp, err := netsim.NewHostPort(c, cfg)
 		if err != nil {

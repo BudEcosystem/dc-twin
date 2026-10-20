@@ -37,6 +37,7 @@ type endpoint struct {
 	circuit string
 	remote  net.HardwareAddr
 	offset  int    // the twin site DHCP's static host part for this port (0: none)
+	second  bool   // a plugged client behind a port another client holds (a BlueField's Arm), by its own MAC
 	class   string // option 60, as sent
 
 	// options every message of this client carries (vendor class, hostname, client id, PRL)

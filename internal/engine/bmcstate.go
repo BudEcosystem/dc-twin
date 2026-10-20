@@ -418,12 +418,23 @@ func deepMerge(dst, src map[string]any) {
 
 // UpdateFirmware stages an update (firmware.update.simple / .multipart) and returns a task
 // whose completion applies it per the component's applyOn.
+//
+// The task is the BMC's: it runs only while the BMC does. A BMC that goes down while the task
+// runs (its reset, the loss of its standby power, a fault that makes it unreachable) loses the
+// task: the image is not staged, and once the BMC is back its TaskService reports the task
+// aborted (Exception), never running and never completed (abortFirmwareTasks, D53). A BMC that
+// is down takes no update at all, as it takes no power request. An update whose task completed
+// before the BMC went down is unaffected: a BMC component staged applyOn reset is applied when
+// that BMC reboots (ResetBMC), which is how an operator updates a BMC (D51).
 func (e *Engine) UpdateFirmware(r Request, components []string, version string) (model.Task, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	d, err := e.dev(r)
 	if err != nil {
 		return model.Task{}, err
+	}
+	if r.Source.Class == "stack" && d.HasBMC() && !e.bmcAvailable(d) {
+		return model.Task{}, ErrBMCDown
 	}
 	c := e.logRequest(r, httpStatus(r, 202))
 	fail := false
@@ -441,7 +452,9 @@ func (e *Engine) UpdateFirmware(r Request, components []string, version string) 
 	t := model.Task{ID: strconv.Itoa(len(d.State.Tasks) + 1), State: "Running", Started: e.now, Canonical: r.Canonical, Message: "update " + version}
 	d.State.Tasks = append(d.State.Tasks, t)
 	idx := len(d.State.Tasks) - 1
-	e.after(20*time.Second, "firmware-task", func() {
+	var timer uint64
+	timer = e.after(20*time.Second, "firmware-task", func() {
+		e.endFirmwareTask(d, timer)
 		task := &d.State.Tasks[idx]
 		task.Ends, task.Percent = e.now, 100
 		if fail {
@@ -467,7 +480,59 @@ func (e *Engine) UpdateFirmware(r Request, components []string, version string) 
 			e.applyStaged(d, "immediate", c)
 		}
 	})
+	e.fwTasks[d.Path] = append(e.fwTasks[d.Path], fwTask{idx: idx, timer: timer})
 	return t, nil
+}
+
+// fwTask is a firmware update task still running on a device's BMC: its index in the device's
+// tasks and the timer that completes it.
+type fwTask struct {
+	idx   int
+	timer uint64
+}
+
+// endFirmwareTask forgets a running firmware task whose timer has fired.
+func (e *Engine) endFirmwareTask(d *model.Device, timer uint64) {
+	run := e.fwTasks[d.Path]
+	for i, t := range run {
+		if t.timer == timer {
+			run = append(run[:i], run[i+1:]...)
+			break
+		}
+	}
+	if len(run) == 0 {
+		delete(e.fwTasks, d.Path)
+	} else {
+		e.fwTasks[d.Path] = run
+	}
+}
+
+// abortFirmwareTasks ends the firmware tasks a BMC is running when it goes down: a BMC's tasks
+// live in the BMC, so a reset, a loss of its standby power or a hang loses them. Each task is
+// aborted where it stood (Exception, ended now, its percentage kept), its completion cancelled,
+// and nothing is staged. A real BMC answers nothing while it is down; once back, bmcweb (which
+// holds its tasks in memory) has forgotten the task and answers 404 for it. The twin keeps it,
+// ended in Exception, as DMTF's TaskState says of a task "stopped due to an
+// exception condition": a client polling it sees a failed update either way, and one keyed on
+// the task id (RMS's jobs) finishes instead of waiting on a task that never ends (D53). Every
+// path that takes a BMC down calls it: loseAC, ResetBMC, and a fault whose effect makes the BMC
+// unavailable (injectLocked).
+func (e *Engine) abortFirmwareTasks(d *model.Device, why string, cause uint64) {
+	run := e.fwTasks[d.Path]
+	if len(run) == 0 {
+		return
+	}
+	delete(e.fwTasks, d.Path)
+	for _, t := range run {
+		e.cancel(t.timer)
+		task := &d.State.Tasks[t.idx]
+		if task.State != "Running" {
+			continue
+		}
+		task.State, task.Ends = "Exception", e.now
+		task.Message = "aborted: " + why
+		e.stateEvent(d.Path, "task."+task.ID, "Running", "Exception", behaviourSrc, cause, "Warning")
+	}
 }
 
 func (e *Engine) applyStaged(d *model.Device, on string, cause uint64) {

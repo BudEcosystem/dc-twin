@@ -4,9 +4,9 @@ import (
 	"bytes"
 	"compress/gzip"
 	"encoding/binary"
+	"errors"
 	"hash/crc32"
 	"net"
-	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,7 +14,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/insomniacslk/dhcp/dhcpv4"
+	"github.com/BudEcosystem/dc-twin/internal/adapter"
+	"github.com/BudEcosystem/dc-twin/internal/adapter/netsim"
+	"github.com/BudEcosystem/dc-twin/internal/model"
 )
 
 // readCpio lists a newc archive's members (name -> data), checking each header's alignment.
@@ -142,57 +144,35 @@ submenu 'Advanced options for Ubuntu' {
 	}
 }
 
-// TestArmRelay answers the Arm's DHCP on its cable: an address below the twin site DHCP's
-// allocations in the BMC's segment, the segment's gateway, and nothing for any other MAC.
-func TestArmRelay(t *testing.T) {
-	mac, _ := net.ParseMAC("b8:3f:d2:00:00:01")
-	r, err := newArmRelay(mac, "10.30.0.12", "10.30.0.1", netip.MustParsePrefix("10.30.0.0/20"), net.HardwareAddr{2, 0, 0, 0, 0, 1})
+// TestArmPlugsIntoItsBMCsPort: the Arm's DHCP is the network's, not the adapter's. Its NIC is
+// plugged into the twin relay of its BMC's switch port by its own MAC, a second client behind the
+// port (the relay tells the two apart by chaddr, package dhcp's TestTwoClientsBehindOnePort). This
+// inverts the first form of D52, where the adapter answered the Arm on its cable with a fixed .9.
+func TestArmPlugsIntoItsBMCsPort(t *testing.T) {
+	n, err := netsim.New(t.TempDir(), 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r.addr != netip.MustParseAddr("10.30.0.9") || r.gw.String() != "10.30.0.1/24" {
-		t.Fatalf("address %s gateway %s", r.addr, r.gw)
+	t.Cleanup(n.Close)
+	var gotRef string
+	var gotMAC net.HardwareAddr
+	n.SetRelayDirectory(func(ref string, client net.HardwareAddr) (netsim.PortRelay, error) {
+		gotRef, gotMAC = ref, client
+		return nil, errors.New("recorded")
+	})
+	t.Cleanup(func() { n.SetRelayDirectory(nil) })
+	mac, _ := net.ParseMAC("b8:3f:d2:00:00:02")
+	d := &model.Device{Path: "site-1/hall-a/a01/compute-tray-01/bf3-0",
+		PortBy: map[string]*model.Port{"bmc0": {Ref: "site-1/hall-a/a01/compute-tray-01/bf3-0:bmc0", Name: "bmc0", MAC: "b8:3f:d2:00:00:01"}}}
+	m := &arm{a: &Adapter{rt: &adapter.Runtime{Net: n}}, dev: d, mac: mac}
+	if _, err := m.plug(); err == nil || err.Error() != "recorded" {
+		t.Fatalf("plug: %v", err)
 	}
-	ask := func(m *dhcpv4.DHCPv4) *dhcpv4.DHCPv4 {
-		t.Helper()
-		if err := r.Send(m.ToBytes()); err != nil {
-			t.Fatal(err)
-		}
-		select {
-		case b := <-r.replies:
-			reply, err := dhcpv4.FromBytes(b)
-			if err != nil {
-				t.Fatal(err)
-			}
-			return reply
-		default:
-			return nil
-		}
+	if gotRef != "site-1/hall-a/a01/compute-tray-01/bf3-0:bmc0" || gotMAC.String() != mac.String() {
+		t.Fatalf("the Arm plugged into %q as %s, want its BMC's port as its own MAC %s", gotRef, gotMAC, mac)
 	}
-	disc, _ := dhcpv4.NewDiscovery(mac)
-	offer := ask(disc)
-	if offer == nil || offer.MessageType() != dhcpv4.MessageTypeOffer || !offer.YourIPAddr.Equal(net.ParseIP("10.30.0.9")) ||
-		!offer.Router()[0].Equal(net.ParseIP("10.30.0.1")) || net.IP(offer.SubnetMask()).String() != "255.255.255.0" {
-		t.Fatalf("offer: %v", offer)
-	}
-	req, _ := dhcpv4.NewRequestFromOffer(offer)
-	if ack := ask(req); ack == nil || ack.MessageType() != dhcpv4.MessageTypeAck {
-		t.Fatalf("ack: %v", ack)
-	}
-	other, _ := net.ParseMAC("b8:3f:d2:00:00:02")
-	disc2, _ := dhcpv4.NewDiscovery(other)
-	if reply := ask(disc2); reply != nil {
-		t.Fatalf("another MAC was answered: %v", reply)
-	}
-	wrong, _ := dhcpv4.NewRequestFromOffer(offer, dhcpv4.WithOption(dhcpv4.OptRequestedIPAddress(net.ParseIP("10.30.0.77"))))
-	if nak := ask(wrong); nak == nil || nak.MessageType() != dhcpv4.MessageTypeNak {
-		t.Fatalf("a request for another address: %v", nak)
-	}
-	if _, err := newArmRelay(mac, "", "", netip.Prefix{}, nil); err == nil {
-		t.Fatal("a relay without the BMC's lease was made")
-	}
-	if small, err := newArmRelay(mac, "192.168.7.20", "192.168.7.17", netip.MustParsePrefix("192.168.7.16/28"), nil); err != nil || small.addr != netip.MustParseAddr("192.168.7.25") {
-		t.Fatalf("a network smaller than a /24 is the segment: %v %v", small, err)
+	if _, err := (&arm{a: m.a, dev: &model.Device{}, mac: mac}).plug(); err == nil {
+		t.Fatal("a DPU without a management port was plugged in")
 	}
 }
 

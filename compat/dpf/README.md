@@ -183,14 +183,17 @@ way). Then:
 | P6 | OS Installing: the BFB transferred | PASS (DPF polled the BMC's task once it was back) | PASS |
 | A1 | The BMC's push installs the DPU OS on the Arm with DPF's bf.cfg: the stream's own installer, `/etc/bf.cfg` from what followed the last image | PASS: `Running bfb_modify_os from bf.cfg`, `INFO: Installation finished`; `oob_net0` named by a link file for the MAC the BMC serves for the Arm's `oob0` | PASS, and the BFB's boot firmware staged at its ARM capsule (UEFI `4.16.0-48-g3e1cb60aa0`, ATF `4.16.0-8-gda930bca9`, BSP `4.16.0.14075`) |
 | A2 | The DPU OS boots: GRUB's entry, `virt`'s early console ahead of its command line | PASS: `dpu-node-mt1565361tbu-mt1565361tbu login:` 138 s after the reset | PASS: 145 s |
-| A3 | DPF's first boot installs the DPU agent | PASS: `oob_net0` leased 10.30.0.9 on its BMC's segment, DPF's CA trusted, `dpu-agent_26.8.0_arm64.deb` fetched from `https://10.90.0.12:443/deb` through the segment's gateway | PASS |
+| A3 | DPF's first boot installs the DPU agent | PASS: `oob_net0` leased 10.30.0.9 on its BMC's segment (the address stand-in D52 first had), DPF's CA trusted, `dpu-agent_26.8.0_arm64.deb` fetched from `https://10.90.0.12:443/deb` through the segment's gateway | PASS |
+| A4 | The Arm's `oob_net0` and its BMC are two DHCP clients behind one switch port: the Arm leases from the twin site DHCP through the twin relay, the BMC keeps its lease (D52, amended) | not run (the check came with the amendment) | PASS (2026-10-21): `oob_net0` (`5c:25:73:7d:8a:49`) leased 10.30.0.200 from the twin site DHCP (10.30.0.2) through the relay of `w01-mgmt-switch:eth4`; the BMC on 10.30.0.14 at T1 and at the end; the relay delivered 21 replies on the shared port by chaddr, 16 to the Arm and 5 to the BMC (its renewals among them) |
 | P7 | The DPU agent reports to DPF: its bootstrap CSR approved by DPF and signed by the host cluster, `lastStartupTime` set | PASS: OS Installing → DPU Config, 345 s after the Arm's reset into its OS | PASS: 345 s |
 | P8 | The DPU joins the DPU cluster as a Node | FAIL: no Node. The agent's 17th operation, `nvconfig`, fails (`no physical ports from devlink (p0/p1)`) and is retried for good; DPF waits at `DPUConfig: waiting for DPU agent to report reboot method` | PASS: DPF's `kubeadm join` at 10.90.0.11:443; `dpu-node-mt1565361tbu-mt1565361tbu` Ready, kubelet v1.34.11, containerd 2.2.1, Ubuntu 24.04.4, `6.8.0-1030-bluefield-64k` |
 | R1 | DPF puts the DPU in service: DPU Cluster Config, Service Readiness, Node Effect Removal | CANNOT | PASS: phase **Ready**, 403 s after the Arm's reset into its OS |
 | H1 | DPF deploys HBN as a DPUService on the DPU Node | CANNOT: no Node | CANNOT (below) |
 | M1 | Memory with the DPU OS (4 GB) up beside the twin, both clusters, cert-manager and DPF's controllers | PASS: job 6,023 MiB, QEMU 3,569 MiB | PASS: job 6,060 MiB, QEMU 3,531 MiB |
 
-`AGENT_SKIP=connectx`: 26 checks, 25 PASS, 1 CANNOT. Memory is sampled every 5 s; the cgroup's
+`AGENT_SKIP=connectx`: 26 checks, 25 PASS, 1 CANNOT; re-run on 2026-10-21 after D52's amendment
+(the Arm leasing through the twin relay, the site gateway routing the stack's services), 27 checks
+with A4, 26 PASS, 1 CANNOT (H1), phase Ready, the job's peak 6,023 MiB with the DPU OS up. Memory is sampled every 5 s; the cgroup's
 own peaks, which include page cache the kernel reclaims at the cap, were 8,752 MiB and 7,291 MiB,
 and neither run met the cap (`memory.events`: `max 0`, no OOM kill). The guide's-flavor column
 is two runs: the later ran without intervention and was stopped once the agent stood at
@@ -264,8 +267,10 @@ does that the Redfish engine's generic service did not, found by running DPF:
 - **The Arm at `vm`** (D52): a QEMU aarch64 machine that the BMC's push installs with the BFB's
   own installer (the bf.cfg handed over where the boot FIFO would put it) and that boots GRUB's
   entry with `virt`'s UART as its early console; its out-of-band NIC on the BMC's switch port,
-  named `oob_net0`, with an address answered on its cable; the stack's site services routed from
-  the site gateway; and the BFB's boot firmware (UEFI, ATF, BSP) staged when the installer reports
+  named `oob_net0`, a second DHCP client behind that port that leases from the twin site DHCP
+  through the twin relay (the relay delivers each reply by chaddr within the port, so the BMC
+  keeps its own lease); the stack's site services routed by the site gateway, which routes them for
+  every stack process; and the BFB's boot firmware (UEFI, ATF, BSP) staged when the installer reports
   its ARM capsule written and reported by the BMC after the Arm's next reset. A BMC upload still
   arriving when the BMC goes down for a reset is cut off with it.
 

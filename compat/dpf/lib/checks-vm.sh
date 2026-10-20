@@ -47,6 +47,18 @@ record A3 "DPF's first boot installs dpu-agent from the bfb-registry's /deb, at 
 	"apt fetches the package DPF built (lib/agent-deb.sh) from https://$SITE_REGISTRY/deb" \
 	"$(grep -c 'GET /deb/' "$WORK/logs/bfb-registry.log" || true) /deb requests; $(grep -o 'GET /deb/[^ ]*' "$WORK/logs/bfb-registry.log" | sort -u | paste -sd' ' - | cut -c1-200)" \
 	"$(fetched_agent && echo PASS || echo FAIL)"
+# A4: the Arm's oob_net0 and its BMC are two DHCP clients behind one switch port (D52, amended):
+# the Arm leases from the twin site DHCP through the twin relay, and the BMC keeps the address it
+# held at T1. The fidelity report's relay line counts the replies delivered to each client of the
+# shared port, the BMC's renewals among them.
+arm_lease=$(arm_events | grep ' oob.lease → ' | tail -1 | sed 's/^[0-9]* //') || true
+bmc_then=$(awk -v p="$vm_path" '$3 == p {print $2}' "$WORK/evidence/leases.txt") || true
+bmc_now=$(leases | awk -v p="$vm_path" '$3 == p {print $2}') || true
+shared_port=$(twin report 2>/dev/null | grep -o 'switch ports have more than one DHCP client behind them.*' | head -1 | cut -c1-300) || true
+record A4 "The Arm's oob_net0 leases from the twin site DHCP through the twin relay of its BMC's switch port (a second client behind the port); the BMC keeps its lease" \
+	"an oob.lease from the twin site DHCP at another address than the BMC's; the BMC's lease unchanged since T1" \
+	"Arm: ${arm_lease:-none}; BMC $vm_path: $bmc_then at T1, ${bmc_now:-none} now; relay: ${shared_port:-no shared port}" \
+	"$([ -n "$arm_lease" ] && [ -n "$bmc_now" ] && [ "$bmc_now" = "$bmc_then" ] && ! echo "$arm_lease" | grep -q "→ $bmc_now:" && echo PASS || echo FAIL)"
 ms=$(wait_until "$AGENT_SECONDS" agent_reported) || true
 hk get dpu -n $NS "$vm_dpu" -o yaml >"$WORK/evidence/dpu-$vm_dpu.yaml" 2>/dev/null || true
 record P7 "OS installed: the DPU agent on $VM_DPU's DPU OS reports to DPF (the other DPU is at model: no OS)" \
