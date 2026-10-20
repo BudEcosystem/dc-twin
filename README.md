@@ -13,11 +13,36 @@ NVSentinel, Fleet Intelligence, DSX Exchange, AI Cluster Runtime and KAI Schedul
 vendor-neutral. AMD Instinct, Intel Gaudi, other OEMs and other rack formats are added as **packs**
 of device profiles and stack definitions, without changing the engine.
 
-> **Status: specification (draft 0.2, reviewed), plus a console prototype.** The twin itself does
-> not run yet. Start with [the spec](docs/spec/README.md); the review that produced draft 0.2 and
-> the gaps it still names are in [docs/reviews/](docs/reviews/2026-10-18-spec-review.md). The
-> [console prototype](prototype/README.md) runs in a browser over an in-memory estate and a
-> simulated stack.
+> **Status: a first implementation runs, and real stacks run against it.** The engine, the
+> compiler, ten packs and twelve protocol adapters (Redfish, DHCP with the twin relay and boot
+> walker, DSX Exchange BMS, SNMP, IPMI, UFM, NVUE, NMX-C, RMS, a Kubernetes projection, accelerator
+> exporters, and `vm` hosts on QEMU), on a loopback or a Linux TAP network substrate with real NOS
+> containers, run, each checked against a real, unmodified client. Run against the twin, unmodified:
+> **NVIDIA Infra Controller (NICo)** itself (22 PASS, 0 FAIL: it leases, explores and ingests every
+> GB300 tray with its DPU, brings its NVLink switches and power shelves to `ready`, powers off a
+> leaking tray through the twin's RMS and has the twin's BMS isolate a rack), NICo's `libredfish`,
+> `libnmxc` and `librms`, **OpenStack Ironic** (125 PASS), **Tinkerbell** (144 of 144), **KAI
+> Scheduler**, **AICR** and **Prometheus**, sushy, gofish, bmclib, ISC Kea, FRR with ISC dhcrelay,
+> ipmitool, net-snmp and a kube-apiserver. Scenarios run end to end across power, cooling, leaks,
+> accelerator faults and BMC failures. What is not built (the in-host agent, a DPU OS, SONiC-VS on
+> ARM hosts) and every result with its limits are in the
+> **[implementation status](docs/implementation.md)**. The specification (draft 0.3) is in
+> [docs/spec](docs/spec/README.md); the [console](prototype/README.md) runs live against a running
+> twin (`dctwin up … --console prototype`, then `dctwin ui`) and as an in-memory demo without one.
+
+## Quick start
+
+```bash
+make build                                   # bin/dctwin, bin/refstack
+bin/dctwin assets fetch                      # the captured BMC trees vendor dialects bind (MIT)
+bin/dctwin up examples/estates/lab-model.yaml --adapters redfish,dhcp,bms,snmp,ipmi,ufm,nvue
+bin/dctwin status
+bin/dctwin fault inject 'a01/compute-tray-07/gpu-2' nvidia/xid/xid-79
+bin/dctwin scenario run examples/scenarios/twin/xid-and-switch-tray.yaml
+bin/dctwin down
+make test                                    # unit, adapter and end-to-end suites
+make compat-libredfish                       # NICo's libredfish integration suite against the twin
+```
 
 ## What it is for
 

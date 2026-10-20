@@ -1,0 +1,53 @@
+# One ResourceFlavor per accelerator product, keyed on the labels the twin's kwok projection puts
+# on each Node (GPU feature discovery's nvidia.com/gpu.product, the AMD and Gaudi product labels).
+# Kueue injects a flavor's nodeLabels into the pods it admits under that flavor, so placement by
+# flavor is kube-scheduler honouring that node selector.
+#
+# The two NVL72 flavors also name a Topology: Kueue's topology-aware scheduling (TAS) places each
+# pod set inside one NVLink domain (nvidia.com/gpu.clique, as GFD publishes it) and then on named
+# hosts, from the Nodes' allocatable, taints and readiness.
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: Topology
+metadata: { name: nvlink }
+spec:
+  levels:
+    - nodeLabel: nvidia.com/gpu.clique
+    - nodeLabel: kubernetes.io/hostname
+---
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: ResourceFlavor
+metadata: { name: gb300 }
+spec:
+  nodeLabels: { nvidia.com/gpu.product: NVIDIA-GB300 }
+  topologyName: nvlink
+---
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: ResourceFlavor
+metadata: { name: gb200 }
+spec:
+  nodeLabels: { nvidia.com/gpu.product: NVIDIA-GB200 }
+  topologyName: nvlink
+---
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: ResourceFlavor
+metadata: { name: h100 }
+spec:
+  nodeLabels: { nvidia.com/gpu.product: NVIDIA-H100-80GB-HBM3 }
+---
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: ResourceFlavor
+metadata: { name: a100 }
+spec:
+  nodeLabels: { nvidia.com/gpu.product: NVIDIA-A100-SXM4-80GB }
+---
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: ResourceFlavor
+metadata: { name: mi355x }
+spec:
+  nodeLabels: { amd.com/gpu.product-name: AMD_Instinct_MI355X }
+---
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: ResourceFlavor
+metadata: { name: gaudi3 }
+spec:
+  nodeLabels: { habana.ai/gaudi.product: HL-325L }

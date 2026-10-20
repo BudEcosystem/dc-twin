@@ -1,8 +1,9 @@
 # Console prototype
 
-A clickable prototype of the dc-twin console ([spec 12](../docs/spec/12-ui.md)). It runs
-entirely in the browser over an in-memory estate. There is no backend, no build step and no
-external request, so it works offline.
+A clickable prototype of the dc-twin console ([spec 12](../docs/spec/12-ui.md)). By default it
+runs entirely in the browser over an in-memory estate. There is no backend, no build step and no
+external request, so it works offline. Served by a running twin it switches to
+[live mode](#live-mode) and reads that twin instead.
 
 **Open it:** open `index.html` directly, or serve the repository root and visit
 `/prototype/`:
@@ -22,7 +23,53 @@ python3 -m http.server 8000
 | **Scenarios** | A small runner with waits, acts and assertions; every result carries its fidelity report (`js/scenarios.js`) |
 | **Numbers** | Counts, firmware versions and power figures are **illustrative**. No profile has been checked against hardware |
 
-## A tour
+## Live mode
+
+The same page is a client of a running twin's control API when the twin serves it:
+
+```bash
+make build                                   # bin/dctwin
+bin/dctwin assets fetch                      # the captured BMC trees vendor dialects bind
+bin/dctwin up examples/estates/lab-model.yaml --adapters redfish,dhcp,bms --console prototype
+bin/dctwin ui                                # prints http://127.0.0.1:<port>/?token=<token>
+```
+
+Open the printed URL. **Live mode is selected when the page carries `?token=` and
+`GET /v1/status` answers on the same origin**; otherwise (no token, a rejected token, or the page
+opened from a plain file server) the in-memory demo below runs unchanged. The top bar then says
+`console · live`, names the estate, and shows the twin's clock and time scale from `/v1/status`,
+its twin incidents, and the state of the event stream. Nothing in live mode is simulated in the
+browser: `js/live.js` holds a cache of what the API returned and turns every act into an API call.
+
+| Screen | From the API |
+|---|---|
+| **Floor** | `GET /v1/layout` (halls, rows, positions, racks) and `GET /v1/devices` for health, BMC availability and temperature; rack power from `GET /v1/status`; the domains overlay from `GET /v1/domains`. The power fill is relative to the busiest rack, because the API publishes no rack capacity |
+| **Rack** | The elevation from each device's `u` (counted from the bottom), `units`, `slot` and `side`, at the format's height; adjacent devices in one slot form a labelled band, `zero-u` devices are strips, sensors sit at their level. Health, power and temperature overlays from the device views |
+| **Device** | `GET /v1/devices/<path>`: identity, place, power, AC, BMC, lease and endpoints, boot, components with health, sensors, firmware and faults. **Interfaces** reads the Redfish tree as the stack sees it through `GET /v1/inspect/redfish` (start at `/redfish/v1`, click any `@odata.id`), and lists the requests made to the device from `GET /v1/events?select=<path>&kind=request` |
+| **Acts** | Power (`POST /v1/power`), fault inject (`POST /v1/faults`, the form lists the catalogue's faults whose target fits the device, a component, a child device or a named port, with their params) and clear (`POST /v1/faults/clear`), feed up and down (`POST /v1/feeds`), cable pull and replace (`POST /v1/cable`), utilisation and chaos |
+| **Events** | `GET /v1/events/stream` (server-sent events) after a backfill from `GET /v1/events`; reads are hidden by default (`reads=false`) and a checkbox brings them back. An event whose `cause` is visible is listed under it, indented |
+| **Report** | `GET /v1/report?format=text` |
+| **Scenarios** | Paste or open a scenario file and run it with `POST /v1/scenarios/run`; the verdict, every step and the run's fidelity report are shown |
+
+Device views are re-read when events touch them (batched), and the screen in view is polled every
+few seconds because sensor readings move without events.
+
+What live mode cannot show yet, because the API does not serve it:
+
+- **Ports and links.** There is no listing of a device's ports or of the cabling, so cable acts
+  take a port ref (`device:port`) or link id typed in, the rack's back view is not drawn, and
+  Topology is absent. Pulled cables seen in the event stream are listed so they can be replaced.
+- **Profiles.** Sensor units and thresholds, the "is not" lists and each profile's catalogue
+  allow-list stay server-side, so sensors show bare values and an inject the profile does not
+  allow comes back refused with the twin's reason.
+- **Chaos state.** `POST /v1/chaos` has no read; the console shows only what it last set.
+- **Scheduling.** Faults are injected now; there is no API to schedule one or clear it later.
+- **Design mode and the Stack screen** are demo-only: the API has no estate diff or apply, and a
+  real stack's state comes only through declared accessors.
+- The inspector's own Redfish reads go through the adapter, so they appear in the request log
+  attributed to the stack.
+
+## A tour of the in-memory demo
 
 1. **Floor.** Hall A has four GB300 NVL72 racks, HGX racks, one AMD MI355X rack, one Gaudi 3
    rack, a CPU rack and a network rack. Switch the overlay between health, power, temperature
@@ -68,12 +115,15 @@ js/stack.js         the SIMULATED stack
 js/scenarios.js     the scenario runner and "save session as scenario"
 js/views-*.js       screens: floor and events drawer; rack and device; topology, facility,
                     faults, events, scenarios, stack, design and modals
-js/app.js           state, router, rendering, and one delegated handler mapping actions to engine calls
+js/live.js          LIVE mode: the control API client, its cache, the event stream, and the live
+                    screens and acts (idle without ?token=)
+js/app.js           state, router, rendering, and one delegated handler mapping actions to engine calls,
+                    or to js/live.js in live mode
 ```
 
 In the real console every action in `app.js` is a control API call ([D16](../docs/spec/11-decisions.md)),
-and the engine, packs and stack live behind it. This prototype exists to settle the console's
-shape before that API exists.
+and the engine, packs and stack live behind it. The demo settled the console's shape before that
+API existed; live mode is the same console over the API that now does.
 
 ## Known limits
 

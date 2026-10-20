@@ -1,0 +1,22 @@
+# A BMC that stops answering, a BMC whose factory password must be changed, and firmware that
+# drifts from its baseline, across vendors.
+apiVersion: dc-twin/v1alpha1
+kind: Scenario
+metadata: { name: bmc-and-firmware }
+spec:
+  estate: { requires: { formats: [generic/hgx-8gpu] } }
+  stack: {}
+  timeout: 5m
+  steps:
+    - fault: { id: dead, select: "b01/server-01", inject: generic/bmc/unreachable }
+    - expect: { within: 3s, all: [{ model: { expr: 'model.device("b01/server-01").bmc == false && model.device("b01/server-01").power == "On"' } }] }
+    - fault: { clear: dead }
+    - fault: { id: drift, select: "b02/server-01", inject: generic/firmware/version-drift, params: { component: bmc, version: "0.0.1-drift" } }
+    - expect:
+        within: 3s
+        all:
+          - model: { expr: 'model.device("b02/server-01").firmware.bmc.version == "0.0.1-drift"' }
+          - event: { field: firmware.bmc, to: "0.0.1-drift", on: "b02/server-01" }
+    - fault: { id: pw, select: "c02/server-01", inject: generic/bmc/password-change-required }
+    - expect: { within: 3s, all: [{ event: { field: account.passwordChangeRequired, on: "c02/server-01" } }] }
+  report: fidelity

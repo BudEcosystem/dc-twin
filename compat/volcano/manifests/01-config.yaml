@@ -1,0 +1,50 @@
+# The scheduler's and the controllers' configuration, as ConfigMaps in volcano-system the way the
+# chart ships them; run.sh writes each key to a file as a ConfigMap volume would.
+#
+# volcano-scheduler-configmap: the chart's default (installer/volcano-development.yaml at the tag)
+# with the network-topology-aware plugin added, as docs/user-guide/
+# how_to_use_network_topology_aware_scheduling.md says to, weighted on nvidia.com/gpu.
+apiVersion: v1
+kind: ConfigMap
+metadata: { name: volcano-scheduler-configmap, namespace: volcano-system }
+data:
+  volcano-scheduler.conf: |
+    actions: "enqueue, allocate, backfill"
+    tiers:
+    - plugins:
+      - name: priority
+      - name: gang
+        enablePreemptable: false
+      - name: conformance
+    - plugins:
+      - name: overcommit
+      - name: drf
+        enablePreemptable: false
+      - name: predicates
+      - name: proportion
+      - name: nodeorder
+      - name: binpack
+      - name: network-topology-aware
+        arguments:
+          weight: 10
+          hypernode.binpack.resources: nvidia.com/gpu
+          hypernode.binpack.resources.nvidia.com/gpu: 2
+---
+# volcano-controller-configmap: HyperNode auto-discovery from node labels
+# (docs/user-guide/how_to_use_hypernode_auto_discovery.md). One tier-1 HyperNode per NVLink
+# domain, from GPU feature discovery's nvidia.com/gpu.clique label the twin projects; Nodes
+# without the label are in none.
+apiVersion: v1
+kind: ConfigMap
+metadata: { name: volcano-controller-configmap, namespace: volcano-system }
+data:
+  volcano-controller.conf: |
+    networkTopologyDiscovery:
+      - source: label
+        enabled: true
+        interval: 10s
+        config:
+          networkTopologyTypes:
+            nvlink:
+              - nodeLabel: "nvidia.com/gpu.clique"
+              - nodeLabel: "kubernetes.io/hostname"

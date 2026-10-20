@@ -19,7 +19,7 @@ spec:
     macOUI: "aa:bb:cc"                       # illustrative; the vendor's OUI
   components:
     - { name: cpu, kind: cpu, count: 2, model: "NVIDIA Grace, 72 cores" }
-    - { name: gpu, kind: accelerator, vendor: nvidia, count: 4, model: "NVIDIA B300", maxW: 1400,
+    - { name: gpu, kind: accelerator, vendor: nvidia, count: 4, model: "NVIDIA GB300", maxW: 1400,
         ports: [{ name: nvl, kind: scale-up, technology: nvlink, lanes: 18 }] }   # component-owned ports
     - { name: cx8, kind: nic, count: 4, model: "ConnectX-8 800G" }
     - { name: bf3, kind: dpu, count: 1, profile: nvidia/bluefield-3 }            # a SUB-DEVICE: own BMC, own ports
@@ -53,7 +53,7 @@ spec:
   fidelity:
     model: {}
     vm: { arch: aarch64, firmware: uefi, tpm: true, inHost: [nvidia/mokka], cost: { ramGB: 12, vcpu: 4 } }
-  kubernetes: { resources: { "nvidia.com/gpu": 4 }, labels: { "nvidia.com/gpu.product": "B300" } }
+  kubernetes: { resources: { "nvidia.com/gpu": 4 }, labels: { "nvidia.com/gpu.clique": "{domain}" } }   # GFD product, count, family: from the gpu component (D43)
   provides:
     - { capability: "redfish/dialect:nvidia/gb-bmc", at: [model, vm] }
     - { capability: ipmi/lan, at: [model, vm] }
@@ -284,7 +284,7 @@ placement, links, per-NOS configuration, provided capabilities).
 | Template | Builds |
 |---|---|
 | `clos-2tier`, `clos-3tier` | Leaf and spine (and super-spine). Underlay BGP, optionally unnumbered (RFC 5549); optional EVPN overlay; DHCP relay on server-facing ports, by giaddr from a real NOS, with link selection from the twin or a Kea relay when `relay.linkSelection` asks ([05](05-interfaces.md#boot-and-addressing)) |
-| `rail-optimised` | The scale-out fabric for 8-accelerator servers: NIC *i* of every server goes to rail leaf *i*. InfiniBand (with a subnet manager or UFM) or Ethernet RoCE |
+| `rail-optimised` | The scale-out fabric for 8-accelerator servers: NIC *i* of every server goes to rail leaf *i*, and every rail leaf to every spine (`spines`, default 2; `0` for single-tier rails), so one subnet manager reaches the whole fabric. InfiniBand (with a subnet manager or UFM) or Ethernet RoCE |
 | `oob-flat` | Per-rack management switches into an OOB aggregation layer; BMC, sub-device BMC and switch management ports; the relay for the management network |
 | `nvidia/nvlink-spine`, `nvidia/nvlink-cross-rack` | NVLink fixed links inside an NVL72, and cross-rack links for NVL36x2. Supplied by the nvidia pack |
 | `amd/ualink-rack` | Helios scale-up links. Supplied by the amd pack once it exists |

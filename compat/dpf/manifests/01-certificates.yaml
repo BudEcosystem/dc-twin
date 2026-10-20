@@ -1,0 +1,66 @@
+# The certificates DPF's operator deploys for the provisioning controller (its inventory,
+# internal/operator/inventory/manifests/provisioning-controller.yaml at v26.8.0, Apache-2.0), in
+# the namespace the zero-trust guides install DPF in: a self-signed CA, the issuer that signs the
+# BMC server certificates' CertificateRequests, and the Redfish client certificate (CommonName
+# root, the BlueField-3 BMC account mutual TLS maps it to). The bfb-registry server certificate is
+# the one DPF's BFBRegistryRunnable requests (bfb_registry_creator.go), naming the address the
+# harness serves the registry on. The webhook serving certificates are left out: the harness
+# registers no webhooks.
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: dpf-provisioning-selfsigned-issuer
+  namespace: dpf-operator-system
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: dpf-provisioning-ca-cert
+  namespace: dpf-operator-system
+spec:
+  commonName: dpf-provisioning-ca-cert
+  duration: 26280h
+  isCA: true
+  issuerRef: { kind: Issuer, name: dpf-provisioning-selfsigned-issuer }
+  privateKey: { algorithm: ECDSA, size: 256 }
+  renewBefore: 13140h
+  secretName: dpf-provisioning-ca-secret
+---
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: dpf-provisioning-issuer
+  namespace: dpf-operator-system
+spec:
+  ca:
+    secretName: dpf-provisioning-ca-secret
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: dpf-provisioning-redfish-client-cert
+  namespace: dpf-operator-system
+spec:
+  commonName: root
+  duration: 8760h
+  issuerRef: { kind: Issuer, name: dpf-provisioning-issuer }
+  renewBefore: 4360h
+  secretName: dpf-provisioning-redfish-client-secret
+  usages: [client auth]
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: bfb-registry-server-cert
+  namespace: dpf-operator-system
+spec:
+  secretName: bfb-registry-server-cert
+  commonName: bfb-registry
+  duration: 2160h
+  privateKey: { algorithm: ECDSA, size: 256 }
+  usages: [server auth, digital signature, key encipherment]
+  ipAddresses: ["127.0.0.1"]
+  dnsNames: [bfb-registry, localhost]
+  issuerRef: { name: dpf-provisioning-issuer, kind: Issuer, group: cert-manager.io }

@@ -1,0 +1,49 @@
+apiVersion: dc-twin/v1alpha1
+kind: FabricTemplate
+metadata: { name: generic/oob-flat, version: 0.1.0 }
+spec:
+  generator: oob
+  params:
+    aggregation: { type: profile, class: switch, default: generic/spine-switch-400g, label: OOB aggregation switch }
+  switch: { rack: generic/mgmt-switch-1g }
+  provides: { none: [switch/lldp, dhcp/relay-option-82, dhcp/relay-link-selection], vm: [switch/lldp, dhcp/relay-giaddr] }
+  layout: { tiers: [aggregation, rack] }
+  isNot: ["The OOB network is flat: one segment per management network, relayed by the twin relay at each rack switch."]
+---
+apiVersion: dc-twin/v1alpha1
+kind: FabricTemplate
+metadata: { name: generic/clos-2tier, version: 0.1.0 }
+spec:
+  generator: clos
+  params:
+    leafsPerRack: { type: int, default: 2, range: [1, 4] }
+    spines:       { type: int, default: 2, range: [1, 16] }
+    leaf:         { type: profile, class: switch, default: generic/leaf-switch-400g }
+    spine:        { type: profile, class: switch, default: generic/spine-switch-400g }
+  provides: { none: [switch/lldp, dhcp/relay-option-82, dhcp/relay-link-selection], vm: [switch/lldp, dhcp/relay-giaddr, switch/bgp-unnumbered, switch/evpn] }
+  layout: { tiers: [spine, leaf] }
+  isNot: ["Packets flow; nothing is measured.", "With nos none, no BGP or EVPN runs (D21)."]
+---
+apiVersion: dc-twin/v1alpha1
+kind: FabricTemplate
+metadata: { name: generic/rail-optimised, version: 0.1.0 }
+spec:
+  generator: rail
+  params:
+    rails: { type: int, default: 8, range: [1, 8] }
+    leaf:  { type: profile, class: switch, default: generic/leaf-switch-400g }
+    ibLeaf: { type: profile, class: switch, default: nvidia/qm9700 }
+    spines: { type: int, default: 2, range: [0, 31] }
+    spine:  { type: profile, class: switch, default: generic/leaf-switch-400g }
+    ibSpine: { type: profile, class: switch, default: nvidia/qm9700 }
+  provides: { none: [switch/lldp], vm: [switch/lldp] }
+  layout: { tiers: [rail, spine] }
+  isNot: ["Rails: NIC i of every server to rail leaf i, every rail leaf to every spine (spines: 0 for single-tier rails). InfiniBand has no packet path."]
+---
+apiVersion: dc-twin/v1alpha1
+kind: FabricTemplate
+metadata: { name: generic/node-mesh, version: 0.1.0 }
+spec:
+  generator: node-mesh
+  provides: { none: [] }
+  isNot: ["An all-to-all mesh of a server's accelerators' scale-up lanes, split evenly across peers; the vendor's real lane map is not modelled."]

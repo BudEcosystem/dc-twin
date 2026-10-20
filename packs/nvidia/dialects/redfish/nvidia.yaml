@@ -1,0 +1,131 @@
+apiVersion: dc-twin/v1alpha1
+kind: RedfishDialect
+metadata: { name: nvidia/gb-bmc, version: 0.1.0 }
+spec:
+  backend: mockup
+  mockup: libredfish/nvidia_gb200
+  system: /redfish/v1/Systems/System_0
+  manager: /redfish/v1/Managers/BMC_0
+  chassis: /redfish/v1/Chassis/Chassis_0
+  bmcInterface: /redfish/v1/Managers/BMC_0/EthernetInterfaces/eth0
+  bind: { serial: "/redfish/v1/Chassis/Chassis_0#SerialNumber", uuid: "/redfish/v1/Systems/System_0#UUID" }
+  factory: { user: root }
+  seedAccounts: true
+  overlays:
+    - { path: "/redfish/v1/Chassis/CBC_*", set: Oem.Nvidia.ComputeTrayIndex, from: slotIndex }
+    - { path: "/redfish/v1/Chassis/Chassis_0", set: Status.HealthRollup, from: health }
+    - { path: "/redfish/v1/Systems/System_0", set: Status.HealthRollup, from: health }
+  components:
+    - { component: gpu, resources: ["/redfish/v1/Systems/HGX_Baseboard_0/Processors/GPU_{i}", "/redfish/v1/Chassis/HGX_GPU_{i}"] }
+    - { component: cpu, resources: ["/redfish/v1/Systems/System_0/Processors/CPU_{i}"] }
+  # the riser BlueField-3s are the tray's DPUs: two on the captured GB200, one on a GB300 tray
+  dpus: ["/redfish/v1/Chassis/Riser_Slot{n}_BlueField_3_DPU"]
+  sensors:
+    - { sensor: power, resources: ["/redfish/v1/Chassis/Chassis_0/Sensors/Chassis_0_TotalHSC_Power_0"] }
+    - { sensor: coolant-in, resources: ["/redfish/v1/Chassis/Chassis_0/Sensors/Chassis_0_Front_IO_Temp_0"] }
+    - { sensor: gpu-max, resources: ["/redfish/v1/Chassis/HGX_GPU_*/Sensors/*TEMP*"] }
+  leakDetectors:
+    - "/redfish/v1/Chassis/Chassis_0/ThermalSubsystem/LeakDetection/LeakDetectors/*"
+  firmware: { FW_BMC_0: bmc, UEFI: uefi, FW_CPLD_0: cpld, FW_CPLD_1: cpld, HGX_FW_GPU_0: gpu, HGX_FW_GPU_1: gpu, HGX_FW_GPU_2: gpu, HGX_FW_GPU_3: gpu }
+  actions:
+    - { path: "/redfish/v1/Chassis/BMC_0/Actions/Oem/NvidiaChassis.AuxPowerReset", canonical: power.cycle, behaviour: ac-cycle }
+  requests:
+    - { method: POST, path: "/redfish/v1/Chassis/BMC_0/Actions/Oem/NvidiaChassis.AuxPowerReset", canonical: power.cycle, op: ac_powercycle }
+    - { method: PATCH, path: "/redfish/v1/Systems/System_0/Bios/Settings", canonical: bios.set, op: set_bios }
+    - { method: GET, path: "/redfish/v1/ComponentIntegrity**", canonical: inventory.read, op: get_component_integrities }
+  quirks:
+    - { name: power-state-lag, title: "PowerState reports the old value for a few seconds after a reset", params: { seconds: 4 } }
+  identity: { dhcpVendorClass: "NVIDIA/OpenBMC", ipmiManufacturer: 5703 }
+  isNot: ["Serves NICo's captured GB200 tree bound to the model; resources the capture lacks are absent."]
+  sources: [{ what: "captured GB200 compute tray BMC", url: "https://github.com/dsx-ai-factory/libredfish/tree/a51ffb1ffeae15d8f9471224cb799d54007098a2/tests/mockups/nvidia_gb200", date: 2026-10-18 }, { what: "vendor detection by Product", url: "https://github.com/dsx-ai-factory/libredfish/blob/a51ffb1ffeae15d8f9471224cb799d54007098a2/src/model/service_root.rs", date: 2026-10-18 }]
+---
+apiVersion: dc-twin/v1alpha1
+kind: RedfishDialect
+metadata: { name: nvidia/gb300-bmc, version: 0.1.0 }
+spec:
+  inherits: nvidia/gb-bmc
+  backend: mockup
+  serviceRoot: { Product: "GB BMC" }
+  factory: { user: root }
+  overlays:
+    - { path: "/redfish/v1/Chassis/Chassis_0", set: Model, value: "NVIDIA GB300" }
+    - { path: "/redfish/v1/Chassis/Chassis_0", set: Manufacturer, value: "NVIDIA" }
+  isNot: ["GB300 identity strings over the GB200 capture: Product 'GB BMC' and a Chassis_0 Model 'NVIDIA GB300', the values NICo matches on."]
+---
+apiVersion: dc-twin/v1alpha1
+kind: RedfishDialect
+metadata: { name: nvidia/nvswitch-tray, version: 0.1.0 }
+spec:
+  backend: mockup
+  mockup: libredfish/nvidia_gbswitch
+  system: /redfish/v1/Systems/System_0
+  manager: /redfish/v1/Managers/BMC_0
+  chassis: /redfish/v1/Chassis/MGX_NVSwitch_0
+  bmcInterface: /redfish/v1/Managers/BMC_0/EthernetInterfaces/eth0
+  bind: { serial: "/redfish/v1/Systems/System_0#SerialNumber" }
+  factory: { user: root }
+  seedAccounts: true
+  components:
+    - { component: nvswitch, resources: ["/redfish/v1/Chassis/MGX_NVSwitch_{i}"] }
+  sensors:
+    - { sensor: asic-max, resources: ["/redfish/v1/Chassis/MGX_NVSwitch_*/Sensors/*TEMP*"] }
+    - { sensor: power, resources: ["/redfish/v1/Chassis/MGX_NVSwitch_0/Sensors/MGX_NVSwitch_0_Power_0"] }
+  leakDetectors: ["/redfish/v1/Chassis/*/ThermalSubsystem/LeakDetection/LeakDetectors/*"]
+  firmware: {}
+  isNot: ["Serves NICo's captured NVLink switch tray (P3809) bound to the model."]
+  sources: [{ what: "captured NVSwitch tray BMC", url: "https://github.com/dsx-ai-factory/libredfish/tree/a51ffb1ffeae15d8f9471224cb799d54007098a2/tests/mockups/nvidia_gbswitch", date: 2026-10-18 }]
+---
+apiVersion: dc-twin/v1alpha1
+kind: RedfishDialect
+metadata: { name: nvidia/bluefield, version: 0.1.0 }
+spec:
+  backend: mockup
+  mockup: libredfish/nvidia_dpu
+  system: /redfish/v1/Systems/Bluefield
+  manager: /redfish/v1/Managers/Bluefield_BMC
+  chassis: /redfish/v1/Chassis/Card1
+  bmcInterface: /redfish/v1/Managers/Bluefield_BMC/EthernetInterfaces/eth0
+  bind: { serial: "/redfish/v1/Systems/Bluefield#SerialNumber" }
+  factory: { user: root, password: 0penBmc }
+  seedAccounts: true
+  identity: { dhcpVendorClass: "NVIDIA/BF/BMC" }
+  firmware: { BMC_Firmware: bmc, DPU_NIC: nic, DPU_UEFI: uefi, DPU_ATF: atf, DPU_BSP: bsp }
+  isNot: ["Serves NICo's captured BlueField-3 BMC; at model the DPU OS behind it is not modelled, at vm it is the Arm's (D52, Q1)."]
+  sources:
+    - { what: "factory login root/0penBmc for BF-2 and BF-3", url: "https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/bmc-explorer/src/lib.rs", date: 2026-10-18 }
+    - { what: "DHCP vendor class NVIDIA/BF/BMC, which NICo's DHCP recognises (arm64) and its DPU simulator sends for a BlueField BMC", url: "https://github.com/dsx-ai-factory/infra-controller/blob/02b92f18fed776c8ef0056803338707c5e6bcb6b/crates/dhcp-common/src/lib.rs", date: 2026-10-19 }
+---
+apiVersion: dc-twin/v1alpha1
+kind: RedfishDialect
+metadata: { name: nvidia/dgx, version: 0.1.0 }
+spec:
+  backend: mockup
+  mockup: libredfish/nvidia_viking
+  system: /redfish/v1/Systems/DGX
+  manager: /redfish/v1/Managers/BMC
+  chassis: /redfish/v1/Chassis/DGX
+  bmcInterface: /redfish/v1/Managers/BMC/EthernetInterfaces/eth0
+  bind: { serial: "/redfish/v1/Systems/DGX#SerialNumber", uuid: "/redfish/v1/Systems/DGX#UUID" }
+  factory: { user: admin }
+  seedAccounts: true
+  components:
+    - { component: gpu, resources: ["/redfish/v1/Systems/HGX_Baseboard_0/Processors/GPU_SXM_{n}"] }
+  firmware: { HostBMC_0: bmc, HostBIOS_0: bios, CPLDMB_0: cpld }
+  isNot: ["Serves NICo's captured DGX H100 (AMI) tree bound to the model."]
+  sources: [{ what: "captured DGX H100 BMC", url: "https://github.com/dsx-ai-factory/libredfish/tree/a51ffb1ffeae15d8f9471224cb799d54007098a2/tests/mockups/nvidia_viking", date: 2026-10-18 }]
+---
+apiVersion: dc-twin/v1alpha1
+kind: RedfishDialect
+metadata: { name: nvidia/gh200-bmc, version: 0.1.0 }
+spec:
+  backend: mockup
+  mockup: libredfish/nvidia_gh200
+  system: /redfish/v1/Systems/System_0
+  manager: /redfish/v1/Managers/BMC_0
+  chassis: /redfish/v1/Chassis/BMC_0
+  bmcInterface: /redfish/v1/Managers/BMC_0/EthernetInterfaces/eth0
+  bind: { serial: "/redfish/v1/Chassis/BMC_0#SerialNumber", uuid: "/redfish/v1/Systems/System_0#UUID" }
+  factory: { user: root }
+  seedAccounts: true
+  isNot: ["Serves NICo's captured GH200 (P3809) tree bound to the model."]
+  sources: [{ what: "captured GH200 BMC", url: "https://github.com/dsx-ai-factory/libredfish/tree/a51ffb1ffeae15d8f9471224cb799d54007098a2/tests/mockups/nvidia_gh200", date: 2026-10-18 }]

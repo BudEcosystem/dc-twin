@@ -1,0 +1,17 @@
+apiVersion: dc-twin/v1alpha1
+kind: RedfishDialect
+metadata: { name: liteon/power-shelf, version: 0.1.0 }
+spec:
+  backend: mockup
+  mockup: libredfish/liteon_powershelf
+  system: /redfish/v1/Systems/system
+  manager: /redfish/v1/Managers/bmc
+  chassis: /redfish/v1/Chassis/powershelf
+  bmcInterface: /redfish/v1/Managers/bmc/EthernetInterfaces/eth0
+  bind: { serial: "/redfish/v1/Chassis/powershelf#SerialNumber" }
+  factory: { user: root }
+  seedAccounts: true
+  components:
+    - { component: psu, resources: ["/redfish/v1/Chassis/powershelf/PowerSubsystem/PowerSupplies/{n}"] }
+  isNot: ["Serves NICo's captured Lite-On shelf; its vendor is detected from the chassis manufacturer, as libredfish does."]
+  sources: [{ what: "captured shelf", url: "https://github.com/dsx-ai-factory/libredfish/tree/a51ffb1ffeae15d8f9471224cb799d54007098a2/tests/mockups/liteon_powershelf", date: 2026-10-18 }]

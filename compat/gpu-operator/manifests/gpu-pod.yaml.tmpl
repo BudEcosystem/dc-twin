@@ -1,0 +1,17 @@
+# A pod asking the device plugin for one GPU on one container host. The image is a glibc one with
+# a shell: Mokka's NRI plugin injects the mock driver and nvidia-smi into a container that holds a
+# GPU allocation, and nvidia-smi is a glibc binary.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: @NAME@
+  namespace: dc-twin-gpu
+spec:
+  restartPolicy: Never
+  nodeSelector: { kubernetes.io/hostname: @NODE@ }
+  containers:
+    - name: app
+      image: @IMAGE@
+      command: ["sleep", "infinity"]
+      resources:
+        limits: { nvidia.com/gpu: 1 }

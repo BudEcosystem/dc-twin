@@ -1,0 +1,27 @@
+# Three trays leak in one rack: the stack shuts each down and, above its threshold, asks the BMS
+# over DSX Exchange to isolate the rack electrically; the twin's BMS answers the request after
+# its delay, opens the rack's power and publishes the isolation status.
+apiVersion: dc-twin/v1alpha1
+kind: Scenario
+metadata: { name: tray-leak-isolation }
+spec:
+  estate: { requires: { formats: [nvidia/gb300-nvl72], capabilities: ["facility/isolation-request:nvidia/dsx-exchange"] } }
+  stack:
+    components: [refstack]
+    accessors: { machine: refstack.machine }
+  timeout: 10m
+  steps:
+    - wait:
+        for: 'model.select("a03/compute-tray-*").all(d, accessors.machine(d.identity.serial).state == "Ready")'
+        within: 3m
+    - fault: { id: leaks, select: "a03/compute-tray-{11..13}", inject: generic/leak/tray-detector }
+    - expect:
+        within: 60s
+        all:
+          - event: { canonical: power.off.graceful, from: stack, on: "a03/compute-tray-11" }
+          - event: { canonical: power.off.graceful, from: stack, on: "a03/compute-tray-13" }
+          - event: { field: isolation.electrical, to: true, on: "a03" }
+          - bms:   { topic: "BMS/v1/PUB/Value/Rack/RackElectricalIsolationStatus/#", value: 1 }
+          - model: { expr: 'model.select("a03/compute-tray-*").all(d, d.ac == false)' }
+    - fault: { clear: leaks }
+  report: fidelity

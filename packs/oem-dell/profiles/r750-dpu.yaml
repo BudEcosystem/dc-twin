@@ -1,0 +1,28 @@
+apiVersion: dc-twin/v1alpha1
+kind: DeviceProfile
+metadata: { name: oem-dell/r750-dpu, version: 0.1.0 }
+spec:
+  class: server
+  form: { mounting: rack, units: 2 }
+  identity: { serialFormat: "{upper:2}{digits:5}", macOUI: "b0:7b:25", manufacturer: "Dell Inc.", model: "PowerEdge R750" }
+  components:
+    - { name: cpu, kind: cpu, count: 2, model: "Intel Xeon Gold" }
+    - { name: bf3, kind: dpu, count: 2, profile: nvidia/bluefield-3 }
+    - { name: psu, kind: psu, count: 2, model: "1400 W" }
+    - { name: tpm, kind: tpm, count: 1, model: "TPM 2.0" }
+  bmc: { dialect: oem-dell/idrac-multi-dpu, ipmi: true }
+  ports:
+    - { name: bmc0, kind: ethernet, speed: 1G, role: management }
+    - { name: "psu-{0..1}", kind: power-in, source: pdu }
+  power: { standbyW: 25, idleW: 250, maxW: 1200 }
+  cooling: { kind: air }
+  sensors:
+    - { name: inlet, quantity: temperature, unit: C, warn: 35, crit: 45, source: inlet }
+    - { name: power, quantity: power, unit: W, source: power }
+  firmware: [{ component: bmc, baseline: "7.10.30.00", applyOn: reset }, { component: bios, baseline: "1.13.2", applyOn: reset }]
+  behaviours: { power: { onSeconds: 30, offSeconds: 10 }, bmc: { bootSeconds: 90 } }
+  faults: [generic/power, generic/bmc, generic/thermal, generic/firmware]
+  fidelity: { model: {} }
+  provides: [{ capability: "redfish/dialect:oem-dell/idrac", at: [model] }, { capability: boot/walk, at: [model] }]
+  isNot: ["The iDRAC tree is NICo's captured R750 with two BlueField DPUs."]
+  sources: [{ what: "Redfish tree", url: "https://github.com/dsx-ai-factory/libredfish/tree/a51ffb1ffeae15d8f9471224cb799d54007098a2/tests/mockups/dell_multi_dpu", date: 2026-10-18 }]

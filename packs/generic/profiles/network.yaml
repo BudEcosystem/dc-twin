@@ -1,0 +1,57 @@
+apiVersion: dc-twin/v1alpha1
+kind: DeviceProfile
+metadata: { name: generic/mgmt-switch-1g, version: 0.1.0 }
+spec:
+  class: switch
+  form: { mounting: rack, units: 1 }
+  identity: { serialFormat: "MS{alnum:10}", macOUI: "02:dc:10", manufacturer: "dc-twin", model: "1G Management Switch" }
+  ports:
+    - { name: "eth{1..48}", kind: ethernet, speed: 1G }
+    - { name: "up{1..4}", kind: ethernet, speed: 10G }
+    - { name: mgmt0, kind: ethernet, speed: 1G, role: management }
+    - { name: "psu-{0..1}", kind: power-in, source: pdu }
+  power: { standbyW: 0, idleW: 60, maxW: 120 }
+  cooling: { kind: air }
+  faults: [generic/power, generic/link]
+  fidelity: { model: {} }
+  provides: [{ capability: switch/lldp, at: [model] }, { capability: dhcp/relay-option-82, at: [model] }]
+  isNot: ["A model switch: cabling, port state, LLDP and the twin relay; no routing protocol and no management API (D21)."]
+  sources: [{ what: archetype, url: "https://www.ieee802.org/1/pages/802.1ab.html", date: 2026-10-18 }]
+---
+apiVersion: dc-twin/v1alpha1
+kind: DeviceProfile
+metadata: { name: generic/leaf-switch-400g, version: 0.1.0 }
+spec:
+  class: switch
+  form: { mounting: rack, units: 1 }
+  identity: { serialFormat: "LS{alnum:10}", macOUI: "02:dc:11", manufacturer: "dc-twin", model: "64x400G Leaf" }
+  ports:
+    - { name: "eth{1..64}", kind: ethernet, speed: 400G }
+    - { name: mgmt0, kind: ethernet, speed: 1G, role: management }
+    - { name: "psu-{0..1}", kind: power-in, source: pdu }
+  power: { standbyW: 0, idleW: 450, maxW: 1500 }
+  cooling: { kind: air }
+  faults: [generic/power, generic/link]
+  fidelity: { model: {}, vm: { arch: x86_64, cost: { ramGB: 4, vcpu: 2 } } }
+  provides: [{ capability: switch/lldp, at: [model, vm] }, { capability: dhcp/relay-option-82, at: [model] }, { capability: dhcp/relay-giaddr, at: [vm] }, { capability: switch/bgp-unnumbered, at: [vm] }, { capability: switch/evpn, at: [vm] }]
+  isNot: { all: ["Packets are not measured."], model: ["No routing protocol runs on a model switch (D21)."] }
+  sources: [{ what: archetype, url: "https://github.com/sonic-net/SONiC", date: 2026-10-18 }]
+---
+apiVersion: dc-twin/v1alpha1
+kind: DeviceProfile
+metadata: { name: generic/spine-switch-400g, version: 0.1.0 }
+spec:
+  class: switch
+  form: { mounting: rack, units: 2 }
+  identity: { serialFormat: "SS{alnum:10}", macOUI: "02:dc:12", manufacturer: "dc-twin", model: "128x400G Spine" }
+  ports:
+    - { name: "eth{1..128}", kind: ethernet, speed: 400G }
+    - { name: mgmt0, kind: ethernet, speed: 1G, role: management }
+    - { name: "psu-{0..1}", kind: power-in, source: pdu }
+  power: { standbyW: 0, idleW: 900, maxW: 2800 }
+  cooling: { kind: air }
+  faults: [generic/power, generic/link]
+  fidelity: { model: {}, vm: { arch: x86_64, cost: { ramGB: 4, vcpu: 2 } } }
+  provides: [{ capability: switch/lldp, at: [model, vm] }]
+  isNot: { all: ["Packets are not measured."], model: ["No routing protocol runs on a model switch (D21)."] }
+  sources: [{ what: archetype, url: "https://github.com/sonic-net/SONiC", date: 2026-10-18 }]

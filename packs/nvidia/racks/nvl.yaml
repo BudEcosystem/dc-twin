@@ -1,0 +1,135 @@
+apiVersion: dc-twin/v1alpha1
+kind: RackFormat
+metadata: { name: nvidia/gb300-nvl72, version: 0.1.0 }
+spec:
+  archetype: rack-scale
+  params:
+    computeTrays: { type: int, default: 18, allowed: [18], label: Compute trays }
+    switchTrays:  { type: int, default: 9,  allowed: [9],  label: NVLink switch trays }
+    shelves:      { type: int, default: 8,  range: [6, 8], label: Power shelves }
+    powerShelf:   { type: profile, class: power-shelf, default: liteon/power-shelf-33kw, label: Power shelf }
+    mgmtSwitch:   { type: profile, class: switch, default: generic/mgmt-switch-1g }
+  slots:
+    - { names: "power-shelf-{01..$shelves}", profile: $powerShelf }
+    - { names: "mgmt-switch-{1..2}", profile: $mgmtSwitch }
+    - { names: "compute-tray-{01..$computeTrays}", profile: nvidia/gb300-compute-tray, accepts: { class: compute-tray, mounting: tray, units: 1, cooling: liquid } }
+    - { names: "switch-tray-{01..$switchTrays}", profile: nvidia/nvlink-switch-tray }
+    - { names: "leak-point-{01..02}", profile: generic/leak-point, at: ["compute-tray-10", "compute-tray-18"] }
+  layout:
+    height: 48
+    uNumbering: eia
+    front:
+      - { slots: "power-shelf-{01..04}", group: power shelves }
+      - { slots: "mgmt-switch-{1..2}" }
+      - { slots: "compute-tray-{01..10}" }
+      - { slots: "switch-tray-{01..09}", group: NVLink switch trays }
+      - { slots: "compute-tray-{11..18}" }
+      - { slots: "power-shelf-{05..08}", group: power shelves }
+    back: [nvlink-spine, busbar, management, scale-out, frontend]
+  fixedLinks: [{ template: nvidia/nvlink-spine }]
+  domains:
+    - kind: scale-up
+      technology: nvlink
+      members: "compute-tray-*/gpu-*"
+      manager: "switch-tray-01"
+      formation: 'rack.devices.filter(d, d.class == "switch-tray").all(d, d.health != "Critical" && d.power == "On")'
+    - { kind: maintenance, members: "*", unit: rack }
+  power:
+    inputs: [{ name: busbar, kind: busbar, capacityW: 264000, redundancy: N+N, minSources: 6, sources: "power-shelf-*", feeds: [A, B] }]
+    capacityW: 142000
+  cooling: { kind: liquid, manifold: liquid, loop: external }
+  management: { rackController: nvidia/rack-management }
+  behaviours:
+    powerOn: { sequence: ["power-shelf-*", "switch-tray-*", "compute-tray-*"] }
+  isNot:
+    - "The NVLink spine is fixed links in the model; no cartridge or cable is individually modelled."
+    - "A rack leak point publishes to the BMS and reaches no tray detector: NICo's two leak paths stay separate (stack doc)."
+  sources:
+    - { what: "18 compute trays, 9 switch trays, 8 x 33 kW shelves", url: "https://docs.nvidia.com/enterprise-reference-architectures/nvl72-ai-factory/latest/components.html", date: 2026-10-18 }
+---
+apiVersion: dc-twin/v1alpha1
+kind: RackFormat
+metadata: { name: nvidia/gb200-nvl72, version: 0.1.0 }
+spec:
+  archetype: rack-scale
+  params:
+    computeTrays: { type: int, default: 18, allowed: [18] }
+    switchTrays:  { type: int, default: 9,  allowed: [9] }
+    shelves:      { type: int, default: 8,  range: [6, 8] }
+    powerShelf:   { type: profile, class: power-shelf, default: liteon/power-shelf-33kw }
+    mgmtSwitch:   { type: profile, class: switch, default: generic/mgmt-switch-1g }
+  slots:
+    - { names: "power-shelf-{01..$shelves}", profile: $powerShelf }
+    - { names: "mgmt-switch-{1..2}", profile: $mgmtSwitch }
+    - { names: "compute-tray-{01..$computeTrays}", profile: nvidia/gb200-compute-tray, accepts: { class: compute-tray } }
+    - { names: "switch-tray-{01..$switchTrays}", profile: nvidia/nvlink-switch-tray }
+    - { names: "leak-point-{01..02}", profile: generic/leak-point, at: ["compute-tray-10", "compute-tray-18"] }
+  layout:
+    height: 48
+    uNumbering: eia
+    front:
+      - { slots: "power-shelf-{01..04}", group: power shelves }
+      - { slots: "mgmt-switch-{1..2}" }
+      - { slots: "compute-tray-{01..10}" }
+      - { slots: "switch-tray-{01..09}", group: NVLink switch trays }
+      - { slots: "compute-tray-{11..18}" }
+      - { slots: "power-shelf-{05..08}", group: power shelves }
+    back: [nvlink-spine, busbar, management, scale-out]
+  fixedLinks: [{ template: nvidia/nvlink-spine }]
+  domains:
+    - kind: scale-up
+      technology: nvlink
+      members: "compute-tray-*/gpu-*"
+      manager: "switch-tray-01"
+      formation: 'rack.devices.filter(d, d.class == "switch-tray").all(d, d.health != "Critical" && d.power == "On")'
+    - { kind: maintenance, members: "*", unit: rack }
+  power:
+    inputs: [{ name: busbar, kind: busbar, capacityW: 264000, redundancy: N+N, minSources: 6, sources: "power-shelf-*", feeds: [A, B] }]
+    capacityW: 132000
+  cooling: { kind: liquid, manifold: liquid, loop: external }
+  behaviours: { powerOn: { sequence: ["power-shelf-*", "switch-tray-*", "compute-tray-*"] } }
+  isNot: ["The NVLink spine is fixed links in the model."]
+  sources: [{ what: "rack composition", url: "https://docs.nvidia.com/enterprise-reference-architectures/nvl72-ai-factory/latest/components.html", date: 2026-10-18 }]
+---
+apiVersion: dc-twin/v1alpha1
+kind: RackFormat
+metadata: { name: nvidia/gb200-nvl36x2, version: 0.1.0 }
+spec:
+  archetype: rack-scale
+  params:
+    peer:         { type: rack, label: Peer rack }
+    computeTrays: { type: int, default: 9, allowed: [9], label: "Compute trays (9 trays of 4 GPUs; partition guide v1.2)" }
+    switchTrays:  { type: int, default: 9, allowed: [9] }
+    shelves:      { type: int, default: 4, range: [4, 6] }
+    powerShelf:   { type: profile, class: power-shelf, default: liteon/power-shelf-33kw }
+    mgmtSwitch:   { type: profile, class: switch, default: generic/mgmt-switch-1g }
+  slots:
+    - { names: "power-shelf-{01..$shelves}", profile: $powerShelf }
+    - { names: "mgmt-switch-{1..2}", profile: $mgmtSwitch }
+    - { names: "compute-tray-{01..$computeTrays}", profile: nvidia/gb200-compute-tray, accepts: { class: compute-tray } }
+    - { names: "switch-tray-{01..$switchTrays}", profile: nvidia/nvlink-switch-tray }
+  layout:
+    height: 48
+    uNumbering: eia
+    front:
+      - { slots: "power-shelf-{01..02}", group: power shelves }
+      - { slots: "mgmt-switch-{1..2}" }
+      - { slots: "compute-tray-{01..05}" }
+      - { slots: "switch-tray-{01..09}", group: NVLink switch trays }
+      - { slots: "compute-tray-{06..09}" }
+      - { slots: "power-shelf-{03..06}", group: power shelves }
+    back: [nvlink-cross-rack, busbar, management, scale-out]
+  fixedLinks: [{ template: nvidia/nvlink-spine }]
+  domains:
+    - kind: scale-up
+      technology: nvlink
+      members: "compute-tray-*/gpu-*"
+      manager: "switch-tray-01"
+      spans: $peer
+      formation: 'rack.devices.filter(d, d.class == "switch-tray").all(d, d.health != "Critical" && d.power == "On")'
+  power:
+    inputs: [{ name: busbar, kind: busbar, capacityW: 132000, redundancy: N+N, minSources: 3, sources: "power-shelf-*", feeds: [A, B] }]
+    capacityW: 66000
+  cooling: { kind: liquid, manifold: liquid, loop: external }
+  isNot: ["Cross-rack NVLink cables are state only; the 18-tray, 2-GPU variant is not modelled yet."]
+  sources: [{ what: "NVL36x2 partitions", url: "https://docs.nvidia.com/multi-node-nvlink-systems/partition-guide-v1-2.pdf", date: 2026-10-18 }]

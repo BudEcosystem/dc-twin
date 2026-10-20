@@ -1,0 +1,12 @@
+# The physical hierarchy KAI's topology plugin places gangs in (docs/topology/README.md), built from
+# the labels the twin's Node projection carries: the hall (zone), the NVLink domain
+# (GPU Feature Discovery's nvidia.com/gpu.clique, "<ClusterUUID>.<CliqueID>") and the node.
+apiVersion: kai.scheduler/v1alpha1
+kind: Topology
+metadata:
+  name: nvlink
+spec:
+  levels:
+    - nodeLabel: topology.kubernetes.io/zone
+    - nodeLabel: nvidia.com/gpu.clique
+    - nodeLabel: kubernetes.io/hostname

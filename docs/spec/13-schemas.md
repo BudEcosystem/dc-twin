@@ -47,7 +47,7 @@ may add values ([04 — Open registries](04-devices-and-racks.md#open-registries
 | `spec.fabrics[]` | R | | |
 | `fabric.name` | R | name | |
 | `fabric.template` | R | `clos-2tier` \| `clos-3tier` \| `rail-optimised` \| `oob-flat` \| `pack/template` (registry) | |
-| `fabric.nos` | R | `none` \| `sonic-vs` \| `cumulus-vx` \| `pack/nos` (registry) | `none` is a model switch ([D21](11-decisions.md#d21--model-switches-are-a-fidelity-level-fabric-device-fidelity-derives-from-nos)); anything else is a real NOS and forces `clock: wall` |
+| `fabric.nos` | R | `none` \| `sonic-vs` \| `cumulus-vx` \| `generic/frr-dhcrelay` \| `pack/nos` (the NOS registry, D44; a name not in it is a validation error) | `none` is a model switch ([D21](11-decisions.md#d21--model-switches-are-a-fidelity-level-fabric-device-fidelity-derives-from-nos)); anything else is a real NOS and forces `clock: wall`. On the TAP substrate `generic/frr-dhcrelay` runs natively everywhere and `sonic-vs` natively on x86_64 and emulated (its linux/amd64 image under binfmt_misc) on aarch64; `cumulus-vx` is refused with its reason |
 | `fabric.technology` | O | `ethernet` \| `ethernet-roce` \| `infiniband`, D `ethernet` | |
 | `fabric.manager` | O | `pack/manager` | A fabric-manager adapter (UFM, NMX-C, UALink) |
 | `fabric.params` | O | map | Template parameters (`leafsPerRack`, `spines`, `rails`, `underlay`, `overlay`, `relay: {linkSelection: nos\|twin\|kea}`) |
@@ -131,7 +131,7 @@ function of the endpoint's path** so that adding a rack never moves another rack
 | `title` | R | |
 | `target` | R | `{component?: kind, device?: class, port?: true, deviceWith?: bmc\|firmware\|tpm, vendor?}` |
 | `params` | O | map of typed parameters the injector may set |
-| `effects[]` | R | Effect verbs ([08](08-scenarios-and-faults.md#faults)): `set`, `counter`, `ports`, `kernelLog`, `shim`, `redfish.logEntry`, `redfish.property`, `bms`, `power.loss`, `link`, `attestation`, or a pack `EffectHandler`. Each may carry `appliesAt: [levels]` |
+| `effects[]` | R | Effect verbs ([08](08-scenarios-and-faults.md#faults)): `set`, `counter`, `ports`, `kernelLog`, `shim`, `redfish.logEntry`, `redfish.property`, `bms`, `power.loss`, `link`, `attestation`, or a pack `EffectHandler`. Each may carry `appliesAt: [levels]`; `kernelLog` takes `line`, `level` (default 4) and `when: boot` for a line written at every boot while the fault holds rather than when it is injected |
 | `clears` | R | `{on: [triggers], after?: duration, manual: bool}`; triggers from the registry ([14](14-expressions.md#triggers)) |
 | `isNot` | R | What the fault does not model (a real Xid 79 also resets PCIe link state; this one does not) |
 
@@ -214,7 +214,7 @@ material = HKDF-Expand(SHA-256, prk, info = kind ‖ 0x00 ‖ path ‖ 0x00 ‖ 
 | Serial | `serial` | Rendered through the profile's `serialFormat`: literal text plus `{digits:n}`, `{upper:n}`, `{hex:n}`, `{alnum:n}` |
 | System UUID | `uuid` | 16 bytes, version and variant bits set |
 | MAC | `mac:<port>` | profile `identity.macOUI` + 3 bytes |
-| InfiniBand GUID | `guid:<port>` | `guidPrefix` + 5 bytes |
+| InfiniBand GUID | `guid:<port>` | `guidPrefix` + as many bytes as make 64 bits (5 after a three-byte prefix) |
 | Factory BMC credentials | `bmc-password` | 16 alphanumerics; the username is the dialect's factory default |
 | DPU ↔ host pairing | derived from both paths | |
 | TPM endorsement key | **not derived** | swtpm creates it; its state is persisted per device path and its EK certificate is issued by the estate CA with the serial in the subject |
@@ -236,6 +236,96 @@ compatibility contract.
 - `pack.yaml` lists `assets: [{path, licence, obtain?}]`: anything captured or derived (a mockup,
   a MIB, a topic schema) names its licence, and anything that may not be committed names how to
   obtain it ([D13](11-decisions.md#d13--the-twin-redistributes-no-vendor-binaries-or-images), Q10).
+
+## Implementation additions (draft 0.3)
+
+Fields the first implementation reads that draft 0.2 did not define. Each is optional and
+additive (D32); the Go types in `internal/schema` are the machine-readable copy until the JSON
+Schema files are generated.
+
+**Estate**
+
+| Field | | Meaning |
+|---|---|---|
+| `spec.timeScale` | O, D 1 | Multiplies every behaviour duration (D36); printed in the fidelity report |
+| `spec.adapters.redfish.auth` | O | `required` (D) or `optional` (oracle mode, D37) |
+| `spec.adapters.network.basePort` | O, D 24000 | First loopback port endpoints are allocated from (D34) |
+| `spec.adapters.redfish.dpus` | O, D `model` | `capture` keeps every DPU resource a captured tree holds, whatever the model's host has: oracle mode for a suite that counts the captured machine's devices (D37); printed in the fidelity report |
+| `spec.adapters.network.substrate` | O | `loopback` (D; D34) or `tap` (Linux, root; D20, D45): every BMC's management port its own TAP with the model's MAC, bridged per segment or wired into its real NOS; required by a fabric whose `nos` is not `none` |
+| `spec.adapters.network.nos.{runtime, image, underlay}` | O | Where real NOS instances run (`docker`, D: the Engine's unix socket); an image replacing the registry's switch image for every switch (a NOS's relay container, SONiC's `dhcp_relay`, keeps the registry's); the IPv4 prefix fabric links' /31s are numbered from (D `10.255.0.0/16`) (D44) |
+| `spec.adapters.network.attach[]` | O | `{container \| netns, port, address, gateway, interface}`: cable a host outside the twin (a running container, or a namespace under `/var/run/netns`) to a real switch's unused port (`<switch path>:<port>`) with an address and a default route via `gateway`, which the switch holds on that port; how a stack's DHCP server reaches the segments a real NOS relays (D45) |
+| `spec.adapters.vm.{memoryMB, cpus}` | O | Replace every `vm` guest's size from its profile's `fidelity.vm.cost`; printed in the fidelity report |
+| `spec.adapters.vm.{qemu, guest, tpm}` | O | A directory searched for `qemu-system-<arch>` before `PATH`; the directory of the `os: twin` guest image (D: the pinned image `dctwin assets fetch` obtains); `auto` (D: swtpm when installed and the profile has a TPM) or `off` |
+| `networks.<n>.server` | O | `host:port` the twin relay forwards to when `dhcp: stack`; normally a stack output |
+| `facility.bms.broker` | O | `host:port` of the stack's MQTT broker; else the stack output `exchangeBroker`; else a twin-hosted broker, labelled |
+| `stacks[].outputs` | O | `name → value` a stack installed outside the twin hands back: `dhcpServer`, `exchangeBroker`, `kubeconfig`, accessor bases (`<component>: http://…`); adapter settings such as `nmxc.authority` (an extra name on NMX-C's certificates, NICo's `nmx_c_tls_authority`), `nmxc.defaultPartition: "false"`, `rms.siteAddress`, `rms.version`, `rms.firmwareObjects`, `ibsim.binary` (the ibsim the `ibsim` adapter runs, or `none` to render InfiniBand topologies only; default `ibsim` on `PATH`, D47) |
+
+**Pack manifest**: `assets[].obtain.files` (O) names the only files under `obtain.path` to obtain,
+each fetched at the pinned `ref` instead of the repository's tarball: for a single interface
+definition such as NMX-C's `nmx_c.proto`, which may be obtained but not redistributed (D13).
+
+**Device profile**
+
+| Field | | Meaning |
+|---|---|---|
+| `identity.manufacturer`, `identity.model`, `identity.partNumber` | O | Strings the generated tree and overlays answer with |
+| `power.outputW` | O | What a source (shelf, PDU) can deliver |
+| `ports[].source` | O | For `power-in` ports: `busbar`, `pdu` or `feed`: which rack input serves the device |
+| `snmp` | O | `{mib, outlets}`: an SNMP agent in that MIB dialect |
+| `metrics` | O | `{exporter: dcgm \| amd \| gaudi}`: the in-host exporter a `model` host impersonates |
+| `components[].memoryGiB` | O | An accelerator's own memory, for exporters and GPU feature discovery; when absent, a `<n>GB` in `model` (D43). An NVIDIA accelerator's `model` is its NVML name |
+| `components[].memoryMiB` | O | The exact figure NVML reports (a few percent under the marketed size); wins over `memoryGiB` |
+| `components[].serialShare` | O | How many consecutive accelerators share one board serial (2 on GB200/GB300 trays, whose superchips carry two GPUs) |
+
+**Rack format**
+
+| Field | | Meaning |
+|---|---|---|
+| `slots[].when` | O | CEL over `params`; the slot is skipped when false |
+| `power.inputs[].sources` | O | Slot pattern of the devices that feed the input (shelves, PDUs) |
+| `power.inputs[].feeds` | O | Sides (`[A, B]`) the sources draw from, in order, bound to `racks[].feeds` |
+
+**Fabric template**: `spec.generator` (`oob`, `clos`, `rail`, `nvlink-spine`, `node-mesh`) names
+the core generator; `spec.provides` is keyed by `none` and `vm` (the fabric's `nos` level).
+
+**Dialects** (kinds the draft named but did not define)
+
+- `RedfishDialect`: `backend` (`mockup` \| `generated`), `mockup` (`<asset>/<dir>`), `inherits`,
+  `serviceRoot` (properties merged into the root), `system`, `manager`, `chassis`, `bmcInterface`,
+  `bind` (`serial`, `uuid` as `<path>#<property>`), `replace`, `factory: {user, password?}`,
+  `seedAccounts`, `overlays: [{path, set, value | from}]`, `components: [{component, resources}]`
+  (`{i}`/`{n}` index placeholders), `dpus` (patterns of the captured host's DPU resources, bound
+  in order to the model's DPU sub-devices, absent beyond them), `settingsJobs` (the `Location`
+  template, `{n}` a twelve-digit number, of the job a settings PATCH schedules when the capture
+  has no answer for it), `sensors`, `leakDetectors`, `actions: [{path, canonical,
+  byField, map, behaviour}]`, `firmware` (inventory id → component), `requests`, `quirks`,
+  `identity: {dhcpVendorClass, ipmiManufacturer}`, `isNot`, `sources` (D35).
+- `TopicDialect`: `value`, `metadata`, `heartbeat` topic templates, `pointTypes`, `requests:
+  [{pointType, effect, status, delaySeconds}]`.
+- `MibDialect`: `sysObjectID`, `sysDescr`, `objects: {name: oid}`.
+
+**Fault catalogue effects**: `set` keys the engine understands: `health`, `state`,
+`power.watts`, `sensor.<name>`, `sensorOffset.<name>`, `bmc` (`unavailable`, `resetting`),
+`bmc.latencyMs`, `bmc.errorPercent`, `output`, `outlet.<n>`, `loop.flow`, `loop.supplyOffsetC`,
+`firmware.<component>`, `firmware.failNext`, `account.rotate`, `account.passwordChangeRequired`;
+`ports` takes `index`; `propagate: leak` applies the format's rule.
+
+**Scenario**
+
+| Field | | Meaning |
+|---|---|---|
+| `estate.requires.clock` | O | `virtual` or `wall` |
+| `act.feed`, `act.up` | O | Take a facility feed down or up |
+| `act.utilisation` | O | Set the selected hosts' load |
+| `act.clock` | O | Advance the virtual clock |
+| `act.power` | | Also `ACCycle` |
+| observation `model` | | `{expr}`: CEL over the model |
+| observation `dhcp` | | `{select, leased}` |
+| observation `event` | | Also `kind`, `field`, `to`; an expect sees the events of the acts and faults that led to it |
+| accessor `args` | | `"{serial:<selector>}"` passes the selected device's serial |
+
+**Stack**: `components.<c>.outputs` names what flows back (`dhcpServer`, `exchangeBroker`);
+`impersonators[].projection` names the twin adapter that is the impersonator (`kwok`).
 
 ## Compatibility
 

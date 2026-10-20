@@ -1,0 +1,57 @@
+# The end-to-end test estate: every pack, every rack archetype and every protocol adapter, all at
+# model fidelity on model switches, so it runs on any laptop. Behaviours are scaled to a twentieth
+# of their real duration (timeScale), which the fidelity report prints.
+# Conforms to docs/spec/13-schemas.md.
+apiVersion: dc-twin/v1alpha1
+kind: Estate
+metadata:
+  name: lab-model
+spec:
+  seed: 4242
+  clock: wall
+  timeScale: 0.05
+  packs: [generic@0.1.0, nvidia@0.1.0, liteon@0.1.0, oem-dell@0.1.0, oem-hpe@0.1.0, oem-lenovo@0.1.0, oem-supermicro@0.1.0, amd@0.1.0, intel@0.1.0]
+  fidelity: { default: model }
+  sites:
+    - name: site-1
+      halls:
+        - name: hall-a
+          rows:
+            - name: a
+              positions: 6
+              racks:
+                - { name: a01, position: 1, format: nvidia/gb300-nvl72, feeds: [A, B] }
+                - { name: a02, position: 2, format: nvidia/gb200-nvl72, feeds: [A, B] }
+            - name: b
+              positions: 6
+              racks:
+                - { name: b01, position: 1, format: generic/hgx-8gpu, params: { server: oem-dell/xe9680-h100, servers: 2 } }
+                - { name: b02, position: 2, format: generic/hgx-8gpu, params: { server: oem-supermicro/sys-821ge-tnhr, servers: 2 } }
+                - { name: b03, position: 3, format: generic/oam-8gpu, params: { servers: 2 } }
+                - { name: b04, position: 4, format: generic/gaudi3-8, params: { servers: 2 } }
+                - { name: b05, position: 5, format: generic/hgx-8gpu, params: { server: oem-lenovo/sr670-v2, servers: 2 } }
+            - name: c
+              positions: 4
+              racks:
+                - { name: c01, position: 1, format: generic/cpu-rack, params: { server: oem-dell/r760, servers: 2 }, slots: { server-02: { profile: oem-hpe/dl385-gen10p } } }
+                - { name: c02, position: 2, format: generic/cpu-rack, params: { server: generic/server-2u, servers: 2 } }
+                - { name: c03, position: 3, format: generic/network-rack, params: { ufm: nvidia/ufm-appliance } }
+  networks:
+    oob:          { role: management,   dhcp: twin, cidr: 10.30.0.0/20, fabric: oob }
+    provisioning: { role: provisioning, dhcp: twin, cidr: 10.40.0.0/20, fabric: frontend }
+    frontend:     { role: frontend,     fabric: frontend }
+    backend-ib:   { role: scale-out,    fabric: backend-ib }
+    backend-roce: { role: storage,      fabric: backend-roce }
+    service:      { role: service,      cidr: 10.90.0.0/24, dhcp: none }
+  fabrics:
+    - { name: oob,         template: oob-flat,       nos: none }
+    - { name: frontend,    template: clos-2tier,     nos: none, params: { leafsPerRack: 2, spines: 2 }, placeIn: c03 }
+    - { name: backend-ib,  template: rail-optimised, nos: none, technology: infiniband, manager: nvidia/ufm, params: { rails: 4 }, select: "a0* b01 b02 b05", placeIn: c03 }
+    - { name: backend-roce, template: rail-optimised, nos: none, technology: ethernet-roce, params: { rails: 4 }, select: "b03 b04", placeIn: c03 }
+  facility:
+    power:
+      feeds: [{ name: A, capacityW: 900000 }, { name: B, capacityW: 900000 }]
+    cooling:
+      loops: [{ name: cdu-1, profile: generic/cdu-inrow, racks: [a01, a02], capacityKW: 400 }]
+    bms: { dialect: nvidia/dsx-exchange }
+  stacks: []

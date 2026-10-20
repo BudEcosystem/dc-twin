@@ -1,0 +1,7 @@
+apiVersion: dc-twin/v1alpha1
+kind: FabricTemplate
+metadata: { name: nvidia/nvlink-spine, version: 0.1.0 }
+spec:
+  generator: nvlink-spine
+  provides: { none: [] }
+  isNot: ["Lane i of GPU g is wired to switch tray (i/2)+1; NVIDIA's real cartridge pinout is not modelled."]

@@ -1,0 +1,54 @@
+# The estate compat/nico runs NVIDIA Infra Controller (NICo) against, unmodified: one GB300 NVL72
+# rack with its network rack and cooling loop, and four OEM racks (Dell XE9680, Supermicro
+# SYS-821GE, Lenovo SR670 V2, and a CPU rack with a Dell R760 and an HPE DL385), so NICo's site
+# explorer meets every BMC dialect it identifies. NICo's own DHCP server (crates/dhcp-server, in
+# controller mode) serves the BMC network: the twin relay forwards every BMC's DHCP to it with
+# option 82 (circuit id, remote id, link selection), and NICo allocates each BMC's address from
+# the per-rack underlay segment the link selection names (compat/nico/run.sh configures one
+# segment per rack: a /24 at the rack's ordinal, gateway .1). The twin hosts the DSX Exchange
+# broker, and mirrors rack leak points in the shape NICo's dsx-exchange-consumer reads.
+apiVersion: dc-twin/v1alpha1
+kind: Estate
+metadata: { name: nvl72-nico }
+spec:
+  seed: 1729
+  clock: wall
+  timeScale: 0.05
+  packs: [generic@0.1.0, nvidia@0.1.0, liteon@0.1.0, oem-dell@0.1.0, oem-hpe@0.1.0, oem-lenovo@0.1.0, oem-supermicro@0.1.0]
+  sites:
+    - name: site-1
+      halls:
+        - name: hall-a
+          rows:
+            - name: a
+              positions: 10
+              racks:
+                - { name: a03, position: 3, format: nvidia/gb300-nvl72, feeds: [A, B] }
+                - { name: a10, position: 10, format: generic/network-rack, params: { ufm: nvidia/ufm-appliance } }
+            - name: b
+              positions: 4
+              racks:
+                - { name: b01, position: 1, format: generic/hgx-8gpu, params: { server: oem-dell/xe9680-h100, servers: 1 } }
+                - { name: b02, position: 2, format: generic/hgx-8gpu, params: { server: oem-supermicro/sys-821ge-tnhr, servers: 1 } }
+                - { name: b03, position: 3, format: generic/hgx-8gpu, params: { server: oem-lenovo/sr670-v2, servers: 1 } }
+                - { name: b04, position: 4, format: generic/cpu-rack, params: { server: oem-dell/r760, servers: 2 }, slots: { server-02: { profile: oem-hpe/dl385-gen10p } } }
+  networks:
+    # dhcp: stack — relayed to NICo's dhcp-server. run.sh sets the port from DHCP_PORT.
+    oob:          { role: management,   dhcp: stack, cidr: 10.30.0.0/16, fabric: oob, server: "127.0.0.1:26767" }
+    provisioning: { role: provisioning, dhcp: twin,  cidr: 10.40.0.0/16, fabric: frontend }
+    frontend:     { role: frontend,     fabric: frontend }
+    backend:      { role: scale-out,    fabric: backend }
+    service:      { role: service,      cidr: 10.90.0.0/24, dhcp: none }
+  fabrics:
+    - { name: oob,      template: oob-flat,   nos: none }
+    - { name: frontend, template: clos-2tier, nos: none, params: { leafsPerRack: 2, spines: 2 }, placeIn: a10 }
+    - { name: backend,  template: rail-optimised, nos: none, technology: infiniband, manager: nvidia/ufm, params: { rails: 4 }, select: "a03 b01 b02 b03", placeIn: a10 }
+  facility:
+    power: { feeds: [{ name: A, capacityW: 400000 }, { name: B, capacityW: 400000 }] }
+    cooling: { loops: [{ name: cdu-1, profile: generic/cdu-inrow, racks: [a03], capacityKW: 200 }] }
+    # No broker named: the twin hosts one (dctwin endpoints prints it) and NICo's consumer reads it.
+    bms: { dialect: nvidia/dsx-exchange }
+  stacks:
+    - name: nvidia-dsx-os@0.1.0
+      # NICo's consumer parses the pre-1.0 BMS shape (docs/stacks/nvidia-dsx-os.md, D40).
+      outputs: { bmsConsumerMirror: "nico-legacy,nico-api" }

@@ -1,0 +1,117 @@
+# nico-api configuration for running NICo against the twin (compat/nico/run.sh fills the @...@
+# values). Derived from NICo's dev/mac-local-dev/nico-api-config.toml: the same local-dev
+# settings (TLS with locally generated certs, permissive auth, no attestation), with the twin's
+# BMC network as underlay segments (appended from nicoinputs' nico-site.toml), site explorer
+# on a short interval and no bmc_proxy: NICo reaches each BMC at the address its own DHCP
+# server leased, through the twin's site gateway (HTTPS_PROXY).
+listen = "127.0.0.1:@API_PORT@"
+listen_mode = "tls"
+metrics_endpoint = "127.0.0.1:@METRICS_PORT@"
+database_url = "postgresql://postgres:admin@127.0.0.1:@PG_PORT@"
+max_database_connections = 100
+asn = 4294967000
+bypass_rbac = true
+attestation_enabled = false
+initial_domain_name = "twin.local"
+initial_dpu_agent_upgrade_policy = "off"
+
+[pools.lo-ip]
+type = "ipv4"
+ranges = [{ start = "10.180.62.1", end = "10.180.62.62" }]
+
+[pools.vlan-id]
+type = "integer"
+ranges = [{ start = "100", end = "501" }]
+
+[pools.vni]
+type = "integer"
+ranges = [{ start = "1024500", end = "1024550" }]
+
+[pools.vpc-vni]
+type = "integer"
+ranges = [{ start = "2024500", end = "2024550" }]
+
+[host_health]
+hardware_health_reports = "MonitorOnly"
+
+[firmware_global]
+autoupdate = false
+firmware_directory = "@WORK@/firmware"
+firmware_download_cache_directory = "@WORK@/firmware-cache"
+
+[tls]
+identity_pemfile_path = "@WORK@/certs/localhost.crt"
+identity_keyfile_path = "@WORK@/certs/localhost.key"
+root_cafile_path = "@WORK@/certs/ca.crt"
+admin_root_cafile_path = "@WORK@/certs/ca.crt"
+
+[auth]
+permissive_mode = true
+
+[auth.trust]
+spiffe_trust_domain = "nico.local"
+spiffe_service_base_paths = ["/forge-system/sa/", "/default/sa/"]
+spiffe_machine_base_path = "/forge-system/machine/"
+additional_issuer_cns = []
+
+[network_security_group]
+stateful_acls_enabled = false
+max_network_security_group_size = 200
+
+[machine_validation_config]
+enabled = false
+test_selection_mode = "EnableAll"
+
+[machine_state_controller]
+dpu_wait_time = "5s"
+power_down_wait = "5s"
+iteration_time = "10s"
+
+[network_segment_state_controller]
+network_segment_drain_time = "60s"
+[network_segment_state_controller.controller]
+iteration_time = "10s"
+
+[vpc_prefix_state_controller]
+vpc_prefix_drain_time = "60s"
+[vpc_prefix_state_controller.controller]
+iteration_time = "10s"
+
+[ib_partition_state_controller.controller]
+iteration_time = "120s"
+
+[site_explorer]
+enabled = true
+create_machines = true
+run_interval = "@EXPLORE_INTERVAL@"
+# NICo's default, DPU-managing ingestion: a host's DPU resources are the model's DPUs (README,
+# twin bug 2, fixed). DPU_POLICY=ignore ingests hosts as zero-DPU hosts.
+dpu_policy = "@DPU_POLICY@"
+explore_mode = "@EXPLORE_MODE@"
+
+[component_manager]
+# Compute trays are driven by NICo core itself (Redfish to the tray BMC). NVLink switches and
+# power shelves go to the Rack Management Service, as NICo's own deployment defaults them: the
+# twin's RMS adapter (COMPONENT_BACKEND=rms, the default), or NICo's mock (COMPONENT_BACKEND=mock).
+compute_tray_backend = "core"
+nv_switch_backend = "@COMPONENT_BACKEND@"
+power_shelf_backend = "@COMPONENT_BACKEND@"
+
+[rms]
+api_url = "@RMS_URL@"
+enforce_tls = true
+root_ca_path = "@RMS_CA@"
+
+# NICo's own DSX Exchange integration (managed-host state, BMS metadata subscription, rack
+# isolation requests and heartbeats) on the twin-hosted broker.
+[dsx_exchange_event_bus]
+enabled = @DSX_BUS@
+mqtt_endpoint = "127.0.0.1"
+mqtt_broker_port = @BROKER_PORT@
+
+[networks.admin]
+type = "admin"
+prefix = "192.168.252.0/24"
+gateway = "192.168.252.1"
+mtu = 9000
+reserve_first = 5

@@ -1,0 +1,7 @@
+apiVersion: dc-twin/v1alpha1
+kind: Pack
+metadata: { name: amd, version: 0.1.0 }
+spec:
+  title: AMD Instinct OAM platforms and the AMD RAS fault catalogue
+  dependsOn: [generic@0.1.0, oem-supermicro@0.1.0]
+  isNot: ["No AMD SMI shim yet (Q7): in-host AMD tools see nothing; Redfish, power, Kubernetes and metrics projections only."]

@@ -1,0 +1,50 @@
+# A disaggregated inference shape as a Grove PodCliqueSet (cf. Grove's
+# samples/user-guide/01_core-concepts/multi-node-disaggregated.yaml): a frontend, and multi-node
+# prefill and decode instances, each a leader and three workers that scale together as one
+# PodCliqueScalingGroup replica. Every PodCliqueSet replica is required to pack into one NVLink
+# domain (pack.required on the `nvlink-domain` level of the `nvlink` ClusterTopologyBinding), on
+# GB300 trays. With a scaling group's minAvailable equal to its replicas every pod is in the base
+# PodGang, one KAI PodGroup; below it, the replicas above minAvailable become PodGangs of their own.
+# A pod leaves a Node that stops being Ready after 10 s (the default is 300 s), so
+# kube-controller-manager's taint eviction runs within the test. run.sh fills the @...@ fields.
+# No kubelet runs behind the twin's Nodes: images are never pulled and bound pods stay Pending;
+# what is tested is the placement.
+apiVersion: grove.io/v1alpha1
+kind: PodCliqueSet
+metadata:
+  name: @NAME@
+  namespace: dc-twin-serving
+  labels: { kai.scheduler/queue: serving, dc-twin.io/workload: @NAME@ }
+spec:
+  replicas: @REPLICAS@
+  template:
+    topologyConstraint:
+      topologyName: nvlink
+      pack: { required: nvlink-domain }
+    cliques:
+      - name: frontend
+        spec:
+          roleName: frontend
+          replicas: 1
+          minAvailable: 1
+          podSpec: &cpu
+            tolerations: &evict
+              - { key: node.kubernetes.io/not-ready, operator: Exists, effect: NoExecute, tolerationSeconds: 10 }
+              - { key: node.kubernetes.io/unreachable, operator: Exists, effect: NoExecute, tolerationSeconds: 10 }
+            nodeSelector: { nvidia.com/gpu.product: NVIDIA-GB300 }
+            terminationGracePeriodSeconds: 0
+            containers:
+              - name: main
+                image: registry.invalid/dc-twin/never-pulled:0
+                resources: { requests: { cpu: "2", memory: 4Gi } }
+      - name: pleader
+        spec: { roleName: pleader, replicas: 1, minAvailable: 1, podSpec: &gpu { nodeSelector: { nvidia.com/gpu.product: NVIDIA-GB300 }, terminationGracePeriodSeconds: 0, tolerations: *evict, containers: [ { name: main, image: registry.invalid/dc-twin/never-pulled:0, resources: { limits: { nvidia.com/gpu: "4" } } } ] } }
+      - name: pworker
+        spec: { roleName: pworker, replicas: 3, minAvailable: 3, podSpec: *gpu }
+      - name: dleader
+        spec: { roleName: dleader, replicas: 1, minAvailable: 1, podSpec: *gpu }
+      - name: dworker
+        spec: { roleName: dworker, replicas: 3, minAvailable: 3, podSpec: *gpu }
+    podCliqueScalingGroups:
+      - { name: prefill, cliqueNames: [pleader, pworker], replicas: @PREFILL@, minAvailable: @PREFILL_MIN@ }
+      - { name: decode,  cliqueNames: [dleader, dworker], replicas: @DECODE@, minAvailable: @DECODE_MIN@ }

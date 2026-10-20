@@ -1,0 +1,25 @@
+apiVersion: dc-twin/v1alpha1
+kind: DeviceProfile
+metadata: { name: liteon/power-shelf-33kw, version: 0.1.0 }
+spec:
+  class: power-shelf
+  form: { mounting: rack, units: 1 }
+  identity: { serialFormat: "6133{digits:2}7RXX{digits:2}X{digits:5}UG", macOUI: "00:0b:ab", manufacturer: "LITE-ON TECHNOLOGY CORP.", model: "PF-1333-7R" }
+  components:
+    - { name: psu, kind: psu, count: 6, model: "5.5 kW PSU" }
+  bmc: { dialect: liteon/power-shelf }
+  ports:
+    - { name: bmc0, kind: ethernet, speed: 1G, role: management }
+    - { name: ac-in, kind: power-in, source: feed }
+    - { name: busbar-out, kind: power-out }
+  power: { standbyW: 30, idleW: 120, maxW: 400, outputW: 33000 }
+  cooling: { kind: air }
+  sensors:
+    - { name: power, quantity: power, unit: W, source: output-power }
+  behaviours: { power: { onSeconds: 5, offSeconds: 2 }, bmc: { bootSeconds: 30 } }
+  faults: [generic/power, generic/bmc]
+  fidelity: { model: {} }
+  provides:
+    - { capability: "redfish/dialect:liteon/power-shelf", at: [model] }
+  isNot: ["Output is the share of the busbar load across delivering shelves."]
+  sources: [{ what: "PF-1333-7R, 33 kW", url: "https://github.com/dsx-ai-factory/libredfish/tree/a51ffb1ffeae15d8f9471224cb799d54007098a2/tests/mockups/liteon_powershelf", date: 2026-10-18 }]

@@ -1,0 +1,22 @@
+apiVersion: dc-twin/v1alpha1
+kind: DeviceProfile
+metadata: { name: delta/power-shelf-33kw, version: 0.1.0 }
+spec:
+  class: power-shelf
+  form: { mounting: rack, units: 1 }
+  identity: { serialFormat: "THAMA{digits:6}{upper:2}", macOUI: "00:18:23", manufacturer: "DELTA", model: "810" }
+  components: [{ name: psu, kind: psu, count: 6, model: "5.5 kW PSU" }]
+  bmc: { dialect: delta/power-shelf }
+  ports:
+    - { name: bmc0, kind: ethernet, speed: 1G, role: management }
+    - { name: ac-in, kind: power-in, source: feed }
+    - { name: busbar-out, kind: power-out }
+  power: { standbyW: 30, idleW: 120, maxW: 400, outputW: 33000 }
+  cooling: { kind: air }
+  sensors: [{ name: power, quantity: power, unit: W, source: output-power }]
+  behaviours: { power: { onSeconds: 5, offSeconds: 2 }, bmc: { bootSeconds: 30 } }
+  faults: [generic/power, generic/bmc]
+  fidelity: { model: {} }
+  provides: [{ capability: "redfish/dialect:delta/power-shelf", at: [model] }]
+  isNot: ["Output is the share of the busbar load across delivering shelves."]
+  sources: [{ what: "Redfish tree", url: "https://github.com/dsx-ai-factory/libredfish/tree/a51ffb1ffeae15d8f9471224cb799d54007098a2/tests/mockups/delta_powershelf", date: 2026-10-18 }]

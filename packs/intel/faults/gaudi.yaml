@@ -1,0 +1,23 @@
+apiVersion: dc-twin/v1alpha1
+kind: FaultCatalogue
+metadata: { name: intel/gaudi, version: 0.1.0 }
+spec:
+  isNot: ["Gaudi error classes as health and port state; no habanalabs driver state."]
+  faults:
+    - name: hbm-uncorrectable
+      title: "HBM uncorrectable error"
+      target: { component: accelerator, vendor: intel }
+      effects:
+        - set: { health: Critical }
+        - counter: { "hbm.ue": "+1" }
+        - kernelLog: { line: "habanalabs hl{index}: HBM ECC uncorrectable error", appliesAt: [vm] }
+      clears: { on: [device.reset], manual: true }
+      isNot: []
+    - name: roce-port-down
+      title: "Integrated RoCE ports down"
+      target: { component: accelerator, vendor: intel }
+      effects:
+        - set: { health: Warning }
+        - ports: { owner: self, kind: scale-up, state: down }
+      clears: { on: [device.reset], manual: true }
+      isNot: []

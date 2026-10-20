@@ -1,0 +1,58 @@
+# Alerts a GPU fleet's Prometheus typically carries, written against the real exporters' metric
+# names. Nothing here knows about dc-twin.
+groups:
+  - name: nvidia-dcgm
+    rules:
+      # DCGM_FI_DEV_XID_ERRORS is "Value of the last XID error encountered" (dcgm-exporter).
+      - alert: GPUXidError
+        expr: DCGM_FI_DEV_XID_ERRORS > 0
+        labels: { severity: critical }
+        annotations:
+          summary: "Xid {{ $value }} on GPU {{ $labels.gpu }} of {{ $labels.hostname }}"
+          description: "{{ $labels.err_msg }} ({{ $labels.modelName }}, {{ $labels.UUID }})"
+      - alert: GPUFellOffTheBus
+        expr: DCGM_FI_DEV_XID_ERRORS == 79
+        labels: { severity: critical }
+        annotations:
+          summary: "GPU {{ $labels.gpu }} of {{ $labels.hostname }} has fallen off the bus"
+      - alert: GPUDoubleBitECC
+        expr: increase(DCGM_FI_DEV_ECC_DBE_VOL_TOTAL[5m]) > 0
+        labels: { severity: critical }
+      - alert: GPUTemperatureHigh
+        expr: DCGM_FI_DEV_GPU_TEMP > 85
+        labels: { severity: warning }
+      # A GPU that stops reporting while its host still answers (Xid 79: NVML says GPU_IS_LOST).
+      - alert: GPUMissingTelemetry
+        expr: (count by (instance) (DCGM_FI_DEV_XID_ERRORS)) > (count by (instance) (DCGM_FI_DEV_GPU_TEMP))
+        labels: { severity: warning }
+      - record: instance:dcgm_gpu_temp:max
+        expr: max by (instance, modelName) (DCGM_FI_DEV_GPU_TEMP)
+  - name: amd
+    rules:
+      - alert: AMDGPUUnhealthy
+        expr: gpu_health == 0
+        labels: { severity: critical }
+        annotations:
+          summary: "AMD GPU {{ $labels.gpu_id }} ({{ $labels.card_model }}) on {{ $labels.hostname }} unhealthy"
+      - alert: AMDGPUUncorrectableECC
+        expr: gpu_ecc_uncorrect_total > 0
+        labels: { severity: critical }
+  - name: gaudi
+    rules:
+      - alert: GaudiHBMUncorrectable
+        expr: habanalabs_pending_rows_with_double_bit_ecc_errors > 0
+        labels: { severity: critical }
+      # One alert per device, however many of its 24 integrated ports are down.
+      - alert: GaudiPortsDown
+        expr: count by (instance, id, Serial) (habanalabs_nic_port_status == 0) > 0
+        labels: { severity: warning }
+        annotations:
+          summary: "{{ $value }} integrated NIC ports down on Gaudi {{ $labels.id }} of {{ $labels.instance }}"
+  - name: exporters
+    rules:
+      # A powered-off host has no exporter: its scrape fails and up drops to 0.
+      - alert: ExporterDown
+        expr: up == 0
+        labels: { severity: critical }
+        annotations:
+          summary: "{{ $labels.job }} on {{ $labels.instance }} is not answering"

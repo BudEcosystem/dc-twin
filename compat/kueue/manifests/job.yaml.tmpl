@@ -1,0 +1,36 @@
+# One batch/v1 Job for Kueue. run.sh fills the @...@ fields. It is created unsuspended, with only
+# the queue-name label: Kueue's own mutating webhook suspends it, and Kueue unsuspends it on
+# admission, adding the flavor's node labels (and, under TAS, a scheduling gate it lifts per pod
+# with the host it chose). kube-controller-manager's Job controller creates the pods and
+# kube-scheduler binds them. No kubelet runs behind the twin's Nodes, so the image is never
+# pulled and a bound pod stays Pending: what is tested is admission and binding.
+#
+# The pods tolerate not-ready/unreachable for 20 s instead of the 300 s the DefaultTolerationSeconds
+# admission plugin would give them, so the node-lifecycle controller evicts them from a powered-off
+# Node within the run; backoffLimit leaves room for those evictions (each counts as a failure).
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: @NAME@
+  namespace: dc-twin-kueue
+  labels: { kueue.x-k8s.io/queue-name: @QUEUE@, dc-twin.io/workload: @NAME@ }
+spec:
+  parallelism: @COUNT@
+  completions: @COUNT@
+  completionMode: Indexed
+  backoffLimit: 10
+  template:
+    metadata:
+      labels: { dc-twin.io/workload: @NAME@ }
+      annotations: { @ANNOTATIONS@ }
+    spec:
+      restartPolicy: Never
+      terminationGracePeriodSeconds: 0
+      tolerations:
+        - { key: node.kubernetes.io/not-ready, operator: Exists, effect: NoExecute, tolerationSeconds: 20 }
+        - { key: node.kubernetes.io/unreachable, operator: Exists, effect: NoExecute, tolerationSeconds: 20 }
+      containers:
+        - name: main
+          image: registry.invalid/dc-twin/never-pulled:0
+          resources:
+            limits: { "@RESOURCE@": "@PER_POD@" }

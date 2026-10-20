@@ -1,0 +1,30 @@
+# Losing facility feed A: an NVL72 busbar keeps 4 of 8 shelves, below its minSources of 6, so
+# every tray loses power; an 8-GPU server on N+N PDUs keeps running on feed B.
+apiVersion: dc-twin/v1alpha1
+kind: Scenario
+metadata: { name: feed-loss-redundancy }
+spec:
+  estate: { requires: { formats: [nvidia/gb300-nvl72, generic/hgx-8gpu] } }
+  stack: {}
+  timeout: 5m
+  steps:
+    - act: { feed: A, up: false }
+    - expect:
+        within: 10s
+        all:
+          - event:   { field: ac, to: false, on: "a01/compute-tray-07" }
+          - redfish: { select: "a01/compute-tray-07", property: "Systems/System_0/PowerState", equals: "Off" }
+          - redfish: { select: "a01/power-shelf-02", property: "Chassis/powershelf/PowerState", equals: "Off" }
+          - domain:  { path: "a01/domain/scale-up-nvlink", state: unformed }
+          - not: { event: { field: ac, to: false, on: "b01/server-*" } }
+    - act: { feed: A, up: true }
+    - expect:
+        within: 30s
+        all:
+          - event: { field: bmc, to: Enabled, on: "a01/compute-tray-07" }
+          - model: { expr: 'model.device("a01/compute-tray-07").power == "Off"' }
+    # the hosts stay off when power returns; a technician powers the rack back on
+    - act: { power: On, select: "a01/switch-tray-*" }
+    - act: { power: On, select: "a01/compute-tray-*" }
+    - expect: { within: 30s, all: [{ domain: { path: "a01/domain/scale-up-nvlink", state: formed } }] }
+  report: fidelity

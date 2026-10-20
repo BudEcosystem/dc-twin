@@ -1,0 +1,30 @@
+# dcgm-exporter 4.5.3-4.8.2-distroless, the image the GPU Operator v26.3.3 deploys as its
+# dcgm-exporter operand, as a plain DaemonSet on the container hosts: it embeds the DCGM host
+# engine, which loads NVML like any consumer, and NVIDIA_VISIBLE_DEVICES=all has the `nvidia`
+# runtime handler Mokka's node agent made the default give it the node's mock driver through CDI.
+apiVersion: v1
+kind: Namespace
+metadata: { name: dc-twin-dcgm }
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: dcgm-exporter
+  namespace: dc-twin-dcgm
+spec:
+  selector: { matchLabels: { app: dcgm-exporter } }
+  template:
+    metadata: { labels: { app: dcgm-exporter } }
+    spec:
+      nodeSelector: { dc-twin.io/host: container }
+      containers:
+        - name: dcgm-exporter
+          image: nvcr.io/nvidia/k8s/dcgm-exporter:4.5.3-4.8.2-distroless
+          env:
+            - { name: NVIDIA_VISIBLE_DEVICES, value: all }
+            - { name: DCGM_EXPORTER_COLLECT_INTERVAL, value: "5000" }
+            - { name: DCGM_EXPORTER_KUBERNETES, value: "false" }
+            - { name: NODE_NAME, valueFrom: { fieldRef: { fieldPath: spec.nodeName } } }
+          ports: [{ name: metrics, containerPort: 9400 }]
+          securityContext: { privileged: true }
+          resources: { requests: { cpu: 10m, memory: 64Mi } }

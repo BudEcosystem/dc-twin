@@ -1,0 +1,11 @@
+apiVersion: dc-twin/v1alpha1
+kind: Pack
+metadata: { name: oem-lenovo, version: 0.1.0 }
+spec:
+  title: "Lenovo ThinkSystem servers and the XCC dialect"
+  dependsOn: [generic@0.1.0]
+  assets:
+    - name: libredfish
+      licence: MIT
+      obtain: { source: "https://github.com/dsx-ai-factory/libredfish", ref: a51ffb1ffeae15d8f9471224cb799d54007098a2, path: tests/mockups }
+  isNot: ["The XCC tree is a captured ThinkSystem SR670 V2."]

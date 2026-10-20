@@ -1,0 +1,10 @@
+# The harness image: OpenSM, infiniband-diags and ibsim (with its umad2sim preload library) from
+# Debian trixie's archive, native to the Docker host's architecture, plus what the in-container
+# checks use. The twin itself is copied in by run.sh (cross-compiled, static).
+FROM debian:trixie-slim
+RUN apt-get update \
+ && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      opensm infiniband-diags ibsim-utils libumad2sim0 \
+      python3 curl ca-certificates procps \
+ && rm -rf /var/lib/apt/lists/*
+WORKDIR /work

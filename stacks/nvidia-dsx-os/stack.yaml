@@ -1,0 +1,63 @@
+apiVersion: dc-twin/v1alpha1
+kind: Stack
+metadata: { name: nvidia-dsx-os, version: 0.1.0 }
+spec:
+  title: NVIDIA DSX OS
+  options:
+    dpuMode: { type: boolean, default: false }
+  impersonators:
+    - { name: machine-a-tron, replaces: scout and dpu-agent, obtain: { source: "https://github.com/dsx-ai-factory/infra-controller", path: crates/machine-a-tron }, appliesTo: model }
+    - { name: kwok, replaces: kubelet, appliesTo: model, projection: kwok }
+  components:
+    nico:
+      obtain: { source: "https://github.com/dsx-ai-factory/infra-controller", ref: "<pinned>", licence: Apache-2.0 }
+      serviceZone: { kubernetes: { nodes: 3, distro: k3s } }
+      install:
+        - { helmfile: helm-prereqs, values: inputs }
+        - { helm: { chart: nico, values: inputs } }
+      attach: [management, provisioning, service]
+      requires:
+        - { capability: "redfish/dialect:*", scope: { each: "?class=compute-tray ?class=server" }, anyOf: ["redfish/dialect:nvidia/gb-bmc", "redfish/dialect:nvidia/dgx", "redfish/dialect:oem-dell/idrac", "redfish/dialect:oem-hpe/ilo", "redfish/dialect:oem-lenovo/xcc", "redfish/dialect:oem-supermicro/redfish"], gate: install }
+        - { capability: redfish/event-service-sse, scope: { each: "?class=compute-tray ?class=server" } }
+        - { capability: redfish/leak-detectors, scope: { each: "?class=compute-tray" }, when: 'estate.has("domain", "scale-up/nvlink")' }
+        - { capability: "dhcp/relay-giaddr", anyOf: ["dhcp/relay-giaddr", "dhcp/relay-option-82"], gate: install }
+        - { capability: boot/pxe, anyOf: [boot/pxe, boot/walk], preferred: vm }
+        - { capability: tpm2/measured-boot, preferred: vm }
+        - { capability: fabric/ufm-rest, when: 'estate.has("fabric.technology", "infiniband")' }
+        - { capability: fabric/nmx-c, when: 'estate.has("domain", "scale-up/nvlink")' }
+        - { capability: "facility/bms:nvidia/dsx-exchange", when: 'estate.has("facility.bms", "nvidia/dsx-exchange")' }
+        - { capability: switch/bgp-unnumbered, when: "stack.options.dpuMode" }
+        - { capability: dpu/hbn, when: "stack.options.dpuMode" }
+      inputs:
+        bmcNetworks: 'estate.networks.filter(n, n.role == "management").map(n, n.cidr)'
+        hostNetworks: 'estate.networks.filter(n, n.role == "provisioning").map(n, n.cidr)'
+      outputs:
+        dhcpServer: { kind: endpoint, from: kea }
+        exchangeBroker: { kind: endpoint, from: dsx-exchange }
+      accessors:
+        machine: { kind: http, endpoint: "{nico}/v1/machines/{id}", credential: twin-issued-readonly, join: { twin: serial, stack: bmc_serial } }
+        alerts: { kind: http, endpoint: "{nico}/v1/alerts?rack={rack}", credential: twin-issued-readonly }
+    nvsentinel:
+      obtain: { source: "https://github.com/NVIDIA/NVSentinel", ref: "<pinned>", licence: Apache-2.0 }
+      clusters: [{ name: tenant, on: "?fidelity=vm&class=server", distro: k3s }]
+      install: [{ helm: { chart: nvsentinel, into: tenant } }]
+      attach: [frontend]
+      requires:
+        - { capability: accelerator/nvml, scope: { each: "?fidelity=vm ?class=server" } }
+        - { capability: "host/os:twin", scope: { each: "?fidelity=vm ?class=server" } }
+    dsx-exchange:
+      obtain: { source: "https://github.com/dsx-ai-factory/dsx-exchange", ref: "<pinned>", licence: Apache-2.0 }
+      install: [{ helm: { chart: dsx-exchange } }]
+      attach: [service]
+      requires:
+        - { capability: "facility/bms:nvidia/dsx-exchange" }
+    fleet-intelligence:
+      obtain: { source: "https://github.com/dsx-ai-factory/fleet-intelligence-agent", ref: "<pinned>", licence: Apache-2.0 }
+      install: [{ helm: { chart: fleet-intelligence-agent } }]
+      attach: [frontend]
+      requires:
+        - { capability: accelerator/nvml, scope: { each: "?fidelity=vm ?class=server" } }
+  scenarios: [scenarios/nvl72-leak-response.yaml, scenarios/xid-cordon.yaml, scenarios/bmc-discovery.yaml]
+  isNot:
+    - "BlueField-enforced isolation is exercised for control flow only; dpu/hbn is a stand-in until Q1 closes."
+    - "A pass with machine-a-tron or kwok enabled is a scale run, not conformance."

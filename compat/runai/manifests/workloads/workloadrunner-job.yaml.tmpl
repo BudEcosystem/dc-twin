@@ -1,0 +1,37 @@
+# A Run:ai workload as its cluster side receives it: a WorkloadRunner (run.ai/v1alpha1, the dromos
+# library's CRD that Run:ai's anyworkload-controller reconciles) wrapping a batch/v1 Job of @PODS@
+# pods x @GPUS@ GPUs, gang-scheduled in one NVLink clique. The controller renders the Job through
+# its Karta definition and owns it; kube-controller-manager's Job controller creates the pods; KRM
+# and KAI place them. run.sh fills the @...@ fields. No kubelet runs behind the twin's Nodes.
+apiVersion: run.ai/v1alpha1
+kind: WorkloadRunner
+metadata:
+  name: @NAME@
+  namespace: kai-llm-train
+  labels: { dc-twin.io/workload: @NAME@ }
+spec:
+  template:
+    apiVersion: batch/v1
+    kind: Job
+    metadata:
+      name: @NAME@
+      namespace: kai-llm-train
+      labels: { dc-twin.io/workload: @NAME@ }
+      annotations:
+        kai.scheduler/batch-min-member: "@PODS@"
+        kai.scheduler/topology: nvlink
+        kai.scheduler/topology-required-placement: nvidia.com/gpu.clique
+    spec:
+      parallelism: @PODS@
+      completions: @PODS@
+      backoffLimit: 6
+      template:
+        metadata:
+          labels: { dc-twin.io/workload: @NAME@ }
+        spec:
+          restartPolicy: Never
+          terminationGracePeriodSeconds: 0
+          containers:
+            - name: main
+              image: registry.invalid/dc-twin/never-pulled:0
+              resources: { limits: { nvidia.com/gpu: "@GPUS@" } }

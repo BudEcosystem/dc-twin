@@ -1,0 +1,13 @@
+# Namespaces KAI's and KRM's components use, as their charts create them. Project namespaces
+# (kai-<project>) are created by KRM's project-controller.
+apiVersion: v1
+kind: Namespace
+metadata: { name: kai-scheduler }
+---
+apiVersion: v1
+kind: Namespace
+metadata: { name: kai-resource-reservation }
+---
+apiVersion: v1
+kind: Namespace
+metadata: { name: kai-resource-management }

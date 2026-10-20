@@ -1,0 +1,14 @@
+# A gang: KAI binds all @MIN@ pods or none (docs/batch/README.md, External PodGroups), inside one
+# domain of the `nvlink` Topology at the NVLink-clique level (docs/topology/README.md).
+apiVersion: scheduling.run.ai/v2alpha2
+kind: PodGroup
+metadata:
+  name: @NAME@
+  namespace: dc-twin-kai
+  labels: { kai.scheduler/queue: @QUEUE@ }
+spec:
+  queue: @QUEUE@
+  minMember: @MIN@
+  topologyConstraint:
+    topology: nvlink
+    requiredTopologyLevel: nvidia.com/gpu.clique

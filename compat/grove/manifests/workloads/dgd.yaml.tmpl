@@ -1,0 +1,62 @@
+# A disaggregated vLLM graph for the Dynamo operator, in the shape of Dynamo's
+# examples/backends/vllm/deploy/disagg-multinode.yaml at v1.5.1: a frontend, a two-node prefill
+# worker and a two-node decode worker, here at four GPUs per node (tensor parallel 8) on GB300
+# trays, the whole graph required in one NVLink domain (spec.topologyConstraint on the `nvlink`
+# ClusterTopologyBinding), queued on KAI's `serving` queue. With Grove enabled the operator renders
+# it as a PodCliqueSet. Workers leave a Node that stops being Ready after 10 s. run.sh fills @NAME@.
+# The image carries a semantic-version tag (Dynamo's webhook requires one) and is never pulled: no
+# kubelet runs behind the twin's Nodes, so no model loads; what is tested is the rendering and the
+# placement.
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: @NAME@
+  namespace: dc-twin-serving
+  annotations: { nvidia.com/kai-scheduler-queue: serving }
+spec:
+  backendFramework: vllm
+  topologyConstraint: { clusterTopologyName: nvlink, packDomain: nvlink-domain }
+  components:
+    - name: Frontend
+      type: frontend
+      replicas: 1
+      podTemplate:
+        spec:
+          nodeSelector: { nvidia.com/gpu.product: NVIDIA-GB300 }
+          containers:
+            - name: main
+              image: registry.invalid/dc-twin/vllm-runtime:1.5.1
+              command: [python3, -m, dynamo.frontend]
+              args: [--http-port, "8000"]
+    - name: prefill
+      type: prefill
+      replicas: 1
+      multinode: { nodeCount: 2 }
+      podTemplate:
+        spec:
+          nodeSelector: { nvidia.com/gpu.product: NVIDIA-GB300 }
+          tolerations:
+            - { key: node.kubernetes.io/not-ready, operator: Exists, effect: NoExecute, tolerationSeconds: 10 }
+            - { key: node.kubernetes.io/unreachable, operator: Exists, effect: NoExecute, tolerationSeconds: 10 }
+          containers:
+            - name: main
+              image: registry.invalid/dc-twin/vllm-runtime:1.5.1
+              command: [python3, -m, dynamo.vllm]
+              args: [--model, Qwen/Qwen3-0.6B, --tensor-parallel-size, "8", --disaggregation-mode, prefill]
+              resources: { limits: { nvidia.com/gpu: "4" } }
+    - name: decode
+      type: decode
+      replicas: 1
+      multinode: { nodeCount: 2 }
+      podTemplate:
+        spec:
+          nodeSelector: { nvidia.com/gpu.product: NVIDIA-GB300 }
+          tolerations:
+            - { key: node.kubernetes.io/not-ready, operator: Exists, effect: NoExecute, tolerationSeconds: 10 }
+            - { key: node.kubernetes.io/unreachable, operator: Exists, effect: NoExecute, tolerationSeconds: 10 }
+          containers:
+            - name: main
+              image: registry.invalid/dc-twin/vllm-runtime:1.5.1
+              command: [python3, -m, dynamo.vllm]
+              args: [--model, Qwen/Qwen3-0.6B, --tensor-parallel-size, "8", --disaggregation-mode, decode]
+              resources: { limits: { nvidia.com/gpu: "4" } }

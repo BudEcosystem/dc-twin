@@ -88,8 +88,11 @@ as `other`.
 | `event.subscribe` · `event.sse` | EventService |
 | `console.setup` · `console.sol` | Serial console settings; SOL |
 | `tpm.clear` | OEM or Bios TPM clear |
+| `certificate.read` · `certificate.install` · `certificate.delete` · `certificate.csr` · `certificate.replace` | CertificateService, Truststore, CSRs, ReplaceCertificate (D51) |
+| `firmware.update.push` | An image pushed to UpdateService's push URI (a BFB to a BlueField BMC) |
+| `dpu.rshim.set` · `dpu.mode.set` | BlueField OEM: rshim enable, DPU/NIC mode (D51) |
 | `media.insert` · `media.eject` | VirtualMedia |
-| `bmc.reset` · `bmc.defaults` | Manager.Reset, ResetToDefaults |
+| `bmc.reset` · `bmc.defaults` · `bmc.clock` | Manager.Reset, ResetToDefaults; Manager `DateTime` set |
 | `network.read` | Manager and System EthernetInterfaces, NetworkDeviceFunctions, Ports |
 | `erase.start` | SecureErase, Drive.SecureErase |
 | `other` | anything unmapped |

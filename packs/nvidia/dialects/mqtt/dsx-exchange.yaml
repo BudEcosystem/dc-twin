@@ -1,0 +1,13 @@
+apiVersion: dc-twin/v1alpha1
+kind: TopicDialect
+metadata: { name: nvidia/dsx-exchange, version: 0.1.0 }
+spec:
+  value: "BMS/v1/PUB/Value/{objectType}/{pointType}/{tagPath}"
+  metadata: "BMS/v1/PUB/Metadata/{objectType}/{pointType}/{tagPath}"
+  heartbeat: "BMS/v1/PUB/Value/System/HeartbeatTimestampBms/{site}/bms"
+  pointTypes: [RackLeakDetect, RackLeakSensorFault, RackLeakDetectTray, RackPower, RackLiquidSupplyTemperature, RackLiquidReturnTemperature, RackLiquidFlow, RackLiquidIsolationStatus, RackElectricalIsolationStatus, RackLiquidIsolationRequest, RackElectricalIsolationRequest]
+  requests:
+    - { pointType: RackElectricalIsolationRequest, effect: electrical, status: RackElectricalIsolationStatus, delaySeconds: 5 }
+    - { pointType: RackLiquidIsolationRequest, effect: liquid, status: RackLiquidIsolationStatus, delaySeconds: 5 }
+  isNot: ["Publishes the Rack, CDU and System points the twin's facility model has; BACnet and Modbus field protocols are not modelled.", "Value messages are {value, timestamp, quality}; metadata carries rackLocationId, rackLocationName, objectType and pointType."]
+  sources: [{ what: "BMS AsyncAPI 1.0.0", url: "https://github.com/dsx-ai-factory/dsx-exchange/tree/main/schemas/asyncapi", date: 2026-10-18 }]

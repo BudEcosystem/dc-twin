@@ -1,0 +1,81 @@
+apiVersion: dc-twin/v1alpha1
+kind: DeviceProfile
+metadata: { name: generic/pdu-3ph-24, version: 0.1.0 }
+spec:
+  class: pdu
+  form: { mounting: zero-u, units: 0 }
+  identity: { serialFormat: "PD{digits:10}", macOUI: "02:dc:20", manufacturer: "dc-twin", model: "3-phase switched PDU, 24 outlets" }
+  bmc: { dialect: generic/dmtf-pdu }
+  ports:
+    - { name: mgmt0, kind: ethernet, speed: 1G, role: management }
+    - { name: inlet, kind: power-in, source: feed }
+    - { name: "outlet{1..24}", kind: power-out }
+  power: { standbyW: 10, idleW: 10, maxW: 15, outputW: 34500 }
+  cooling: { kind: none }
+  sensors:
+    - { name: power, quantity: power, unit: W, source: output-power }
+    - { name: current, quantity: current, unit: A, warn: 50, crit: 60, source: output-current }
+  snmp: { mib: generic/apc-rpdu2, outlets: 24 }
+  faults: [generic/power]
+  fidelity: { model: {} }
+  provides: [{ capability: "facility/pdu-snmp:generic/apc-rpdu2", at: [model] }, { capability: "redfish/dialect:generic/dmtf-pdu", at: [model] }]
+  isNot: ["Outlet metering is the sum of the modelled draws, not a measurement."]
+  sources: [{ what: "outlet count and rating", url: "https://www.apc.com/us/en/product-range/61799-apc-rack-pdu-9000-switched/", date: 2026-10-18 }]
+---
+apiVersion: dc-twin/v1alpha1
+kind: DeviceProfile
+metadata: { name: generic/cdu-inrow, version: 0.1.0 }
+spec:
+  class: cdu
+  form: { mounting: rack, units: 42 }
+  identity: { serialFormat: "CDU{digits:8}", manufacturer: "dc-twin", model: "In-row CDU" }
+  components:
+    - { name: pump, kind: pump, count: 2, model: "variable speed" }
+    - { name: valve, kind: valve, count: 1, model: "isolation" }
+  ports:
+    - { name: mgmt0, kind: ethernet, speed: 1G, role: management }
+    - { name: supply, kind: coolant-out }
+    - { name: return, kind: coolant-in }
+  power: { standbyW: 50, idleW: 1500, maxW: 4000 }
+  cooling: { kind: none }
+  sensors:
+    - { name: supply-temp, quantity: temperature, unit: C, warn: 40, crit: 45, source: loop-supply }
+    - { name: return-temp, quantity: temperature, unit: C, warn: 55, crit: 60, source: loop-return }
+    - { name: flow, quantity: flow, unit: L/min, source: loop-flow }
+    - { name: leak, quantity: leak, source: leak-point }
+  bms:
+    objectType: CDU
+    points:
+      - { name: supply, pointType: SupplyTemperature, sensor: supply-temp }
+      - { name: return, pointType: ReturnTemperature, sensor: return-temp }
+      - { name: flow, pointType: Flow, sensor: flow }
+      - { name: leak, pointType: LeakDetect, sensor: leak }
+  faults: [generic/thermal, generic/leak]
+  fidelity: { model: {} }
+  provides: [{ capability: "facility/bms:nvidia/dsx-exchange", at: [model] }]
+  isNot: ["No fluid model: supply temperature and flow are first-order targets."]
+  sources: [{ what: "BMS point types", url: "https://github.com/dsx-ai-factory/dsx-exchange", date: 2026-10-18 }]
+---
+apiVersion: dc-twin/v1alpha1
+kind: DeviceProfile
+metadata: { name: generic/leak-point, version: 0.1.0 }
+spec:
+  class: sensor
+  form: { mounting: none }
+  identity: { serialFormat: "LP{digits:8}", manufacturer: "dc-twin", model: "Rack leak rope" }
+  ports: []
+  power: { standbyW: 0, idleW: 0, maxW: 1 }
+  cooling: { kind: none }
+  sensors:
+    - { name: leak, quantity: leak, source: leak-point }
+    - { name: sensor-fault, quantity: state, source: sensor-fault }
+  bms:
+    objectType: Rack
+    points:
+      - { name: leak, pointType: RackLeakDetect, sensor: leak }
+      - { name: fault, pointType: RackLeakSensorFault, sensor: sensor-fault }
+  faults: [generic/leak]
+  fidelity: { model: {} }
+  provides: [{ capability: "facility/bms:nvidia/dsx-exchange", at: [model] }]
+  isNot: ["A rope or drip-pan point: on or off, no position along the rope."]
+  sources: [{ what: "point types the NICo consumer reads", url: "https://github.com/dsx-ai-factory/infra-controller/tree/main/crates/dsx-exchange-consumer", date: 2026-10-18 }]

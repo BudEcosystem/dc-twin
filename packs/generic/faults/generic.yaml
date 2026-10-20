@@ -1,0 +1,205 @@
+apiVersion: dc-twin/v1alpha1
+kind: FaultCatalogue
+metadata: { name: generic/power, version: 0.1.0 }
+spec:
+  isNot: ["Electrical transients are not modelled: a source is delivering or it is not."]
+  faults:
+    - name: psu-failure
+      title: "Power supply failed"
+      target: { component: psu }
+      effects:
+        - set: { health: Critical, state: offline }
+        - redfish.logEntry: { severity: Critical, message: "Power supply {component} failed.", messageId: "PowerEvent.1.0.PowerSupplyFailure" }
+      clears: { on: [component.replaced], manual: true }
+      isNot: ["The remaining PSU does not report load sharing."]
+    - name: output-loss
+      title: "Power source output lost (shelf, PDU)"
+      target: { device: power-shelf }
+      effects:
+        - set: { health: Critical, output: "off" }
+        - power.loss: {}
+        - redfish.logEntry: { severity: Critical, message: "Output lost.", messageId: "PowerEvent.1.0.OutputLost" }
+      clears: { on: [device.acCycle], manual: true }
+      isNot: []
+    - name: pdu-failure
+      title: "PDU failed"
+      target: { device: pdu }
+      effects:
+        - set: { health: Critical, output: "off" }
+        - power.loss: {}
+      clears: { manual: true }
+      isNot: []
+    - name: outlet-off
+      title: "PDU outlet switched off out of band"
+      target: { device: pdu }
+      params: { outlet: { type: int, default: 1, range: [1, 48] } }
+      effects:
+        - set: { "outlet.{outlet}": "off" }
+        - power.loss: {}
+      clears: { manual: true }
+      isNot: []
+---
+apiVersion: dc-twin/v1alpha1
+kind: FaultCatalogue
+metadata: { name: generic/bmc, version: 0.1.0 }
+spec:
+  isNot: ["BMC faults change how the BMC answers; the host keeps its state."]
+  faults:
+    - name: unreachable
+      title: "BMC unreachable"
+      target: { deviceWith: bmc }
+      effects: [{ set: { bmc: unavailable } }]
+      clears: { on: [device.acCycle], manual: true }
+      isNot: ["The BMC's switch port stays up, as a hung BMC's usually does."]
+    - name: slow
+      title: "BMC slow to answer"
+      target: { deviceWith: bmc }
+      params: { latencyMs: { type: int, default: 3000, range: [100, 60000] } }
+      effects: [{ set: { "bmc.latencyMs": "{latencyMs}" } }]
+      clears: { manual: true }
+      isNot: []
+    - name: errors
+      title: "BMC answers 500 to a share of requests"
+      target: { deviceWith: bmc }
+      params: { rate: { type: int, default: 50, range: [1, 100] } }
+      effects: [{ set: { "bmc.errorPercent": "{rate}" } }]
+      clears: { manual: true }
+      isNot: []
+    - name: reset
+      title: "BMC resets itself"
+      target: { deviceWith: bmc }
+      effects: [{ set: { bmc: resetting } }]
+      clears: { after: 60s, manual: true }
+      isNot: []
+    - name: password-change-required
+      title: "The factory password must be changed before the BMC grants access"
+      target: { deviceWith: bmc }
+      effects: [{ set: { "account.passwordChangeRequired": "factory" } }]
+      clears: { manual: true }
+      isNot: ["The flag stays until the password is changed through AccountService, as on a BMC; clearing the fault does not lift it."]
+    - name: credentials-changed
+      title: "BMC password changed out of band"
+      target: { deviceWith: bmc }
+      effects: [{ set: { "account.rotate": "factory" } }]
+      clears: { manual: true }
+      isNot: ["Clearing the fault does not restore the old password, as on a real BMC."]
+---
+apiVersion: dc-twin/v1alpha1
+kind: FaultCatalogue
+metadata: { name: generic/thermal, version: 0.1.0 }
+spec:
+  isNot: ["Temperatures are first-order targets, not a thermal simulation."]
+  faults:
+    - name: fan-failure
+      title: "Fan failed"
+      target: { component: fan }
+      effects:
+        - set: { health: Critical, state: offline }
+        - set: { "device.sensorOffset.inlet": 8, "device.sensorOffset.cpu-max": 12 }
+      clears: { on: [component.replaced], manual: true }
+      isNot: []
+    - name: inlet-rise
+      title: "Inlet temperature rise"
+      target: { device: server }
+      params: { deltaC: { type: int, default: 15, range: [1, 40] } }
+      effects: [{ set: { "sensorOffset.inlet": "{deltaC}", "sensorOffset.cpu-max": "{deltaC}", "sensorOffset.gpu-max": "{deltaC}" } }]
+      clears: { manual: true }
+      isNot: []
+    - name: cdu-flow-loss
+      title: "CDU flow lost"
+      target: { device: cdu }
+      effects:
+        - set: { health: Critical, "loop.flow": false }
+        - bms: { point: flow, value: 0 }
+      clears: { manual: true }
+      isNot: ["Coolant temperature rises at a fixed rate toward the trays' heat load."]
+    - name: coolant-excursion
+      title: "Coolant supply temperature excursion"
+      target: { device: cdu }
+      params: { deltaC: { type: int, default: 20, range: [1, 40] } }
+      effects: [{ set: { health: Warning, "loop.supplyOffsetC": "{deltaC}" } }]
+      clears: { manual: true }
+      isNot: []
+---
+apiVersion: dc-twin/v1alpha1
+kind: FaultCatalogue
+metadata: { name: generic/leak, version: 0.1.0 }
+spec:
+  isNot: ["No fluid model; propagation is the rack format's rule."]
+  faults:
+    - name: tray-detector
+      title: "In-tray leak detector trips"
+      target: { deviceWith: leak-detector }
+      params: { detector: { type: int, default: 0, range: [0, 7] } }
+      effects:
+        - set: { "sensor.leak": 1, health: Critical }
+        - redfish.logEntry: { severity: Critical, message: "Leak detected by detector {detector}.", messageId: "EnvironmentalEvent.1.0.LeakDetected" }
+      clears: { manual: true }
+      isNot: ["Every detector of the tray reports the leak; the twin does not place a leak on one cold plate."]
+    - name: rack-point
+      title: "Rack leak point (rope, drip pan) detects a leak"
+      target: { device: sensor }
+      effects:
+        - set: { "sensor.leak": 1 }
+        - bms: { point: leak, value: true }
+        - propagate: leak
+      clears: { manual: true }
+      isNot: []
+    - name: rack-point-fault
+      title: "Rack leak sensor fault"
+      target: { device: sensor }
+      effects:
+        - set: { "sensor.sensor-fault": 1 }
+        - bms: { point: fault, value: true }
+      clears: { manual: true }
+      isNot: []
+    - name: cdu-leak
+      title: "CDU leak point"
+      target: { device: cdu }
+      effects:
+        - set: { "sensor.leak": 1, health: Critical }
+        - bms: { point: leak, value: true }
+      clears: { manual: true }
+      isNot: []
+---
+apiVersion: dc-twin/v1alpha1
+kind: FaultCatalogue
+metadata: { name: generic/link, version: 0.1.0 }
+spec:
+  isNot: ["Links carry state only; no frames are lost or corrupted on the data path."]
+  faults:
+    - name: cable-pulled
+      title: "Cable pulled"
+      target: { port: true }
+      effects: [{ link: { state: down } }]
+      clears: { on: [cable.replaced], manual: true }
+      isNot: []
+    - name: crc-errors
+      title: "CRC errors on a port"
+      target: { port: true }
+      params: { perMinute: { type: int, default: 120, range: [1, 100000] } }
+      effects: [{ counter: { crcErrors: "+{perMinute}" } }]
+      clears: { manual: true }
+      isNot: []
+---
+apiVersion: dc-twin/v1alpha1
+kind: FaultCatalogue
+metadata: { name: generic/firmware, version: 0.1.0 }
+spec:
+  isNot: ["Firmware is a version string per component; nothing is flashed."]
+  faults:
+    - name: version-drift
+      title: "Firmware drifts from baseline"
+      target: { deviceWith: firmware }
+      params:
+        component: { type: string, default: bmc }
+        version:   { type: string, default: "0.0.1-drift" }
+      effects: [{ set: { "firmware.{component}": "{version}" } }]
+      clears: { on: [firmware.applied], manual: true }
+      isNot: []
+    - name: update-fails
+      title: "The next firmware update fails"
+      target: { deviceWith: firmware }
+      effects: [{ set: { "firmware.failNext": true } }]
+      clears: { manual: true }
+      isNot: []

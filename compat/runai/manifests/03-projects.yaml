@@ -1,0 +1,63 @@
+# Two Run:ai projects (KRM Projects, as Run:ai's cluster agent writes them from the control plane's
+# org units). llm-train trains on the NVL72 pools, GB300 first; serving runs inference on H100 with a
+# hard limit of 16 GPUs there, and may also use GB200. Each gets a namespace (kai-<project>) whose
+# pods admission puts on KAI and charges to the project's queue for the pool it lands in.
+apiVersion: kai.resources/v1alpha1
+kind: Project
+metadata: { name: llm-train }
+spec:
+  parent: ai
+  enforceKaiScheduler: true
+  defaultNodePools: [gb300, gb200]
+  queues:
+    - name: llm-train
+      nodepool: default
+      priority: 100
+      resources: &cpuonly
+        gpu: { deserved: 0, limit: 0, overQuotaWeight: 0 }
+        cpu: { deserved: -1, limit: -1, overQuotaWeight: 1 }
+        memory: { deserved: -1, limit: -1, overQuotaWeight: 1 }
+    - name: llm-train-gb300
+      nodepool: gb300
+      priority: 100
+      resources:
+        gpu: { deserved: 72, limit: 72, overQuotaWeight: 1 }
+        cpu: { deserved: -1, limit: -1, overQuotaWeight: 1 }
+        memory: { deserved: -1, limit: -1, overQuotaWeight: 1 }
+    - name: llm-train-gb200
+      nodepool: gb200
+      priority: 100
+      resources:
+        gpu: { deserved: 36, limit: 72, overQuotaWeight: 1 }
+        cpu: { deserved: -1, limit: -1, overQuotaWeight: 1 }
+        memory: { deserved: -1, limit: -1, overQuotaWeight: 1 }
+---
+apiVersion: kai.resources/v1alpha1
+kind: Project
+metadata: { name: serving }
+spec:
+  parent: ai
+  enforceKaiScheduler: true
+  defaultNodePools: [h100]
+  queues:
+    - name: serving
+      nodepool: default
+      priority: 100
+      resources:
+        gpu: { deserved: 0, limit: 0, overQuotaWeight: 0 }
+        cpu: { deserved: -1, limit: -1, overQuotaWeight: 1 }
+        memory: { deserved: -1, limit: -1, overQuotaWeight: 1 }
+    - name: serving-h100
+      nodepool: h100
+      priority: 100
+      resources:
+        gpu: { deserved: 8, limit: 16, overQuotaWeight: 1 }
+        cpu: { deserved: -1, limit: -1, overQuotaWeight: 1 }
+        memory: { deserved: -1, limit: -1, overQuotaWeight: 1 }
+    - name: serving-gb200
+      nodepool: gb200
+      priority: 100
+      resources:
+        gpu: { deserved: 8, limit: 16, overQuotaWeight: 1 }
+        cpu: { deserved: -1, limit: -1, overQuotaWeight: 1 }
+        memory: { deserved: -1, limit: -1, overQuotaWeight: 1 }

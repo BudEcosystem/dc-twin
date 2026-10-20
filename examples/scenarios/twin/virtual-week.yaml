@@ -1,0 +1,14 @@
+# Twin-only, on the virtual clock: a week of fleet behaviour with seeded random BMC and PSU
+# faults runs in seconds and replays exactly with the same seed (D22).
+apiVersion: dc-twin/v1alpha1
+kind: Scenario
+metadata: { name: virtual-week }
+spec:
+  estate: { requires: { clock: virtual } }
+  stack: {}
+  timeout: 10m
+  chaos: { enabled: true, ratePerDeviceHour: 0.002, faults: [generic/bmc/reset] }
+  steps:
+    - act: { clock: 168h }
+    - expect: { within: 1s, all: [{ model: { expr: 'events.count({"kind": "fault"}) > 0' } }] }
+  report: fidelity

@@ -1,0 +1,21 @@
+# A static DPU cluster (DPF's e2e infrastructure objects, test/objects/infrastructure/
+# dpucluster.yaml): the harness's second kube-apiserver, whose admin kubeconfig DPF reads from
+# the secret's super-admin.conf.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: dpu-cluster-1-admin-kubeconfig
+  namespace: dpf-operator-system
+type: Opaque
+data:
+  super-admin.conf: @DPU_KUBECONFIG_B64@
+---
+apiVersion: provisioning.dpu.nvidia.com/v1alpha1
+kind: DPUCluster
+metadata:
+  name: dpu-cluster-1
+  namespace: dpf-operator-system
+spec:
+  type: static
+  maxNodes: 1000
+  kubeconfig: dpu-cluster-1-admin-kubeconfig

@@ -1,0 +1,11 @@
+apiVersion: bmc.tinkerbell.org/v1alpha1
+kind: Job
+metadata:
+  name: @JOB@
+  namespace: dctwin
+spec:
+  machineRef:
+    name: @MACHINE@
+    namespace: dctwin
+  tasks:
+    - powerAction: "on"

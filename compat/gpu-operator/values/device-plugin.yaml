@@ -1,0 +1,11 @@
+# NVIDIA k8s-device-plugin v0.19.3 with GPU Feature Discovery: the release the GPU Operator
+# v26.3.3 deploys as its device-plugin and GFD operands (its values.yaml), installed from the
+# device plugin's own chart (see README: why not the whole operator).
+nvidiaDriverRoot: /var/lib/nvml-mock/driver   # Mokka's staged driver tree
+deviceDiscoveryStrategy: nvml                 # discover through NVML, the interface Mokka implements
+compatWithCPUManager: true                    # PASS_DEVICE_SPECS: Mokka's NRI plugin recognises the allocation by its device specs
+gfd:
+  enabled: true
+nfd:
+  enabled: false                              # NFD is installed on its own, at Mokka's pin (values/nfd.yaml)
+nodeSelector: { dc-twin.io/host: container }

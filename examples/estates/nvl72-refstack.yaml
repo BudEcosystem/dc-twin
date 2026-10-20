@@ -1,0 +1,39 @@
+# One GB300 NVL72 rack, its network rack and its cooling loop, with a stack installed: the
+# reference stack (cmd/refstack) serves the BMC network's DHCP (relayed by the twin relay with
+# option 82) and hosts the broker the twin's BMS publishes DSX Exchange points to. Run
+# refstack first; scenarios read it through its declared accessors.
+apiVersion: dc-twin/v1alpha1
+kind: Estate
+metadata: { name: nvl72-refstack }
+spec:
+  seed: 1729
+  clock: wall
+  timeScale: 0.05
+  packs: [generic@0.1.0, nvidia@0.1.0, liteon@0.1.0]
+  sites:
+    - name: site-1
+      halls:
+        - name: hall-a
+          rows:
+            - name: a
+              positions: 10
+              racks:
+                - { name: a03, position: 3, format: nvidia/gb300-nvl72, feeds: [A, B] }
+                - { name: a10, position: 10, format: generic/network-rack, params: { ufm: nvidia/ufm-appliance } }
+  networks:
+    oob:          { role: management,   dhcp: stack, cidr: 10.30.0.0/20, fabric: oob, server: "127.0.0.1:16767" }
+    provisioning: { role: provisioning, dhcp: twin,  cidr: 10.40.0.0/20, fabric: frontend }
+    frontend:     { role: frontend,     fabric: frontend }
+    backend:      { role: scale-out,    fabric: backend }
+    service:      { role: service,      cidr: 10.90.0.0/24, dhcp: none }
+  fabrics:
+    - { name: oob,      template: oob-flat,   nos: none }
+    - { name: frontend, template: clos-2tier, nos: none, params: { leafsPerRack: 2, spines: 2 }, placeIn: a10 }
+    - { name: backend,  template: rail-optimised, nos: none, technology: infiniband, manager: nvidia/ufm, params: { rails: 4 }, select: a03, placeIn: a10 }
+  facility:
+    power: { feeds: [{ name: A, capacityW: 300000 }, { name: B, capacityW: 300000 }] }
+    cooling: { loops: [{ name: cdu-1, profile: generic/cdu-inrow, racks: [a03], capacityKW: 200 }] }
+    bms: { dialect: nvidia/dsx-exchange, broker: "127.0.0.1:18830" }
+  stacks:
+    - name: reference@0.1.0
+      outputs: { refstack: "http://127.0.0.1:18080", dhcpServer: "127.0.0.1:16767", exchangeBroker: "127.0.0.1:18830" }

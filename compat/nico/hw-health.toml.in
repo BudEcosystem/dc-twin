@@ -1,0 +1,81 @@
+# NICo's hardware-health service (crates/health, forge-hw-health): discovers the BMCs of the
+# machines, switches and power shelves nico-api knows, polls their sensors and in-tray leak
+# detectors over Redfish (through the twin's site gateway, HTTPS_PROXY), and submits health
+# reports to nico-api, under its SPIFFE identity (nico-api issues BMC credentials only to
+# service identities). Filled by run.sh.
+bmc_request_concurrency = 4
+endpoint_discovery_interval = "30s"
+
+[endpoint_sources.nico_api]
+root_ca = "@WORK@/certs/ca.crt"
+client_cert = "@WORK@/certs/nico-hardware-health.crt"
+client_key = "@WORK@/certs/nico-hardware-health.key"
+api_url = "https://localhost:@API_PORT@"
+
+[collectors.reachability]
+enabled = true
+interval = "15s"
+timeout = "3s"
+log_mode = "unreachable"
+
+[collectors.sensors]
+sensor_fetch_interval = "30s"
+include_sensor_thresholds = true
+
+[collectors.leak_detector]
+poll_interval = "15s"
+state_refresh_interval = "5m"
+
+[collectors.logs]
+enabled = false
+
+[collectors.nmxc]
+enabled = false
+
+[processors.leak_detection]
+enabled = true
+minimum_alerts_per_report = 1
+
+[processors.rack_leak]
+leaking_tray_threshold = 2
+
+[sinks.tracing]
+enabled = true
+
+[sinks.prometheus]
+enabled = true
+
+[sinks.health_report]
+root_ca = "@WORK@/certs/ca.crt"
+client_cert = "@WORK@/certs/nico-hardware-health.crt"
+client_key = "@WORK@/certs/nico-hardware-health.key"
+api_url = "https://localhost:@API_PORT@"
+workers = 4
+skip_empty_reports = false
+
+[sinks.rack_health_report]
+root_ca = "@WORK@/certs/ca.crt"
+client_cert = "@WORK@/certs/nico-hardware-health.crt"
+client_key = "@WORK@/certs/nico-hardware-health.key"
+api_url = "https://localhost:@API_PORT@"
+workers = 2
+skip_empty_reports = false
+
+[sinks.switch_health_report]
+root_ca = "@WORK@/certs/ca.crt"
+client_cert = "@WORK@/certs/nico-hardware-health.crt"
+client_key = "@WORK@/certs/nico-hardware-health.key"
+api_url = "https://localhost:@API_PORT@"
+workers = 2
+skip_empty_reports = false
+
+[sinks.power_shelf_health_report]
+root_ca = "@WORK@/certs/ca.crt"
+client_cert = "@WORK@/certs/nico-hardware-health.crt"
+client_key = "@WORK@/certs/nico-hardware-health.key"
+api_url = "https://localhost:@API_PORT@"
+workers = 2
+skip_empty_reports = false
+
+[metrics]
+endpoint = "127.0.0.1:@HEALTH_METRICS_PORT@"

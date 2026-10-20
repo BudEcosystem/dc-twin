@@ -1,0 +1,48 @@
+# Two ClusterQueues. `nvl72` holds the rack-scale GPUs (topology-aware: GB300 first, then GB200),
+# with quota equal to what the racks have: 18 trays x 4 GPUs each. `accel` holds the 8-way
+# servers, one resource group per device plugin resource, with quota equal to the estate's
+# devices (4 H100 servers, 2 A100, 2 MI355X, 2 Gaudi 3). Quota is nominal: Kueue admits against
+# these numbers, not against which Nodes are Ready, except where TAS reads the Nodes.
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: ClusterQueue
+metadata: { name: nvl72 }
+spec:
+  namespaceSelector: {}
+  resourceGroups:
+    - coveredResources: [nvidia.com/gpu]
+      flavors:
+        - name: gb300
+          resources: [{ name: nvidia.com/gpu, nominalQuota: 72 }]
+        - name: gb200
+          resources: [{ name: nvidia.com/gpu, nominalQuota: 72 }]
+---
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: ClusterQueue
+metadata: { name: accel }
+spec:
+  namespaceSelector: {}
+  resourceGroups:
+    - coveredResources: [nvidia.com/gpu]
+      flavors:
+        - name: h100
+          resources: [{ name: nvidia.com/gpu, nominalQuota: 32 }]
+        - name: a100
+          resources: [{ name: nvidia.com/gpu, nominalQuota: 16 }]
+    - coveredResources: [amd.com/gpu]
+      flavors:
+        - name: mi355x
+          resources: [{ name: amd.com/gpu, nominalQuota: 16 }]
+    - coveredResources: [habana.ai/gaudi]
+      flavors:
+        - name: gaudi3
+          resources: [{ name: habana.ai/gaudi, nominalQuota: 16 }]
+---
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: LocalQueue
+metadata: { name: training, namespace: dc-twin-kueue }
+spec: { clusterQueue: nvl72 }
+---
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: LocalQueue
+metadata: { name: inference, namespace: dc-twin-kueue }
+spec: { clusterQueue: accel }

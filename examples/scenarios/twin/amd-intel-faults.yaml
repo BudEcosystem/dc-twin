@@ -1,0 +1,33 @@
+# The AMD and Intel packs: an uncorrectable ECC error on an Instinct MI355X shows in the
+# accelerator's health, the server's Redfish health and the SEL; integrated RoCE ports going down
+# on a Gaudi 3 take that accelerator's 21 in-node links down and degrade the server's scale-up
+# domain. Both clear on a reset.
+apiVersion: dc-twin/v1alpha1
+kind: Scenario
+metadata: { name: amd-intel-faults }
+spec:
+  estate: { requires: { formats: [generic/oam-8gpu, generic/gaudi3-8] } }
+  stack: {}
+  timeout: 5m
+  steps:
+    - fault: { id: ras, select: "b03/server-01/gpu-3", inject: amd/ras/uncorrectable-ecc }
+    - expect:
+        within: 5s
+        all:
+          - redfish: { select: "b03/server-01", property: "Systems/1/Status.Health", equals: Critical }
+          - model:   { expr: 'model.device("b03/server-01").components.filter(c, c.name == "gpu-3")[0].counters["ras.ue"] == 1.0' }
+          - event:   { field: log.SEL, on: "b03/server-01" }
+          - domain:  { path: "b03/server-01/domain/scale-up", state: degraded }
+    - fault: { id: roce, select: "b04/server-02/hpu-5", inject: intel/gaudi/roce-port-down }
+    - expect:
+        within: 5s
+        all:
+          - model: { expr: 'model.device("b04/server-02").health == "Warning"' }
+          - event: { field: ports, to: "21 ports down", on: "b04/server-02/hpu-5" }
+    - act: { power: ForceRestart, select: "b03/server-01 b04/server-02" }
+    - expect:
+        within: 20s
+        all:
+          - faults: { select: "b03/server-01/** b04/server-02/**", count: 0 }
+          - model: { expr: 'model.device("b03/server-01").health == "OK" && model.device("b04/server-02").health == "OK"' }
+  report: fidelity

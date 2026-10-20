@@ -1,0 +1,30 @@
+# Kueue's Configuration: its own (config/components/manager/controller_manager_config.yaml) with what a
+# process on loopback needs instead of a pod: loopback ports, no leader election, metrics off, and
+# the webhook certificate directory under $WORK. Internal certificate management stays on, as in
+# the release: Kueue's cert rotator issues the webhook certificate for kueue-webhook-service.
+# kueue-system.svc and injects the CA into the webhook configurations and CRD conversion stanzas.
+# Integrations: batch/job only (the other frameworks' CRDs are not installed).
+apiVersion: config.kueue.x-k8s.io/v1beta2
+kind: Configuration
+namespace: kueue-system
+clientConnection: { qps: 300, burst: 500 }
+controller:
+  groupKindConcurrency:
+    ClusterQueue.kueue.x-k8s.io: 5
+    Cohort.kueue.x-k8s.io: 1
+    Job.batch: 5
+    LocalQueue.kueue.x-k8s.io: 5
+    Pod: 5
+    ResourceFlavor.kueue.x-k8s.io: 1
+    Workload.kueue.x-k8s.io: 10
+health: { healthProbeBindAddress: "127.0.0.1:@HEALTH_PORT@" }
+metrics: { bindAddress: "0" }
+webhook: { host: 127.0.0.1, port: @WEBHOOK_PORT@, certDir: "@CERT_DIR@" }
+leaderElection: { leaderElect: false }
+internalCertManagement:
+  enable: true
+  webhookServiceName: kueue-webhook-service
+  webhookSecretName: kueue-webhook-server-cert
+visibilityServer: { bindAddress: 127.0.0.1, bindPort: @VISIBILITY_PORT@ }
+integrations:
+  frameworks: [batch/job]

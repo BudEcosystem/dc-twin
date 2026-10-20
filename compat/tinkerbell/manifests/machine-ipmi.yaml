@@ -1,0 +1,22 @@
+# A Rufio Machine reaching the same twin BMC over IPMI 2.0 RMCP+ (bmclib's ipmitool provider, which
+# runs the ipmitool binary on PATH with -I lanplus). The port goes in providerOptions.ipmitool.port.
+apiVersion: bmc.tinkerbell.org/v1alpha1
+kind: Machine
+metadata:
+  name: @MACHINE@
+  namespace: dctwin
+  labels:
+    dc-twin/protocol: ipmi
+  annotations:
+    dc-twin/device: "@DEVICE@"
+spec:
+  connection:
+    host: "@HOST@"
+    insecureTLS: true
+    authSecretRef:
+      name: @SECRET@
+      namespace: dctwin
+    providerOptions:
+      preferredOrder: [ipmitool]
+      ipmitool:
+        port: @PORT@

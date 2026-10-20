@@ -1,0 +1,451 @@
+// Package control is the control API (docs/spec/09-runtime.md — Control API): the only way into
+// the engine for the CLI, the console and scripts. It binds to loopback, requires the estate's
+// token, and is on no network the software under test can reach (15).
+package control
+
+import (
+	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/BudEcosystem/dc-twin/internal/adapter"
+	"github.com/BudEcosystem/dc-twin/internal/engine"
+	"github.com/BudEcosystem/dc-twin/internal/model"
+	"github.com/BudEcosystem/dc-twin/internal/report"
+	"github.com/BudEcosystem/dc-twin/internal/scenario"
+	"github.com/BudEcosystem/dc-twin/internal/schema"
+	"github.com/BudEcosystem/dc-twin/internal/selector"
+	"github.com/BudEcosystem/dc-twin/internal/twin"
+)
+
+// Info is what `up` writes to the state directory for clients.
+type Info struct {
+	Addr     string `json:"addr"`
+	Token    string `json:"token"`
+	Estate   string `json:"estate"`
+	StateDir string `json:"stateDir"`
+	PID      int    `json:"pid"`
+	Gateway  string `json:"gateway"`
+}
+
+type Server struct {
+	T      *twin.Twin
+	Info   Info
+	srv    *http.Server
+	Static http.Handler // the console bundle, when served
+	// Down is closed when a client asks the estate to come down.
+	Down chan struct{}
+}
+
+// Serve starts the API on addr (loopback) and writes control.json to the state directory.
+func Serve(t *twin.Twin, addr string, static http.Handler) (*Server, error) {
+	if addr == "" {
+		addr = "127.0.0.1:0"
+	}
+	host, _, _ := net.SplitHostPort(addr)
+	if ip := net.ParseIP(host); ip == nil || !ip.IsLoopback() {
+		return nil, fmt.Errorf("the control API binds to loopback only (15); %s is not", addr)
+	}
+	l, err := net.Listen("tcp", addr)
+	if err != nil {
+		return nil, err
+	}
+	tok := make([]byte, 16)
+	_, _ = rand.Read(tok)
+	s := &Server{T: t, Static: static, Info: Info{Addr: l.Addr().String(), Token: hex.EncodeToString(tok), Estate: t.Estate.Metadata.Name,
+		StateDir: t.Runtime.StateDir, PID: os.Getpid(), Gateway: t.Net.Gateway}, Down: make(chan struct{})}
+	b, _ := json.MarshalIndent(s.Info, "", "  ")
+	if err := os.WriteFile(filepath.Join(t.Runtime.StateDir, "control.json"), b, 0o600); err != nil {
+		return nil, err
+	}
+	s.srv = &http.Server{Handler: s, ReadHeaderTimeout: 10 * time.Second}
+	go s.srv.Serve(l)
+	return s, nil
+}
+
+func (s *Server) Close() {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_ = s.srv.Shutdown(ctx)
+}
+
+func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if !strings.HasPrefix(r.URL.Path, "/v1/") {
+		if s.Static != nil {
+			s.Static.ServeHTTP(w, r)
+			return
+		}
+		http.NotFound(w, r)
+		return
+	}
+	tok := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+	if tok == "" {
+		tok = r.URL.Query().Get("token")
+	}
+	if tok != s.Info.Token {
+		jsonErr(w, http.StatusUnauthorized, "a valid estate token is required")
+		return
+	}
+	eng := s.T.Engine
+	user := schema.EventSource{Class: "user", Principal: "control-api"}
+	p := strings.TrimPrefix(r.URL.Path, "/v1")
+	q := r.URL.Query()
+	var body map[string]any
+	if r.Method == http.MethodPost || r.Method == http.MethodPut {
+		data, _ := io.ReadAll(io.LimitReader(r.Body, 16<<20))
+		if strings.Contains(r.Header.Get("Content-Type"), "yaml") {
+			body = map[string]any{"_raw": string(data)}
+		} else {
+			_ = json.Unmarshal(data, &body)
+		}
+		if body == nil {
+			body = map[string]any{}
+		}
+	}
+	str := func(k string) string { v, _ := body[k].(string); return v }
+	switch {
+	case p == "/down" && r.Method == http.MethodPost:
+		writeJSON(w, map[string]any{"down": true})
+		select {
+		case <-s.Down:
+		default:
+			close(s.Down)
+		}
+	case p == "/status" && r.Method == http.MethodGet:
+		st := eng.Status()
+		st["gateway"] = s.T.Net.Gateway
+		st["warnings"] = s.T.Warnings
+		var adapters []string
+		for _, a := range s.T.Adapters {
+			adapters = append(adapters, a.Name())
+		}
+		st["adapters"] = adapters
+		writeJSON(w, st)
+	case p == "/devices" && r.Method == http.MethodGet:
+		views, err := eng.Select(q.Get("select"))
+		if err != nil {
+			jsonErr(w, 400, err.Error())
+			return
+		}
+		writeJSON(w, views)
+	case strings.HasPrefix(p, "/devices/") && r.Method == http.MethodGet:
+		path := strings.TrimPrefix(p, "/devices/")
+		ds, err := eng.SelectDevices(path)
+		if err != nil || len(ds) == 0 {
+			jsonErr(w, 404, "no device matches "+path)
+			return
+		}
+		writeJSON(w, eng.DeviceView(ds[0]))
+	case p == "/events" && r.Method == http.MethodGet:
+		since, _ := strconv.ParseUint(q.Get("since"), 10, 64)
+		filter := eventFilter(q)
+		evs := eng.Events(since, filter)
+		if n, _ := strconv.Atoi(q.Get("limit")); n > 0 && len(evs) > n {
+			evs = evs[len(evs)-n:]
+		}
+		writeJSON(w, evs)
+	case p == "/events/stream" && r.Method == http.MethodGet:
+		s.stream(w, r, eventFilter(q))
+	case p == "/power" && r.Method == http.MethodPost:
+		ds, err := eng.SelectDevices(str("select"))
+		if err != nil || len(ds) == 0 {
+			jsonErr(w, 400, "select matches no device")
+			return
+		}
+		canonical := map[string]string{"on": "power.on", "off": "power.off.force", "graceful": "power.off.graceful",
+			"restart": "power.restart", "cycle": "power.cycle", "ac-cycle": "ac.cycle"}[str("action")]
+		if canonical == "" {
+			jsonErr(w, 400, "action: on, off, graceful, restart, cycle or ac-cycle")
+			return
+		}
+		var errs []string
+		for _, d := range ds {
+			if err := eng.Power(engine.Request{Path: d.Path, Canonical: canonical, Source: user, Protocol: "control", Method: "POST", Target: "/v1/power"}); err != nil {
+				errs = append(errs, d.Path+": "+err.Error())
+			}
+		}
+		writeJSON(w, map[string]any{"devices": len(ds), "canonical": canonical, "errors": errs})
+	case p == "/faults" && r.Method == http.MethodGet:
+		writeJSON(w, eng.Faults(q.Get("select")))
+	case p == "/faults" && r.Method == http.MethodPost:
+		params, _ := body["params"].(map[string]any)
+		fs, err := eng.Inject(str("select"), str("fault"), params, str("id"), user)
+		if err != nil {
+			jsonErr(w, 400, err.Error())
+			return
+		}
+		writeJSON(w, fs)
+	case p == "/faults/clear" && r.Method == http.MethodPost:
+		n, err := eng.Clear(str("target"), str("fault"), user)
+		if err != nil {
+			jsonErr(w, 400, err.Error())
+			return
+		}
+		writeJSON(w, map[string]any{"cleared": n})
+	case p == "/chaos" && r.Method == http.MethodPost:
+		rate, _ := body["rate"].(float64)
+		var faults []string
+		if fl, ok := body["faults"].([]any); ok {
+			for _, f := range fl {
+				faults = append(faults, fmt.Sprint(f))
+			}
+		}
+		eng.SetChaos(rate, faults)
+		writeJSON(w, map[string]any{"rate": rate})
+	case p == "/clock/advance" && r.Method == http.MethodPost:
+		d, err := time.ParseDuration(str("duration"))
+		if err == nil {
+			err = eng.Advance(d)
+		}
+		if err != nil {
+			jsonErr(w, 400, err.Error())
+			return
+		}
+		writeJSON(w, map[string]any{"now": eng.Now()})
+	case p == "/feeds" && r.Method == http.MethodPost:
+		up, _ := body["up"].(bool)
+		if err := eng.SetFeed(str("feed"), up, user); err != nil {
+			jsonErr(w, 400, err.Error())
+			return
+		}
+		writeJSON(w, map[string]any{"feed": str("feed"), "up": up})
+	case p == "/cable" && r.Method == http.MethodPost:
+		if err := eng.SetLink(str("link"), str("state") == "replace", user); err != nil {
+			jsonErr(w, 400, err.Error())
+			return
+		}
+		writeJSON(w, map[string]any{"link": str("link"), "state": str("state")})
+	case p == "/reseat" && r.Method == http.MethodPost:
+		ds, _ := eng.SelectDevices(str("select"))
+		for _, d := range ds {
+			_ = eng.Reseat(d.Path, user)
+		}
+		writeJSON(w, map[string]any{"devices": len(ds)})
+	case p == "/utilisation" && r.Method == http.MethodPost:
+		v, _ := body["value"].(float64)
+		ds, _ := eng.SelectDevices(str("select"))
+		for _, d := range ds {
+			_ = eng.SetUtilisation(d.Path, v, user)
+		}
+		writeJSON(w, map[string]any{"devices": len(ds), "value": v})
+	case p == "/layout" && r.Method == http.MethodGet:
+		writeJSON(w, s.layout())
+	case p == "/domains" && r.Method == http.MethodGet:
+		writeJSON(w, eng.Domains())
+	case p == "/endpoints" && r.Method == http.MethodGet:
+		writeJSON(w, map[string]any{"gateway": s.T.Net.Gateway, "endpoints": s.T.Net.Endpoints, "routes": s.T.Net.Routes()})
+	case p == "/report" && r.Method == http.MethodGet:
+		rep := report.Build(s.T, nil)
+		if q.Get("format") == "text" {
+			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+			io.WriteString(w, rep.Text())
+			return
+		}
+		writeJSON(w, rep)
+	case p == "/scenarios/run" && r.Method == http.MethodPost:
+		raw, _ := body["_raw"].(string)
+		var sc schema.Scenario
+		if err := schema.Decode([]byte(raw), &sc); err != nil {
+			jsonErr(w, 400, err.Error())
+			return
+		}
+		res := scenario.Run(r.Context(), s.T, &sc, scenario.Options{})
+		writeJSON(w, res)
+	case p == "/catalogue" && r.Method == http.MethodGet:
+		writeJSON(w, s.catalogue())
+	case p == "/credentials" && r.Method == http.MethodGet:
+		// the BMC credentials of devices, for the operator's own tools (redacted from events)
+		ds, _ := eng.SelectDevices(q.Get("select"))
+		out := []map[string]string{}
+		eng.Read(func(*model.Model) {
+			for _, d := range ds {
+				if d.HasBMC() {
+					out = append(out, map[string]string{"path": d.Path, "user": d.Identity.BMCUser, "password": d.Identity.BMCPassword, "redfish": d.Endpoint.ListenTLS, "siteIP": d.Endpoint.SiteIP})
+				}
+			}
+		})
+		writeJSON(w, out)
+	case p == "/inspect/redfish" && r.Method == http.MethodGet:
+		s.inspectRedfish(w, q.Get("device"), q.Get("path"))
+	case p == "/console" && r.Method == http.MethodGet:
+		// a device's console: a vm's serial port, the stand-in for Serial over LAN (05)
+		ds, err := eng.SelectDevices(q.Get("device"))
+		if err != nil || len(ds) != 1 {
+			jsonErr(w, 400, "device must select exactly one device")
+			return
+		}
+		from, _ := strconv.ParseInt(q.Get("from"), 10, 64)
+		for _, a := range s.T.Adapters {
+			if c, ok := a.(adapter.Console); ok {
+				if b, next, err := c.ConsoleLog(ds[0].Path, from); err == nil {
+					w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+					w.Header().Set("X-Console-Next", strconv.FormatInt(next, 10))
+					w.Write(b)
+					return
+				}
+			}
+		}
+		jsonErr(w, 404, ds[0].Path+" has no console here: only vm devices have one")
+	default:
+		jsonErr(w, 404, "no such operation: "+r.Method+" "+r.URL.Path)
+	}
+}
+
+func eventFilter(q map[string][]string) func(schema.Event) bool {
+	get := func(k string) string {
+		if v := q[k]; len(v) > 0 {
+			return v[0]
+		}
+		return ""
+	}
+	var sel *selector.Selector
+	if s := get("select"); s != "" {
+		sel, _ = selector.Parse(s)
+	}
+	kind, source, canonical := get("kind"), get("source"), get("canonical")
+	hideReads := get("reads") == "false"
+	return func(e schema.Event) bool {
+		if sel != nil && !sel.MatchPath(e.Path) && !sel.MatchPort(e.Path) {
+			return false
+		}
+		if kind != "" && e.Kind != kind {
+			return false
+		}
+		if source != "" && e.Source.Class != source {
+			return false
+		}
+		if canonical != "" && (e.Request == nil || e.Request.Canonical != canonical) {
+			return false
+		}
+		if hideReads && e.Request != nil && strings.HasSuffix(e.Request.Canonical, ".read") {
+			return false
+		}
+		return true
+	}
+}
+
+func (s *Server) stream(w http.ResponseWriter, r *http.Request, filter func(schema.Event) bool) {
+	fl, ok := w.(http.Flusher)
+	if !ok {
+		jsonErr(w, 500, "streaming unsupported")
+		return
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	id, ch := s.T.Engine.Subscribe(4096)
+	defer s.T.Engine.Unsubscribe(id)
+	fl.Flush()
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case ev, ok := <-ch:
+			if !ok {
+				return
+			}
+			if !filter(ev) {
+				continue
+			}
+			b, _ := json.Marshal(ev)
+			fmt.Fprintf(w, "id: %d\ndata: %s\n\n", ev.Seq, b)
+			fl.Flush()
+		}
+	}
+}
+
+// layout is what the console draws from (12, D18): halls, rows with their positions, racks with
+// their format's height, and every device's slot, U and state.
+func (s *Server) layout() map[string]any {
+	eng := s.T.Engine
+	var halls []any
+	eng.Read(func(m *model.Model) {
+		for _, h := range m.Halls {
+			var rows []any
+			for _, row := range h.Rows {
+				var racks []any
+				for _, r := range row.Racks {
+					var devs []any
+					for _, d := range r.Devices {
+						devs = append(devs, map[string]any{"path": d.Path, "name": d.Name, "slot": d.Slot, "u": d.U, "units": d.Units,
+							"side": d.Side, "class": d.Class, "profile": d.ProfileName, "fidelity": d.Fidelity, "generated": d.Generated})
+					}
+					racks = append(racks, map[string]any{"name": r.Name, "path": r.Path, "position": r.Position, "format": r.FormatName,
+						"archetype": r.Format.Spec.Archetype, "height": r.Format.Spec.Layout.Height, "devices": devs})
+				}
+				rows = append(rows, map[string]any{"name": row.Name, "positions": row.Positions, "racks": racks})
+			}
+			halls = append(halls, map[string]any{"name": h.Name, "path": h.Path, "rows": rows})
+		}
+	})
+	return map[string]any{"estate": s.T.Estate.Metadata.Name, "site": eng.M.Site, "halls": halls}
+}
+
+func (s *Server) catalogue() map[string]any {
+	reg := s.T.Reg
+	profiles, formats, faults, dialects := []any{}, []any{}, []any{}, []any{}
+	for n, p := range reg.Profiles {
+		profiles = append(profiles, map[string]any{"name": n, "class": p.Spec.Class, "units": p.Spec.Form.Units})
+	}
+	for n, f := range reg.Formats {
+		formats = append(formats, map[string]any{"name": n, "archetype": f.Spec.Archetype, "params": f.Spec.Params})
+	}
+	for n, f := range reg.Faults {
+		faults = append(faults, map[string]any{"id": n, "title": f.Spec.Title, "target": f.Spec.Target, "params": f.Spec.Params, "clears": f.Spec.Clears})
+	}
+	for n, d := range reg.Redfish {
+		dialects = append(dialects, map[string]any{"name": n, "backend": d.Spec.Backend, "mockup": d.Spec.Mockup})
+	}
+	return map[string]any{"profiles": profiles, "formats": formats, "faults": faults, "dialects": dialects}
+}
+
+// inspectRedfish reads a device's Redfish resource as the stack sees it, through the adapter.
+func (s *Server) inspectRedfish(w http.ResponseWriter, device, path string) {
+	ds, _ := s.T.Engine.SelectDevices(device)
+	if len(ds) == 0 || !ds[0].HasBMC() {
+		jsonErr(w, 404, "no BMC device matches "+device)
+		return
+	}
+	d := ds[0]
+	if path == "" {
+		path = "/redfish/v1"
+	}
+	// render in-process, as the scenario runner observes: the console's reads are not requests
+	// from the software under test and must not appear in the device's request log
+	for _, a := range s.T.Adapters {
+		if g, ok := a.(interface {
+			Get(devicePath, resourcePath string) (map[string]any, bool)
+		}); ok {
+			doc, found := g.Get(d.Path, path)
+			if !found || doc == nil {
+				jsonErr(w, 404, "no resource "+path+" on "+d.Path)
+				return
+			}
+			writeJSON(w, doc)
+			return
+		}
+	}
+	jsonErr(w, 503, "no Redfish adapter is running")
+}
+
+func writeJSON(w http.ResponseWriter, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	_ = enc.Encode(v)
+}
+
+func jsonErr(w http.ResponseWriter, status int, msg string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
+}

@@ -1,0 +1,85 @@
+apiVersion: dc-twin/v1alpha1
+kind: FaultCatalogue
+metadata: { name: nvidia/xid, version: 0.1.0 }
+spec:
+  isNot: ["Xid classes as health, power and port state; no driver state machine."]
+  faults:
+    - name: xid-79
+      title: "GPU has fallen off the bus (Xid 79)"
+      target: { component: accelerator, vendor: nvidia }
+      effects:
+        - set: { health: Critical, state: offline, "power.watts": 0 }
+        - ports: { owner: self, kind: scale-up, state: down }
+        # as the driver writes them: the GPU's identity line, then the Xid with the PCI address
+        # without its function (Fleet Intelligence's parser needs it so; NVSentinel's takes both)
+        - kernelLog: { line: "NVRM: GPU at PCI:{pcidev}: {uuid}", appliesAt: [vm] }
+        - kernelLog: { line: "NVRM: Xid (PCI:{pcidev}): 79, pid='<unknown>', name=<unknown>, GPU has fallen off the bus.", appliesAt: [vm] }
+        # and at every boot while it holds, as the driver logs a GPU that reads all ones when it probes
+        # it (rm_is_supported_device); the driver's printk spans three lines and names the PCI ID
+        - kernelLog: { line: "NVRM: The NVIDIA GPU {pci} installed in this system has fallen off the bus and is not responding to commands.", appliesAt: [vm], when: boot }
+        - shim: { driver: nvidia/mokka, fault: fallen-off-bus, appliesAt: [vm] }
+        - redfish.logEntry: { severity: Critical, message: "{component}: GPU has fallen off the bus (Xid 79).", messageId: "ResourceEvent.1.0.ResourceErrorsDetected" }
+      clears: { on: [device.acCycle], manual: true }
+      isNot: ["A real Xid 79 also leaves PCIe link-state artefacts the host firmware reports; this one does not.", "The boot-time line is one line without the PCI ID; the driver writes it over three lines with \"(PCI ID: 10de:…)\"."]
+    - name: xid-48
+      title: "Double-bit ECC error (Xid 48)"
+      target: { component: accelerator, vendor: nvidia }
+      effects:
+        - set: { health: Critical }
+        - counter: { "ecc.volatile.dbe": "+1" }
+        - kernelLog: { line: "NVRM: GPU at PCI:{pcidev}: {uuid}", appliesAt: [vm] }
+        - kernelLog: { line: "NVRM: Xid (PCI:{pcidev}): 48, pid='<unknown>', name=<unknown>, An uncorrectable double bit error (DBE) has been detected on GPU in the framebuffer at partition 0, subpartition 0.", appliesAt: [vm] }
+        - shim: { driver: nvidia/mokka, xid: 48, appliesAt: [vm] }
+        - redfish.logEntry: { severity: Critical, message: "{component}: uncorrectable ECC error (Xid 48).", messageId: "ResourceEvent.1.0.ResourceErrorsDetected" }
+      clears: { on: [device.reset], manual: true }
+      isNot: []
+    - name: xid-94
+      title: "Contained ECC error (Xid 94)"
+      target: { component: accelerator, vendor: nvidia }
+      effects:
+        - set: { health: Warning }
+        - counter: { "ecc.contained": "+1" }
+        - redfish.logEntry: { severity: Warning, message: "{component}: contained ECC error (Xid 94).", messageId: "ResourceEvent.1.0.ResourceErrorsDetected" }
+      clears: { on: [device.reset], manual: true }
+      isNot: []
+---
+apiVersion: dc-twin/v1alpha1
+kind: FaultCatalogue
+metadata: { name: nvidia/nvlink, version: 0.1.0 }
+spec:
+  isNot: ["NVLink failures as port and domain state; no link training."]
+  faults:
+    - name: switch-tray-failure
+      title: "NVLink switch tray failed"
+      target: { device: switch-tray }
+      effects:
+        - set: { health: Critical }
+        - ports: { owner: device, kind: scale-up, state: down }
+        - redfish.logEntry: { severity: Critical, message: "NVSwitch tray failure.", messageId: "ResourceEvent.1.0.ResourceErrorsDetected" }
+      clears: { on: [device.acCycle], manual: true }
+      isNot: []
+    - name: lane-down
+      title: "An NVLink lane is down (Xid 74 on the GPU side)"
+      target: { component: accelerator, vendor: nvidia }
+      params: { lane: { type: int, default: 0, range: [0, 17] } }
+      effects:
+        - set: { health: Warning }
+        - ports: { owner: self, kind: scale-up, state: down, index: "{lane}" }
+        - counter: { "nvlink.errors": "+1" }
+      clears: { on: [device.reset], manual: true }
+      isNot: []
+---
+apiVersion: dc-twin/v1alpha1
+kind: FaultCatalogue
+metadata: { name: nvidia/dpu, version: 0.1.0 }
+spec:
+  isNot: ["The DPU OS is not modelled; faults are BMC-visible state."]
+  faults:
+    - name: unresponsive
+      title: "DPU unresponsive"
+      target: { device: dpu }
+      effects:
+        - set: { health: Critical, state: offline }
+        - ports: { owner: device, kind: ethernet, state: down }
+      clears: { on: [device.reset, device.acCycle], manual: true }
+      isNot: []

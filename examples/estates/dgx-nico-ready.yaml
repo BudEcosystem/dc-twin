@@ -1,0 +1,61 @@
+# The estate compat/nico's Ready path runs NVIDIA Infra Controller (NICo) against (`run.sh ready`):
+# one DGX H100 that is a real x86_64 virtual machine (`vm`, `os: stack`, KVM) behind its emulated
+# BMC (NICo's captured DGX H100 tree, "Viking"), with its network rack. Every other device is at
+# model fidelity. The DGX has no DPU, so NICo is told (its expected machine, nicoinputs) to ingest
+# it as a zero-DPU host.
+#
+# NICo's own DHCP server serves both the BMC network and the provisioning network, through the twin
+# relay (option 82, link selection): the BMC leases on its rack's underlay segment, the host's boot
+# NIC on its rack's HostInband segment. The DGX's NICs are on the twin's segments (D48): its UEFI
+# firmware's DHCP enters the relay at the leaf port its eth0 is cabled to, and the segment gateway
+# routes it at L3 into the routed site network (siteNetwork), a Linux network namespace where
+# run.sh runs NICo's PXE service at 10.90.0.17 and nico-api at 10.90.0.20, which see the host's own
+# lease as its address, as on a site. run.sh sets the ports.
+apiVersion: dc-twin/v1alpha1
+kind: Estate
+metadata: { name: dgx-nico-ready }
+spec:
+  seed: 1729
+  clock: wall
+  timeScale: 0.05
+  packs: [generic@0.1.0, nvidia@0.1.0]
+  fidelity:
+    default: model
+    overrides:
+      - { select: "b01/server-01", level: vm, os: stack }
+  adapters:
+    vm: { memoryMB: 2048, cpus: 2 }   # the profile asks 8 GB and 4 vCPU; NICo's boot image runs in 2 GB
+  sites:
+    - name: site-1
+      halls:
+        - name: hall-a
+          rows:
+            - name: a
+              positions: 10
+              racks:
+                - { name: a10, position: 10, format: generic/network-rack, params: { ufm: nvidia/ufm-appliance } }
+            - name: b
+              positions: 2
+              racks:
+                - { name: b01, position: 1, format: generic/hgx-8gpu, params: { server: nvidia/dgx-h100, servers: 1 } }
+  networks:
+    # dhcp: stack — relayed to NICo's dhcp-server (both networks to the same server, which answers
+    # the relay at one port). run.sh sets the port from DHCP_PORT.
+    oob:          { role: management,   dhcp: stack, cidr: 10.30.0.0/16, fabric: oob, server: "127.0.0.1:26767" }
+    provisioning: { role: provisioning, dhcp: stack, cidr: 10.40.0.0/16, fabric: frontend, server: "127.0.0.1:26767" }
+    frontend:     { role: frontend,     fabric: frontend }
+    backend:      { role: scale-out,    fabric: backend }
+    service:      { role: service,      cidr: 10.90.0.0/24, dhcp: none }
+  fabrics:
+    - { name: oob,      template: oob-flat,   nos: none }
+    - { name: frontend, template: clos-2tier, nos: none, params: { leafsPerRack: 2, spines: 2 }, placeIn: a10 }
+    - { name: backend,  template: rail-optimised, nos: none, technology: infiniband, manager: nvidia/ufm, params: { rails: 4 }, select: b01, placeIn: a10 }
+  facility:
+    power: { feeds: [{ name: A, capacityW: 100000 }, { name: B, capacityW: 100000 }] }
+    bms: { dialect: nvidia/dsx-exchange }
+  stacks:
+    - name: nvidia-dsx-os@0.1.0
+      outputs:
+        bmsConsumerMirror: "nico-legacy,nico-api"
+        # the routed site network: a Linux network namespace holding NICo's PXE service and API
+        siteNetwork: "prefix=10.90.0.0/24 gateway=10.90.0.1 link=127.0.0.1:17800"

@@ -1,0 +1,9 @@
+# NVIDIA DRA driver for GPUs 0.5.0 (nvidia/dra-driver-nvidia-gpu, the chart Mokka's CI pins,
+# local/dra/dra.tiltfile at k8s-test-infra v0.5.0).
+nvidiaDriverRoot: /var/lib/nvml-mock/driver   # Mokka's staged driver tree
+gpuResourcesEnabledOverride: true             # GPU (not ComputeDomain) publishing is gated off by default
+resources:
+  computeDomains:
+    enabled: false                            # IMEX channels need a DRA release with altProcDevices (Mokka #498)
+kubeletPlugin:
+  nodeSelector: { dc-twin.io/host: container }

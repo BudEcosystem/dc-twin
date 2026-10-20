@@ -1,0 +1,40 @@
+# The TAP substrate with SONiC-VS on the OOB fabric (D4, D44): the rack's management switch and the
+# OOB aggregation switch run docker-sonic-vs, linux/amd64, emulated on an aarch64 Docker host, each
+# with SONiC's dhcp_relay container beside it; every BMC port is a TAP moved into its switch's
+# namespace as the container's eth<n>. The management switch relays DHCP by giaddr, with SONiC's
+# hostname:port circuit id, to the stack's Kea attached at the aggregation switch's eth128, over
+# eBGP between the two SONiC switches. One rack, so two SONiC switches: each is a few hundred MB
+# and boots in minutes under emulation. test/linuxnet substitutes the Kea container's and the
+# probe namespace's names.
+apiVersion: dc-twin/v1alpha1
+kind: Estate
+metadata:
+  name: linuxnet-sonic
+spec:
+  seed: 2027
+  clock: wall
+  timeScale: 0.05
+  packs: [generic@0.1.0]
+  fidelity: { default: model }
+  sites:
+    - name: site-1
+      halls:
+        - name: hall-a
+          rows:
+            - name: a
+              positions: 2
+              racks:
+                - { name: r01, position: 1, format: generic/cpu-rack, params: { servers: 3 }, feeds: [A, B] }
+  networks:
+    oob: { role: management, dhcp: stack, cidr: 10.30.0.0/20, fabric: oob, server: 10.90.0.10 }
+  fabrics:
+    - { name: oob, template: oob-flat, nos: sonic-vs }
+  facility:
+    power:
+      feeds: [{ name: A, capacityW: 200000 }, { name: B, capacityW: 200000 }]
+  adapters:
+    network:
+      substrate: tap
+      attach:
+        - { container: KEA_CONTAINER, port: "oob-agg-1:eth128", address: 10.90.0.10/24, gateway: 10.90.0.1 }
+        - { netns: PROBE_NETNS, port: "oob-agg-1:eth127", address: 10.90.1.10/24, gateway: 10.90.1.1, interface: probe0 }

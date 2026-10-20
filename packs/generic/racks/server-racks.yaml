@@ -1,0 +1,137 @@
+apiVersion: dc-twin/v1alpha1
+kind: RackFormat
+metadata: { name: generic/hgx-8gpu, version: 0.1.0 }
+spec:
+  archetype: server-scale
+  params:
+    server:  { type: profile, class: server, default: oem-supermicro/sys-821ge-tnhr, label: Server }
+    servers: { type: int, default: 4, range: [1, 4], label: Servers }
+    pdu:     { type: profile, class: pdu, default: generic/pdu-3ph-24, label: PDU }
+  slots:
+    - { names: "pdu-{a,b}", profile: $pdu, side: zero-u }
+    - { names: "mgmt-switch", profile: generic/mgmt-switch-1g }
+    - { names: "server-{01..$servers}", profile: $server, accepts: { class: server, mounting: rack } }
+  layout:
+    height: 48
+    uNumbering: eia
+    front:
+      - { slots: "mgmt-switch" }
+      - { slots: "server-{01..04}" }
+    back: [management, scale-out, frontend, power]
+    reserved: [{ u: 1, units: 4, for: fabric }]
+  power:
+    inputs: [{ name: pdu, kind: pdu, capacityW: 69000, redundancy: N+N, minSources: 1, sources: "pdu-*", feeds: [A, B] }]
+    capacityW: 69000
+  cooling: { kind: air, loop: external }
+  domains:
+    - { kind: scale-up, technology: nvlink, members: "server-*/gpu-*", unit: server }
+    - { kind: maintenance, members: "*", unit: server }
+  provides: []
+  isNot: ["NVSwitch chips on each HGX baseboard are not modelled as devices; scale-up is per server."]
+  sources: [{ what: "8-GPU servers per rack", url: "https://docs.nvidia.com/dgx-superpod/reference-architecture-scalable-infrastructure-h100/latest/", date: 2026-10-18 }]
+---
+apiVersion: dc-twin/v1alpha1
+kind: RackFormat
+metadata: { name: generic/oam-8gpu, version: 0.1.0 }
+spec:
+  archetype: server-scale
+  params:
+    server:  { type: profile, class: server, default: amd/instinct-mi355x-platform, label: Server }
+    servers: { type: int, default: 4, range: [1, 4], label: Servers }
+    pdu:     { type: profile, class: pdu, default: generic/pdu-3ph-24 }
+  slots:
+    - { names: "pdu-{a,b}", profile: $pdu, side: zero-u }
+    - { names: "mgmt-switch", profile: generic/mgmt-switch-1g }
+    - { names: "server-{01..$servers}", profile: $server, accepts: { class: server } }
+  layout:
+    height: 48
+    uNumbering: eia
+    front: [{ slots: "mgmt-switch" }, { slots: "server-{01..04}" }]
+    back: [management, scale-out, frontend, power]
+  power:
+    inputs: [{ name: pdu, kind: pdu, capacityW: 69000, redundancy: N+N, minSources: 1, sources: "pdu-*", feeds: [A, B] }]
+    capacityW: 69000
+  cooling: { kind: air, loop: external }
+  fixedLinks: [{ template: generic/node-mesh }]
+  domains: [{ kind: scale-up, technology: xgmi, members: "server-*/gpu-*", unit: server }]
+  isNot: ["The Infinity Fabric mesh inside each OAM baseboard is state only."]
+  sources: [{ what: "OAM 8-GPU platform", url: "https://www.amd.com/en/products/accelerators/instinct/mi350.html", date: 2026-10-18 }]
+---
+apiVersion: dc-twin/v1alpha1
+kind: RackFormat
+metadata: { name: generic/gaudi3-8, version: 0.1.0 }
+spec:
+  archetype: server-scale
+  params:
+    server:  { type: profile, class: server, default: intel/gaudi3-hls, label: Server }
+    servers: { type: int, default: 4, range: [1, 4], label: Servers }
+    pdu:     { type: profile, class: pdu, default: generic/pdu-3ph-24 }
+  slots:
+    - { names: "pdu-{a,b}", profile: $pdu, side: zero-u }
+    - { names: "mgmt-switch", profile: generic/mgmt-switch-1g }
+    - { names: "server-{01..$servers}", profile: $server, accepts: { class: server } }
+  layout:
+    height: 48
+    uNumbering: eia
+    front: [{ slots: "mgmt-switch" }, { slots: "server-{01..04}" }]
+    back: [management, scale-out, frontend, power]
+  power:
+    inputs: [{ name: pdu, kind: pdu, capacityW: 69000, redundancy: N+N, minSources: 1, sources: "pdu-*", feeds: [A, B] }]
+    capacityW: 69000
+  cooling: { kind: air, loop: external }
+  fixedLinks: [{ template: generic/node-mesh }]
+  domains: [{ kind: scale-up, technology: roce, members: "server-*/hpu-*", unit: server }]
+  isNot: ["Gaudi 3's 21 in-node RoCE ports per accelerator are fixed links with state only."]
+  sources: [{ what: "Gaudi 3 integrated RoCE: 24 x 200GbE, 21 in-node and 3 scale-out", url: "https://www.intel.com/content/www/us/en/content-details/817486/intel-gaudi-3-ai-accelerator-white-paper.html", date: 2026-10-18 }]
+---
+apiVersion: dc-twin/v1alpha1
+kind: RackFormat
+metadata: { name: generic/cpu-rack, version: 0.1.0 }
+spec:
+  archetype: cpu
+  params:
+    server:  { type: profile, class: server, default: generic/server-2u, label: Server }
+    servers: { type: int, default: 12, range: [1, 20], label: Servers }
+    pdu:     { type: profile, class: pdu, default: generic/pdu-3ph-24 }
+  slots:
+    - { names: "pdu-{a,b}", profile: $pdu, side: zero-u }
+    - { names: "mgmt-switch", profile: generic/mgmt-switch-1g }
+    - { names: "server-{01..$servers}", profile: $server, accepts: { class: server } }
+  layout:
+    height: 48
+    uNumbering: eia
+    front: [{ slots: "mgmt-switch" }, { slots: "server-{01..20}" }]
+    back: [management, frontend, power]
+  power:
+    inputs: [{ name: pdu, kind: pdu, capacityW: 34500, redundancy: N+N, minSources: 1, sources: "pdu-*", feeds: [A, B] }]
+    capacityW: 34500
+  cooling: { kind: air, loop: external }
+  isNot: ["A control-plane rack archetype."]
+  sources: [{ what: archetype, url: "https://www.dmtf.org/standards/redfish", date: 2026-10-18 }]
+---
+apiVersion: dc-twin/v1alpha1
+kind: RackFormat
+metadata: { name: generic/network-rack, version: 0.1.0 }
+spec:
+  archetype: network
+  params:
+    ufm:       { type: profile, class: appliance, default: "", label: Fabric manager appliance }
+    ibRails:   { type: int, default: 0, range: [0, 8], label: InfiniBand rails }
+    roceRails: { type: int, default: 0, range: [0, 8], label: RoCE rails }
+    pdu:       { type: profile, class: pdu, default: generic/pdu-3ph-24 }
+  slots:
+    - { names: "pdu-{a,b}", profile: $pdu, side: zero-u }
+    - { names: "mgmt-switch-{1..2}", profile: generic/mgmt-switch-1g }
+    - { names: "ufm-1", profile: $ufm, when: 'params.ufm != ""' }
+  layout:
+    height: 48
+    uNumbering: eia
+    front: [{ slots: "mgmt-switch-{1..2}" }, { slots: "ufm-1" }]
+    back: [management, frontend, scale-out, power]
+    reserved: [{ u: 1, units: 40, for: fabric }]
+  power:
+    inputs: [{ name: pdu, kind: pdu, capacityW: 48000, redundancy: N+N, minSources: 1, sources: "pdu-*", feeds: [A, B] }]
+    capacityW: 48000
+  cooling: { kind: air, loop: external }
+  isNot: ["Spines, aggregation and rail switches are generated by fabric templates into the reserved U."]
+  sources: [{ what: archetype, url: "https://www.dmtf.org/standards/redfish", date: 2026-10-18 }]

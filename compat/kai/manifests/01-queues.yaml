@@ -1,0 +1,34 @@
+# A two-level queue hierarchy, in the shape of KAI's quickstart (examples/quickstart/default-queues.yaml):
+# only leaf queues take workloads. GPU quota is in devices, CPU in millicores, memory in MB.
+apiVersion: scheduling.run.ai/v2
+kind: Queue
+metadata:
+  name: dc-twin
+spec:
+  resources:
+    cpu: { quota: -1, limit: -1, overQuotaWeight: 1 }
+    gpu: { quota: -1, limit: -1, overQuotaWeight: 1 }
+    memory: { quota: -1, limit: -1, overQuotaWeight: 1 }
+---
+apiVersion: scheduling.run.ai/v2
+kind: Queue
+metadata:
+  name: training
+spec:
+  parentQueue: dc-twin
+  priority: 100
+  resources:
+    cpu: { quota: -1, limit: -1, overQuotaWeight: 1 }
+    gpu: { quota: 144, limit: -1, overQuotaWeight: 1 }
+    memory: { quota: -1, limit: -1, overQuotaWeight: 1 }
+---
+apiVersion: scheduling.run.ai/v2
+kind: Queue
+metadata:
+  name: inference
+spec:
+  parentQueue: dc-twin
+  resources:
+    cpu: { quota: -1, limit: -1, overQuotaWeight: 1 }
+    gpu: { quota: 32, limit: -1, overQuotaWeight: 1 }
+    memory: { quota: -1, limit: -1, overQuotaWeight: 1 }

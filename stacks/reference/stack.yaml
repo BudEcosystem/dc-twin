@@ -1,0 +1,25 @@
+apiVersion: dc-twin/v1alpha1
+kind: Stack
+metadata: { name: reference, version: 0.1.0 }
+spec:
+  title: dc-twin reference stack (cmd/refstack) — a protocol-only stand-in for a lifecycle and health manager
+  components:
+    refstack:
+      obtain: { source: "https://github.com/BudEcosystem/dc-twin", ref: "in-tree: cmd/refstack", licence: Apache-2.0 }
+      install: [{ script: "refstack --dhcp <addr> --api <addr> --broker <addr> --gateway <site gateway> --expected <state>/stack-inputs/expected-machines.json" }]
+      attach: [management, service]
+      requires:
+        - { capability: "redfish/dialect:*", scope: { each: "?class=compute-tray ?class=server" }, anyOf: ["redfish/dialect:nvidia/gb-bmc", "redfish/dialect:nvidia/gb300-bmc", "redfish/dialect:nvidia/dgx", "redfish/dialect:oem-dell/idrac", "redfish/dialect:oem-hpe/ilo", "redfish/dialect:oem-lenovo/xcc", "redfish/dialect:oem-supermicro/redfish", "redfish/dialect:generic/dmtf"], gate: install }
+        - { capability: "dhcp/relay-option-82", anyOf: ["dhcp/relay-option-82", "dhcp/relay-giaddr"], gate: install }
+        - { capability: redfish/leak-detectors, scope: { each: "?class=compute-tray" } }
+        - { capability: "facility/bms:nvidia/dsx-exchange" }
+      outputs:
+        dhcpServer: { kind: endpoint, from: refstack }
+        exchangeBroker: { kind: endpoint, from: refstack }
+      accessors:
+        machine: { kind: http, endpoint: "{refstack}/v1/machines/{id}", credential: twin-issued-readonly, join: { twin: serial, stack: serial } }
+        alerts: { kind: http, endpoint: "{refstack}/v1/alerts?rack={rack}", credential: twin-issued-readonly }
+  scenarios: [examples/scenarios/bmc-discovery.yaml, examples/scenarios/nvl72-leak-response.yaml, examples/scenarios/tray-leak-isolation.yaml]
+  isNot:
+    - "Not NICo: implements NICo's documented leak policies (tray shutdown, RackLeak alert, isolation request above a threshold) and NICo's identity-string hardware detection, nothing more."
+    - "No OS install, attestation, firmware baselines or DPU provisioning."

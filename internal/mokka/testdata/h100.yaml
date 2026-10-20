@@ -1,0 +1,28 @@
+# A minimal stand-in for Mokka's h100 profile (see gb300.yaml): eight GPUs, the baseboard's
+# NVSwitches on the first root complex.
+version: "1.0"
+system: { driver_version: "580.65.06", nvml_version: "13.580.65", cuda_version: "13.0", cuda_version_major: 13, cuda_version_minor: 0 }
+device_defaults:
+  name: "NVIDIA H100 80GB HBM3"
+  serial: "1000000000100"
+  architecture: "hopper"
+  compute_capability: { major: 9, minor: 0 }
+  fabric: { cluster_uuid: "00000000-0000-0000-0000-000000000001", clique_id: 0, state: "auto" }
+  memory: { total_bytes: 85899345920, reserved_bytes: 0, free_bytes: 85899345920, used_bytes: 0 }
+devices:
+  - { index: 0, uuid: "GPU-00000000-0000-0000-0000-000000000100", pci: { bus_id: "0000:1A:00.0" } }
+  - { index: 1, uuid: "GPU-00000000-0000-0000-0000-000000000101", pci: { bus_id: "0000:1B:00.0" } }
+  - { index: 2, uuid: "GPU-00000000-0000-0000-0000-000000000102", pci: { bus_id: "0000:4A:00.0" } }
+  - { index: 3, uuid: "GPU-00000000-0000-0000-0000-000000000103", pci: { bus_id: "0000:4B:00.0" } }
+  - { index: 4, uuid: "GPU-00000000-0000-0000-0000-000000000104", pci: { bus_id: "0000:8A:00.0" } }
+  - { index: 5, uuid: "GPU-00000000-0000-0000-0000-000000000105", pci: { bus_id: "0000:8B:00.0" } }
+  - { index: 6, uuid: "GPU-00000000-0000-0000-0000-000000000106", pci: { bus_id: "0000:CA:00.0" } }
+  - { index: 7, uuid: "GPU-00000000-0000-0000-0000-000000000107", pci: { bus_id: "0000:CB:00.0" } }
+nvlink:
+  switches:
+    - { bdf: "0000:05:00.0", device_id: 0x22A310DE, uuid: "NVSwitch-0000-0000-0000-000000000100" }
+infiniband: { enabled: true }
+pcie_topology:
+  root_complexes:
+    - { id: "pci0000:00", numa_node: 0, devices: ["0000:1A:00.0", "0000:1B:00.0", "0000:4A:00.0", "0000:4B:00.0", "0000:05:00.0"] }
+    - { id: "pci0000:80", numa_node: 1, devices: ["0000:8A:00.0", "0000:8B:00.0", "0000:CA:00.0", "0000:CB:00.0"] }
