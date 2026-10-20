@@ -1,0 +1,36 @@
+# MAAS 3.7.3 as Canonical ships it as Debian packages (the MAAS 3.7 PPA), on Ubuntu 24.04: region
+# controller (regiond, the v3 API server, Temporal and its MAAS worker, PostgreSQL), rack controller
+# (rackd) and maas-agent, which runs every power action as `maas.power`. compat/maas/run.sh builds
+# it for the Docker host's own architecture and runs it with the twin inside the same container.
+#
+# No systemd: policy-rc.d keeps package scripts from starting services (PostgreSQL excepted, which
+# the region's postinst restarts with --force through its SysV script to create the database), and
+# start-maas.sh, which run.sh copies in, starts the services the way their systemd units do.
+ARG UBUNTU=ubuntu:24.04
+FROM ${UBUNTU}
+ARG MAAS_VERSION=1:3.7.3-18030-g.9122eee68-0ubuntu1~24.04.1
+# the MAAS 3.7 PPA's signing key (Launchpad: ~maas/+archive/ubuntu/3.7, signing_key_fingerprint)
+ARG MAAS_PPA_KEY=3AB6DCF1F234E78DAA9C104204E7FDC5684D4A1C
+ENV DEBIAN_FRONTEND=noninteractive LANG=C.UTF-8
+
+RUN set -eux; \
+    printf '#!/bin/sh\nexit 101\n' > /usr/sbin/policy-rc.d; chmod +x /usr/sbin/policy-rc.d; \
+    apt-get -q update; \
+    apt-get -q -y install --no-install-recommends ca-certificates curl gnupg; \
+    curl -fsSL "https://keyserver.ubuntu.com/pks/lookup?op=get&options=mr&search=0x${MAAS_PPA_KEY}" \
+      | gpg --dearmor -o /usr/share/keyrings/maas-3.7.gpg; \
+    gpg --no-default-keyring --keyring /usr/share/keyrings/maas-3.7.gpg --list-keys --with-colons \
+      | grep -q "fpr:::::::::${MAAS_PPA_KEY}:"; \
+    echo "deb [signed-by=/usr/share/keyrings/maas-3.7.gpg] https://ppa.launchpadcontent.net/maas/3.7/ubuntu noble main" \
+      > /etc/apt/sources.list.d/maas-3.7.list; \
+    apt-get -q update; \
+    apt-get -q -y install --no-install-recommends postgresql jq iproute2 sudo; \
+    pg_ctlcluster 16 main start; \
+    apt-get -q -y install --no-install-recommends \
+      "maas-region-controller=${MAAS_VERSION}" "maas-region-api=${MAAS_VERSION}" \
+      "maas-rack-controller=${MAAS_VERSION}" "maas-agent=${MAAS_VERSION}" "maas-cli=${MAAS_VERSION}" \
+      "maas-common=${MAAS_VERSION}" "python3-maas-provisioningserver=${MAAS_VERSION}" \
+      "python3-django-maas=${MAAS_VERSION}" "python3-maas-client=${MAAS_VERSION}"; \
+    pg_ctlcluster 16 main stop; \
+    dpkg-query -W 'maas*' 'python3-maas*' 'python3-django-maas' temporal freeipmi-tools postgresql-16 > /maas-packages.txt; \
+    apt-get -q clean; rm -rf /var/lib/apt/lists/*

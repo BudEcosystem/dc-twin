@@ -1,0 +1,11 @@
+apiVersion: dc-twin/v1alpha1
+kind: Pack
+metadata: { name: delta, version: 0.1.0 }
+spec:
+  title: Delta Electronics power shelves
+  dependsOn: [generic@0.1.0]
+  assets:
+    - name: libredfish
+      licence: MIT
+      obtain: { source: "https://github.com/dsx-ai-factory/libredfish", ref: a51ffb1ffeae15d8f9471224cb799d54007098a2, path: tests/mockups }
+  isNot: ["Shelf internals are not modelled."]

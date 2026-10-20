@@ -1,0 +1,9 @@
+# The operators' namespace (NHC's DEPLOYMENT_NAMESPACE; the FAR templates, the remediations NHC
+# creates from them and the BMC Secrets live here, as in a medik8s install) and one for workloads.
+apiVersion: v1
+kind: Namespace
+metadata: { name: medik8s }
+---
+apiVersion: v1
+kind: Namespace
+metadata: { name: dc-twin-medik8s }

@@ -1,0 +1,29 @@
+# Prometheus scraping the twin's in-host exporters (internal/adapter/metrics, IMPERSONATED: D24).
+#
+# Targets are the exporters' site names, "<node>:<the exporter's default port>", as a stack's own
+# Prometheus would address them; they are reached through the twin's site gateway (an HTTP proxy
+# that routes only to estate endpoints). run.sh writes the targets file from `dctwin endpoints`
+# and replaces __GATEWAY__ with the gateway address before Prometheus starts.
+global:
+  scrape_interval: 5s
+  scrape_timeout: 4s
+  evaluation_interval: 5s
+  external_labels:
+    estate: lab-model
+
+rule_files:
+  - rules/*.yml
+
+scrape_configs:
+  # DCGM-exporter (NVIDIA): GB300 and GB200 compute trays, HGX H100 and A100 servers. :9400
+  - job_name: dcgm-exporter
+    proxy_url: http://__GATEWAY__
+    file_sd_configs: [{ files: [targets/dcgm.json], refresh_interval: 30s }]
+  # AMD Device Metrics Exporter: MI355X servers. :5000
+  - job_name: amd-device-metrics-exporter
+    proxy_url: http://__GATEWAY__
+    file_sd_configs: [{ files: [targets/amd.json], refresh_interval: 30s }]
+  # Intel Gaudi metric exporter: Gaudi 3 servers. :41611
+  - job_name: gaudi-metric-exporter
+    proxy_url: http://__GATEWAY__
+    file_sd_configs: [{ files: [targets/gaudi.json], refresh_interval: 30s }]

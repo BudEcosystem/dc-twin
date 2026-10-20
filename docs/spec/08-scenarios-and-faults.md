@@ -21,6 +21,7 @@ spec:
         - set:        { power.watts: 0 }
         - ports:      { owner: self, kind: scale-up, state: down }
         - kernelLog:  { line: "NVRM: Xid (PCI:{pci}): 79, pid=*, GPU has fallen off the bus.", appliesAt: [vm] }
+        - kernelLog:  { line: "NVRM: The NVIDIA GPU {pci} … has fallen off the bus and is not responding to commands.", appliesAt: [vm], when: boot }
         - shim:       { driver: nvidia/mokka, fault: fallen-off-bus, appliesAt: [vm] }
         - redfish.logEntry: { severity: Critical, messageId: "{dialect}" }
       clears: { on: [device.acCycle], manual: true }
@@ -44,7 +45,7 @@ spec:
 | `set` | sets owned fields on the target | yes | yes |
 | `counter` | increments an error counter | yes | yes (also visible through the shim) |
 | `ports` | changes port state for ports the target owns or the device has | yes | yes |
-| `kernelLog` | writes a driver line the fault would produce | recorded on the model only | written to `/dev/kmsg` by the in-host agent |
+| `kernelLog` | writes a driver line the fault would produce: when it is injected, or with `when: boot` at every boot of the host while the fault holds (what the driver logs when it probes the broken device) | recorded on the model only | printk'd by the in-host agent's kernel module (facility `kern`), or written to `/dev/kmsg` and marked when the module is absent (D50) |
 | `shim` | tells the in-host accelerator shim to present the fault | no effect | yes |
 | `redfish.logEntry`, `redfish.property` | SEL and LogService entries; a dialect-specific property | yes | yes |
 | `bms` | publishes a point in the estate's BMS dialect | yes | yes |

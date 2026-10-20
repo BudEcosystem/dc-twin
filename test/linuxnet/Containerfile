@@ -1,0 +1,8 @@
+# The runner for test/linuxnet: ISC Kea (the dhcp adapter's Kea test image) plus iproute2 and
+# tcpdump, so the tests can print what ip(8), bridge(8) and the wire show. scripts/linux-substrate-e2e.sh copies the test
+# binary in and runs it privileged, with the Docker Engine's socket and the host's PID namespace
+# (to open the network namespaces of the NOS containers the twin starts).
+FROM dctwin-kea-e2e:2.6
+RUN apk add --no-cache iproute2 tcpdump
+RUN mkdir -p /work/test/linuxnet
+WORKDIR /work/test/linuxnet

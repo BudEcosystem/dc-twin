@@ -1,0 +1,63 @@
+# Three NodeHealthChecks over disjoint sets of the twin's GPU servers, each remediating with a
+# FenceAgentsRemediationTemplate (run.sh renders the templates with each BMC's endpoint).
+# Unhealthy after 20 s instead of NHC's default 300 s, so a run takes minutes; minHealthy 50% so
+# one of two servers may be remediated. healthyDelay 30 s: a twin host's Node is Ready the moment
+# the host reaches power On (the engine models no POST or OS boot), where a real server's kubelet
+# takes minutes, so NHC would call the node healthy, and delete the remediation under FAR, while
+# fence_ipmilan is still confirming the power-on; the delay stands in for the boot (README).
+#
+#   ipmi-onoff   b01 (Dell XE9680, H100)     fence_ipmilan, reboot as power off then on (the default)
+#   ipmi-cycle   b05 (Lenovo SR670 V2, A100) fence_ipmilan --method=cycle (IPMI chassis power cycle)
+#   redfish      b02 (Supermicro, H100)      fence_redfish, out-of-service taint strategy
+apiVersion: remediation.medik8s.io/v1alpha1
+kind: NodeHealthCheck
+metadata: { name: ipmi-onoff }
+spec:
+  selector:
+    matchExpressions: [{ key: dc-twin.io/rack, operator: In, values: [b01] }]
+  minHealthy: "50%"
+  healthyDelay: 30s
+  unhealthyConditions:
+    - { type: Ready, status: "False", duration: 20s }
+    - { type: Ready, status: Unknown, duration: 20s }
+    - { type: GpuHealthy, status: "False", duration: 20s }
+  remediationTemplate:
+    apiVersion: fence-agents-remediation.medik8s.io/v1alpha1
+    kind: FenceAgentsRemediationTemplate
+    name: fence-ipmilan
+    namespace: medik8s
+---
+apiVersion: remediation.medik8s.io/v1alpha1
+kind: NodeHealthCheck
+metadata: { name: ipmi-cycle }
+spec:
+  selector:
+    matchExpressions: [{ key: dc-twin.io/rack, operator: In, values: [b05] }]
+  minHealthy: "50%"
+  healthyDelay: 30s
+  unhealthyConditions:
+    - { type: Ready, status: "False", duration: 20s }
+    - { type: Ready, status: Unknown, duration: 20s }
+    - { type: GpuHealthy, status: "False", duration: 20s }
+  remediationTemplate:
+    apiVersion: fence-agents-remediation.medik8s.io/v1alpha1
+    kind: FenceAgentsRemediationTemplate
+    name: fence-ipmilan-cycle
+    namespace: medik8s
+---
+apiVersion: remediation.medik8s.io/v1alpha1
+kind: NodeHealthCheck
+metadata: { name: redfish }
+spec:
+  selector:
+    matchExpressions: [{ key: dc-twin.io/rack, operator: In, values: [b02] }]
+  minHealthy: "50%"
+  healthyDelay: 30s
+  unhealthyConditions:
+    - { type: Ready, status: "False", duration: 20s }
+    - { type: Ready, status: Unknown, duration: 20s }
+  remediationTemplate:
+    apiVersion: fence-agents-remediation.medik8s.io/v1alpha1
+    kind: FenceAgentsRemediationTemplate
+    name: fence-redfish
+    namespace: medik8s

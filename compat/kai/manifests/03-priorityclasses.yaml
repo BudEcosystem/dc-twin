@@ -1,0 +1,21 @@
+# KAI's default priority classes (deployments/kai-scheduler/templates/priorityclasses at v0.18.6);
+# the pod grouper names them on the PodGroups it creates.
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata: { name: train }
+value: 50
+---
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata: { name: build-preemptible }
+value: 75
+---
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata: { name: inference }
+value: 125
+---
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata: { name: build }
+value: 100

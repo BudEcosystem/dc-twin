@@ -1,0 +1,23 @@
+# The DPUSet the HBN guide's DPUDeployment makes (manifests/03.1-dpudeployment-installation-pf/
+# dpudeployment.yaml at v26.8.0: its `dpus` section, which DPF's dpuservice controller turns into
+# a DPUSet per entry of dpuSets): the guide's BFB and HBN flavor on every DPUNode discovery
+# labelled, with the guide's node effect (hold). The DPUDeployment's services and service chains
+# need DPUs that have joined the DPU cluster, so the harness applies the DPUSet alone.
+apiVersion: provisioning.dpu.nvidia.com/v1alpha1
+kind: DPUSet
+metadata:
+  name: hbn-dpuset1
+  namespace: dpf-operator-system
+spec:
+  dpuNodeSelector:
+    matchLabels:
+      feature.node.kubernetes.io/dpu-enabled: "true"
+  strategy:
+    type: OnDelete
+  dpuTemplate:
+    spec:
+      dpuFlavor: hbn-@TAG@
+      bfb:
+        name: bf-bundle-@TAG@
+      nodeEffect:
+        hold: true

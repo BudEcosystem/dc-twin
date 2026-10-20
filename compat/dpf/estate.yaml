@@ -1,0 +1,32 @@
+# The estate NVIDIA DOCA Platform Framework (DPF) provisions in zero-trust mode (compat/dpf): one
+# rack of two Grace Hopper servers, each carrying one BlueField-3 DPU whose BMC is on the
+# management network, as the HBN guide's two workers are. DPF reaches only the DPU BMCs, over
+# Redfish through the site gateway; the hosts stay outside DPF's cluster, as zero-trust mode
+# requires. The BlueField BMCs are fronted by the `bluefield` adapter (certificates, mTLS, the
+# BFB push and the DPU's OEM resources); everything else of their Redfish service is the redfish
+# engine's. Behaviours are scaled to a tenth of their real duration (timeScale).
+# Conforms to docs/spec/13-schemas.md.
+apiVersion: dc-twin/v1alpha1
+kind: Estate
+metadata: { name: dpf-zero-trust }
+spec:
+  seed: 2608
+  clock: wall
+  timeScale: 0.1
+  packs: [generic@0.1.0, nvidia@0.1.0]
+  sites:
+    - name: site-1
+      halls:
+        - name: hall-a
+          rows:
+            - name: a
+              positions: 2
+              racks:
+                - { name: w01, position: 1, format: generic/cpu-rack, params: { server: nvidia/gh200-server, servers: 2 } }
+  networks:
+    oob: { role: management, dhcp: twin, cidr: 10.30.0.0/20, fabric: oob }
+  fabrics:
+    - { name: oob, template: oob-flat, nos: none }
+  facility:
+    power: { feeds: [{ name: A, capacityW: 60000 }, { name: B, capacityW: 60000 }] }
+  stacks: []

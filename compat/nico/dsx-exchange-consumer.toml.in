@@ -1,0 +1,20 @@
+# NICo's nico-dsx-exchange-consumer on the twin-hosted DSX Exchange broker (MQTT 3.1.1),
+# writing rack health reports to nico-api. Filled by run.sh.
+[mqtt]
+endpoint = "127.0.0.1"
+port = @BROKER_PORT@
+client_id = "nico-dsx-exchange-consumer-dctwin"
+topic_prefix = "BMS/v1"
+
+[cache]
+metadata_ttl = "1h"
+value_state_ttl = "1h"
+
+[carbide_api]
+root_ca = "@WORK@/certs/ca.crt"
+client_cert = "@WORK@/certs/nico-dsx-exchange-consumer.crt"
+client_key = "@WORK@/certs/nico-dsx-exchange-consumer.key"
+api_url = "https://localhost:@API_PORT@"
+
+[metrics]
+endpoint = "127.0.0.1:@CONSUMER_METRICS_PORT@"

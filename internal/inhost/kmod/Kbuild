@@ -1,0 +1,2 @@
+obj-m := dctwin-kmsg.o
+dctwin-kmsg-y := dctwin_kmsg.o

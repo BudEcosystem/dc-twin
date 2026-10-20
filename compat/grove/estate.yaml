@@ -1,0 +1,40 @@
+# Two GB300 NVL72 racks, one NVLink domain each, at model fidelity: the smallest estate in which a
+# topology-packed serving workload has a second domain to be placed in. compat/grove/run.sh projects
+# their 36 compute trays as Kubernetes Nodes (the kwok adapter, impersonated: D24) for Grove, the
+# Dynamo operator and KAI Scheduler. `stacks:` must stay the last key (compat/kai/lib/twin.sh
+# replaces it with the scratch cluster's kubeconfig).
+apiVersion: dc-twin/v1alpha1
+kind: Estate
+metadata:
+  name: serving-gb300
+spec:
+  seed: 3131
+  clock: wall
+  timeScale: 0.05
+  packs: [generic@0.1.0, nvidia@0.1.0, liteon@0.1.0]
+  fidelity: { default: model }
+  sites:
+    - name: site-1
+      halls:
+        - name: hall-a
+          rows:
+            - name: a
+              positions: 4
+              racks:
+                - { name: a01, position: 1, format: nvidia/gb300-nvl72, feeds: [A, B] }
+                - { name: a02, position: 2, format: nvidia/gb300-nvl72, feeds: [A, B] }
+                - { name: a04, position: 4, format: generic/network-rack, params: { ufm: nvidia/ufm-appliance } }
+  networks:
+    oob:          { role: management,   dhcp: twin, cidr: 10.30.0.0/20, fabric: oob }
+    provisioning: { role: provisioning, dhcp: twin, cidr: 10.40.0.0/20, fabric: frontend }
+    frontend:     { role: frontend,     fabric: frontend }
+    backend:      { role: scale-out,    fabric: backend }
+    service:      { role: service,      cidr: 10.90.0.0/24, dhcp: none }
+  fabrics:
+    - { name: oob,      template: oob-flat,   nos: none }
+    - { name: frontend, template: clos-2tier, nos: none, params: { leafsPerRack: 2, spines: 2 }, placeIn: a04 }
+    - { name: backend,  template: rail-optimised, nos: none, technology: infiniband, manager: nvidia/ufm, params: { rails: 4 }, select: "a01 a02", placeIn: a04 }
+  facility:
+    power: { feeds: [{ name: A, capacityW: 600000 }, { name: B, capacityW: 600000 }] }
+    cooling: { loops: [{ name: cdu-1, profile: generic/cdu-inrow, racks: [a01, a02], capacityKW: 400 }] }
+  stacks: []

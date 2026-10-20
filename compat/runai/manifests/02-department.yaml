@@ -1,0 +1,17 @@
+# A department with a queue per node pool: the ceiling its projects share (KRM's
+# docs/concepts/examples/department.yaml shape). gpu is in GPUs, cpu in millicores, memory in MB;
+# -1 is "no ceiling".
+apiVersion: kai.resources/v1alpha1
+kind: Department
+metadata: { name: ai }
+spec:
+  queues:
+    - name: ai
+      nodepool: default
+      resources: &open
+        gpu: { deserved: -1, limit: -1, overQuotaWeight: 1 }
+        cpu: { deserved: -1, limit: -1, overQuotaWeight: 1 }
+        memory: { deserved: -1, limit: -1, overQuotaWeight: 1 }
+    - { name: ai-gb300, nodepool: gb300, resources: *open }
+    - { name: ai-gb200, nodepool: gb200, resources: *open }
+    - { name: ai-h100, nodepool: h100, resources: *open }

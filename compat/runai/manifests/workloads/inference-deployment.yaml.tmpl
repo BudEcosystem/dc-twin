@@ -1,0 +1,25 @@
+# An inference service as a plain apps/v1 Deployment in the serving project's namespace: @REPLICAS@
+# replicas of @GPUS@ GPUs, placed by the project's default node pool unless the annotations and
+# affinity name others (kai.scheduler/node-pools, with matching node affinity, as KRM documents).
+# kube-controller-manager's Deployment and ReplicaSet controllers create the pods; KAI groups each
+# into its own PodGroup. run.sh fills the @...@ fields. No kubelet runs behind the twin's Nodes.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: @NAME@
+  namespace: kai-serving
+  labels: { dc-twin.io/workload: @NAME@ }
+spec:
+  replicas: @REPLICAS@
+  selector: { matchLabels: { dc-twin.io/workload: @NAME@ } }
+  template:
+    metadata:
+      labels: { dc-twin.io/workload: @NAME@ }
+      annotations: { @ANNOTATIONS@ }
+    spec:
+      terminationGracePeriodSeconds: 0
+      affinity: @AFFINITY@
+      containers:
+        - name: main
+          image: registry.invalid/dc-twin/never-pulled:0
+          resources: { limits: { nvidia.com/gpu: "@GPUS@" } }

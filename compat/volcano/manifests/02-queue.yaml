@@ -1,0 +1,6 @@
+# The queue the workloads go to (under Volcano's root queue). No capability: what is tested is
+# placement, gang admission and the scheduler's view of the twin's Nodes, not fair share.
+apiVersion: scheduling.volcano.sh/v1beta1
+kind: Queue
+metadata: { name: dc-twin }
+spec: { weight: 1, reclaimable: false }

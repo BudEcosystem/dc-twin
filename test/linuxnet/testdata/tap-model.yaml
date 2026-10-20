@@ -1,0 +1,32 @@
+# The TAP substrate on model switches (D20, D21): two racks of three servers, every BMC on its
+# own veth with its own MAC, one Linux bridge per rack segment, the twin relay at each segment's
+# gateway. test/linuxnet runs it inside a privileged Linux container (scripts/linux-substrate-e2e.sh).
+apiVersion: dc-twin/v1alpha1
+kind: Estate
+metadata:
+  name: linuxnet-model
+spec:
+  seed: 2027
+  clock: wall
+  timeScale: 0.05
+  packs: [generic@0.1.0]
+  fidelity: { default: model }
+  sites:
+    - name: site-1
+      halls:
+        - name: hall-a
+          rows:
+            - name: a
+              positions: 4
+              racks:
+                - { name: r01, position: 1, format: generic/cpu-rack, params: { servers: 3 }, feeds: [A, B] }
+                - { name: r02, position: 2, format: generic/cpu-rack, params: { servers: 3 }, feeds: [A, B] }
+  networks:
+    oob: { role: management, dhcp: twin, cidr: 10.30.0.0/20, fabric: oob }
+  fabrics:
+    - { name: oob, template: oob-flat, nos: none }
+  facility:
+    power:
+      feeds: [{ name: A, capacityW: 200000 }, { name: B, capacityW: 200000 }]
+  adapters:
+    network: { substrate: tap }

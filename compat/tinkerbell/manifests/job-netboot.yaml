@@ -1,0 +1,19 @@
+# The Job Tinkerbell's tink-controller creates for a Workflow with bootMode netboot
+# (tink/controller/internal/workflow/pre.go at v0.25.0): three tasks run in order by one Job,
+# each a Task object Rufio creates when the previous one completes. efiBoot follows
+# Hardware.spec.interfaces[].dhcp.uefi; here it is true.
+apiVersion: bmc.tinkerbell.org/v1alpha1
+kind: Job
+metadata:
+  name: @JOB@
+  namespace: dctwin
+spec:
+  machineRef:
+    name: @MACHINE@
+    namespace: dctwin
+  tasks:
+    - powerAction: "off"
+    - oneTimeBootDeviceAction:
+        device: [pxe]
+        efiBoot: true
+    - powerAction: "on"

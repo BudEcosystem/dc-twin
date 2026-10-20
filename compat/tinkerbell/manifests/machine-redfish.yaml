@@ -1,0 +1,26 @@
+# A Rufio Machine reaching a twin BMC over Redfish (bmclib's gofish provider). The twin serves each
+# BMC on its own loopback port, so the port goes in providerOptions.redfish.port (Rufio passes it
+# to bmclib as WithRedfishPort); on a real site it would be 443 on the BMC's own address.
+# systemName is set only where a BMC serves more than one ComputerSystem (the GB300 tray: the host
+# System_0 and the HGX baseboard), as an operator would; bmclib matches it against the system Name.
+apiVersion: bmc.tinkerbell.org/v1alpha1
+kind: Machine
+metadata:
+  name: @MACHINE@
+  namespace: dctwin
+  labels:
+    dc-twin/protocol: redfish
+  annotations:
+    dc-twin/device: "@DEVICE@"
+spec:
+  connection:
+    host: "@HOST@"
+    insecureTLS: true
+    authSecretRef:
+      name: @SECRET@
+      namespace: dctwin
+    providerOptions:
+      preferredOrder: [gofish]
+      redfish:
+        port: @PORT@
+        systemName: "@SYSTEM_NAME@"

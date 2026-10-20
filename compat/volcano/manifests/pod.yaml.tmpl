@@ -1,0 +1,17 @@
+# One pod for vc-scheduler (no Volcano Job): vc-controller-manager gives it a PodGroup of one.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: @NAME@
+  namespace: dc-twin-volcano
+  labels: { dc-twin.io/workload: @NAME@ }
+  annotations: { scheduling.volcano.sh/queue-name: dc-twin }
+spec:
+  schedulerName: volcano
+  nodeSelector: { @SELECTOR@ }
+  terminationGracePeriodSeconds: 0
+  containers:
+    - name: main
+      image: registry.invalid/dc-twin/never-pulled:0
+      resources:
+        limits: { "@RESOURCE@": "@PER_POD@" }

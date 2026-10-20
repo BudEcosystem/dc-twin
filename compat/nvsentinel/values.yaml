@@ -1,0 +1,42 @@
+# NVSentinel's Helm chart values for compat/nvsentinel. The harness renders the chart at the pinned
+# tag with these (helm template) and gives each module the ConfigMaps the chart makes, so every
+# rule set, drain policy and remediation template is the chart's own. What differs from the
+# chart's defaults, and why:
+global:
+  datastore:
+    provider: postgresql
+    connection:
+      host: HOST            # run.sh sets the address the containers reach this host's PostgreSQL by
+      port: 5432            # and its port
+      database: nvsentinel
+      username: postgres
+      sslmode: disable      # a scratch PostgreSQL with trust authentication; no cert-manager issues client certificates
+  platformConnectorAuth:
+    enabled: false          # node binding authenticates each node's monitor pod by its projected ServiceAccount token; no kubelet projects one here
+  syslogHealthMonitor: { enabled: true }
+  faultQuarantine: { enabled: true }
+  nodeDrainer: { enabled: true }
+  faultRemediation: { enabled: true }
+  janitor: { enabled: true }
+  janitorProvider: { enabled: true }
+  gpuHealthMonitor: { enabled: true }        # rendered for its ConfigMap: the GPU guest runs it with an in-process DCGM on Mokka's NVML (lib/gpu.sh)
+  metadataCollector: { enabled: false }      # GPU UUIDs by PCI address from NVML; the Xid events name the PCI address only
+  dcgm:
+    mode: embedded-mode     # the monitor's in-process host engine (--dcgm-mode local-managed): no GPU Operator DCGM service runs
+    enabled: false          # and no DCGM Kubernetes service
+  labeler: { enabled: false }                # labels from the GPU Operator's DCGM and driver pods; none run
+  healthEventsAnalyzer: { enabled: false }   # not on the Xid 79 path
+  mongodbStore: { enabled: false }
+postgresql:
+  enabled: false            # the harness runs PostgreSQL itself
+janitor-provider:
+  csp:
+    provider: label         # bare metal: the janitor asks for a reboot by labelling the Node; the site's lifecycle manager carries it out
+node-drainer:
+  userNamespaces:
+    - name: dc-twin-training  # the harness's workload: evicted at once (the chart's default for every namespace is AllowCompletion)
+      mode: Immediate
+    - name: "*"
+      mode: AllowCompletion
+gpu-health-monitor:
+  runtimeClassName: nvidia  # required by the chart in embedded-mode; the GPU guest runs the container privileged on the driver tree instead

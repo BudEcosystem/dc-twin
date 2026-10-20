@@ -1,0 +1,16 @@
+# A plain KAI pod holding all four GPUs of one named tray (it stands for other tenants' work), so a
+# test can leave an NVLink domain with a chosen number of free trays.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: @NAME@
+  namespace: dc-twin-serving
+  labels: { kai.scheduler/queue: serving, dc-twin.io/workload: filler }
+spec:
+  schedulerName: kai-scheduler
+  nodeSelector: { kubernetes.io/hostname: @NODE@ }
+  terminationGracePeriodSeconds: 0
+  containers:
+    - name: main
+      image: registry.invalid/dc-twin/never-pulled:0
+      resources: { limits: { nvidia.com/gpu: "4" } }

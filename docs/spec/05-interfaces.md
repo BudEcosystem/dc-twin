@@ -83,7 +83,7 @@ NVRAM on the next reset** and read back by the NVRAM observer.
 |---|---|---|
 | **Accelerator management library** | Device inventory, health, clocks, power and limits, ECC and error counters, topology, driver-visible faults | A shim under the vendor's real library, so the real CLI, DCGM-class daemons, device plugins, DRA drivers and feature discovery all see accelerators. NVIDIA: **Mokka** (`NVIDIA/k8s-test-infra`), which replaces `libnvidia-ml.so`. AMD and Intel shims: [Q7](11-decisions.md#q7) |
 | **sysfs for Go consumers** | `/sys/class/infiniband`, `/sys/bus/pci` as the model says | Mokka's sysfs surfaces are `LD_PRELOAD` interception, which **Go binaries bypass**; NVSentinel's NIC monitor is Go. The in-host agent **bind-mounts a model-driven tree** at the real paths ([Q16](11-decisions.md#q16)) |
-| **Kernel log** | Driver messages a fault would produce (`NVRM: Xid …`, amdgpu RAS lines, habanalabs errors) | The in-host agent writes to `/dev/kmsg`, with message templates from the pack's fault catalogue |
+| **Kernel log** | Driver messages a fault would produce (`NVRM: Xid …`, amdgpu RAS lines, habanalabs errors) | The in-host agent printk's them through its kernel module (`dctwin-kmsg`, facility `kern`), or writes them to `/dev/kmsg`, marked, where the module is absent (D50); message templates come from the pack's fault catalogue, and a `when: boot` line is written at every boot while its fault holds |
 | **TPM** | Measured boot, endorsement key, quote | swtpm; PCRs are the real measurements OVMF makes |
 | **In-host agent** | Applies the above | Talks to the engine over **virtio-vsock only**. Never on a twin network ([D10](11-decisions.md)) |
 

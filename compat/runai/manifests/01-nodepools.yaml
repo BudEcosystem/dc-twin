@@ -1,0 +1,19 @@
+# Run:ai node pools, one per accelerator product, selected by the label GPU Feature Discovery
+# publishes and the twin's Node projection carries (nvidia.com/gpu.product). The NVL72 pools prefer
+# the `nvlink` KAI Topology, so KRM's pod-group-assigner adds a preferred NVLink-clique constraint
+# to their workloads. Every other Node (A100, AMD, Gaudi, CPU) stays in the `default` pool, which
+# KRM's chart creates.
+apiVersion: kai.resources/v1alpha1
+kind: NodePool
+metadata: { name: gb300 }
+spec: { labelKey: nvidia.com/gpu.product, labelValue: NVIDIA-GB300, preferredNetworkTopologyName: nvlink }
+---
+apiVersion: kai.resources/v1alpha1
+kind: NodePool
+metadata: { name: gb200 }
+spec: { labelKey: nvidia.com/gpu.product, labelValue: NVIDIA-GB200, preferredNetworkTopologyName: nvlink }
+---
+apiVersion: kai.resources/v1alpha1
+kind: NodePool
+metadata: { name: h100 }
+spec: { labelKey: nvidia.com/gpu.product, labelValue: NVIDIA-H100-80GB-HBM3 }

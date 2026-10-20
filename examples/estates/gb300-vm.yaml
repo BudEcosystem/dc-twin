@@ -1,0 +1,49 @@
+# One GB300 NVL72 rack with ONE compute tray at vm fidelity: a real aarch64 virtual machine
+# (QEMU, UEFI, NVRAM, SMBIOS from the tray's identity) behind the tray's emulated BMC. Its power
+# is observed from the machine (D19): Redfish, IPMI and `dctwin power` hand requests to QEMU,
+# and PowerState follows what QEMU reports. Every other device is at model fidelity.
+#
+# Needs QEMU with UEFI firmware for aarch64 (macOS: brew install qemu) on an arm64 host, where the
+# guest runs under Hypervisor.framework (or KVM on Linux), and the twin's guest image:
+#   bin/dctwin assets fetch
+#   bin/dctwin up examples/estates/gb300-vm.yaml --adapters redfish,ipmi,vm
+#   bin/dctwin console a01/compute-tray-01
+apiVersion: dc-twin/v1alpha1
+kind: Estate
+metadata: { name: gb300-vm }
+spec:
+  seed: 1729
+  clock: wall                       # a vm device forces the wall clock (D22)
+  timeScale: 0.05                   # model behaviours (shelves, BMCs) only; the VM boots in its own time
+  packs: [generic@0.1.0, nvidia@0.1.0, liteon@0.1.0]
+  fidelity:
+    default: model
+    overrides:                      # last match wins
+      - { select: "a01/compute-tray-01", level: vm, os: twin }
+      - { select: "a01/compute-tray-01/bf3-0", level: model }   # the tray's BlueField stays a model device (Q1)
+  adapters:
+    vm: { memoryMB: 1024, cpus: 2 }  # the profile asks 12 GB and 4 vCPU; the report prints the scaling
+  sites:
+    - name: site-1
+      halls:
+        - name: hall-a
+          rows:
+            - name: a
+              positions: 10
+              racks:
+                - { name: a01, position: 1, format: nvidia/gb300-nvl72, feeds: [A, B] }
+                - { name: a10, position: 10, format: generic/network-rack, params: { ufm: nvidia/ufm-appliance } }
+  networks:
+    oob:          { role: management,   dhcp: twin, cidr: 10.30.0.0/20, fabric: oob }
+    provisioning: { role: provisioning, dhcp: twin, cidr: 10.40.0.0/20, fabric: frontend }
+    frontend:     { role: frontend,     fabric: frontend }
+    backend:      { role: scale-out,    fabric: backend }
+    service:      { role: service,      cidr: 10.90.0.0/24, dhcp: none }
+  fabrics:
+    - { name: oob,      template: oob-flat,   nos: none }
+    - { name: frontend, template: clos-2tier, nos: none, params: { leafsPerRack: 2, spines: 2 }, placeIn: a10 }
+    - { name: backend,  template: rail-optimised, nos: none, technology: infiniband, manager: nvidia/ufm, params: { rails: 4 }, select: a01, placeIn: a10 }
+  facility:
+    power: { feeds: [{ name: A, capacityW: 300000 }, { name: B, capacityW: 300000 }] }
+    cooling: { loops: [{ name: cdu-1, profile: generic/cdu-inrow, racks: [a01], capacityKW: 200 }] }
+  stacks: []

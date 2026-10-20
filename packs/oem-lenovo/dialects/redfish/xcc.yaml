@@ -1,0 +1,18 @@
+apiVersion: dc-twin/v1alpha1
+kind: RedfishDialect
+metadata: { name: oem-lenovo/xcc, version: 0.1.0 }
+spec:
+  backend: mockup
+  mockup: libredfish/lenovo
+  system: /redfish/v1/Systems/1
+  manager: /redfish/v1/Managers/1
+  chassis: /redfish/v1/Chassis/1
+  bmcInterface: /redfish/v1/Managers/1/EthernetInterfaces/NIC
+  bind: { serial: "/redfish/v1/Systems/1#SerialNumber", uuid: "/redfish/v1/Systems/1#UUID" }
+  factory: { user: root }
+  seedAccounts: true
+  overlays:
+    - { path: "/redfish/v1/Systems/1", set: Model, from: model }
+    - { path: "/redfish/v1/Systems/1", set: Status.HealthRollup, from: health }
+  isNot: ["Serves NICo's captured ThinkSystem SR670 V2 XCC tree bound to the model; OEM job queues answer as captured."]
+  sources: [{ what: "captured ThinkSystem SR670 V2 XCC", url: "https://github.com/dsx-ai-factory/libredfish/tree/a51ffb1ffeae15d8f9471224cb799d54007098a2/tests/mockups/lenovo", date: 2026-10-18 }]

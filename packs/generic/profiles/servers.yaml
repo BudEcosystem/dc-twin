@@ -1,0 +1,92 @@
+apiVersion: dc-twin/v1alpha1
+kind: DeviceProfile
+metadata: { name: generic/server-2u, version: 0.1.0 }
+spec:
+  class: server
+  form: { mounting: rack, units: 2 }
+  identity: { serialFormat: "GS{alnum:10}", macOUI: "02:dc:01", manufacturer: "dc-twin", model: "Generic 2U Server" }
+  components:
+    - { name: cpu, kind: cpu, count: 2, model: "x86-64, 32 cores" }
+    - { name: dimm, kind: memory, count: 16, model: "DDR5 64 GB" }
+    - { name: nic, kind: nic, count: 2, model: "25GbE" }
+    - { name: nvme, kind: drive, count: 2, model: "NVMe 1.92 TB" }
+    - { name: psu, kind: psu, count: 2, model: "1100 W" }
+    - { name: fan, kind: fan, count: 6, model: "60 mm" }
+    - { name: tpm, kind: tpm, count: 1, model: "TPM 2.0" }
+  bmc: { dialect: generic/dmtf, ipmi: true, console: none }
+  ports:
+    - { name: bmc0, kind: ethernet, speed: 1G, role: management }
+    - { name: eth0, kind: ethernet, speed: 25G, role: provisioning }
+    - { name: eth1, kind: ethernet, speed: 25G, role: frontend }
+    - { name: "psu-{0..1}", kind: power-in, source: pdu }
+  power: { standbyW: 25, idleW: 180, maxW: 800 }
+  cooling: { kind: air }
+  sensors:
+    - { name: inlet, quantity: temperature, unit: C, warn: 35, crit: 45, source: inlet }
+    - { name: cpu-max, quantity: temperature, unit: C, warn: 85, crit: 95, source: cpu-max }
+    - { name: power, quantity: power, unit: W, source: power }
+  firmware:
+    - { component: bmc, baseline: "1.12.0", applyOn: reset }
+    - { component: bios, baseline: "2.4.1", applyOn: reset }
+  behaviours:
+    power: { onSeconds: 20, offSeconds: 8 }
+    boot: { postSeconds: 60 }
+    bmc: { bootSeconds: 45 }
+  faults: [generic/power, generic/bmc, generic/thermal, generic/link, generic/firmware]
+  fidelity:
+    model: {}
+    vm: { arch: x86_64, firmware: uefi, tpm: true, cost: { ramGB: 4, vcpu: 2 } }
+  kubernetes: { resources: {}, labels: { "node.kubernetes.io/instance-type": "generic-2u" } }
+  provides:
+    - { capability: "redfish/dialect:generic/dmtf", at: [model, vm] }
+    - { capability: redfish/event-service-sse, at: [model, vm] }
+    - { capability: redfish/update-service, at: [model, vm] }
+    - { capability: redfish/account-service, at: [model, vm] }
+    - { capability: ipmi/lan, at: [model] }
+    - { capability: boot/walk, at: [model] }
+  isNot:
+    all: ["A generic archetype: no vendor's BMC tree, firmware or quirks."]
+    model: ["No operating system runs; boot stops at the boot walk."]
+  sources:
+    - { what: archetype, url: "https://www.dmtf.org/standards/redfish", date: 2026-10-18 }
+---
+apiVersion: dc-twin/v1alpha1
+kind: DeviceProfile
+metadata: { name: generic/pcie-gpu-server, version: 0.1.0 }
+spec:
+  class: server
+  form: { mounting: rack, units: 4 }
+  identity: { serialFormat: "GP{alnum:10}", macOUI: "02:dc:02", manufacturer: "dc-twin", model: "Generic PCIe GPU Server" }
+  components:
+    - { name: cpu, kind: cpu, count: 2, model: "x86-64, 48 cores" }
+    - { name: gpu, kind: accelerator, vendor: nvidia, count: 4, model: "NVIDIA L40S", memoryGiB: 48, maxW: 350 }
+    - { name: nic, kind: nic, count: 2, model: "100GbE" }
+    - { name: psu, kind: psu, count: 2, model: "2400 W" }
+    - { name: fan, kind: fan, count: 6, model: "80 mm" }
+  bmc: { dialect: generic/dmtf, ipmi: true }
+  ports:
+    - { name: bmc0, kind: ethernet, speed: 1G, role: management }
+    - { name: eth0, kind: ethernet, speed: 100G, role: provisioning }
+    - { name: eth1, kind: ethernet, speed: 100G, role: frontend }
+    - { name: "psu-{0..1}", kind: power-in, source: pdu }
+  power: { standbyW: 30, idleW: 400, maxW: 2600 }
+  cooling: { kind: air }
+  sensors:
+    - { name: inlet, quantity: temperature, unit: C, warn: 35, crit: 45, source: inlet }
+    - { name: gpu-max, quantity: temperature, unit: C, warn: 85, crit: 95, source: accelerator-max }
+    - { name: power, quantity: power, unit: W, source: power }
+  firmware:
+    - { component: bmc, baseline: "1.12.0", applyOn: reset }
+    - { component: bios, baseline: "2.4.1", applyOn: reset }
+  behaviours: { power: { onSeconds: 25, offSeconds: 8 }, bmc: { bootSeconds: 45 } }
+  faults: [generic/power, generic/bmc, generic/thermal, generic/link, generic/firmware, nvidia/xid]
+  fidelity: { model: {}, vm: { arch: x86_64, firmware: uefi, tpm: true, cost: { ramGB: 8, vcpu: 4 } } }
+  kubernetes: { resources: { "nvidia.com/gpu": 4 } }
+  metrics: { exporter: dcgm }
+  provides:
+    - { capability: "redfish/dialect:generic/dmtf", at: [model, vm] }
+    - { capability: redfish/event-service-sse, at: [model, vm] }
+    - { capability: ipmi/lan, at: [model] }
+    - { capability: boot/walk, at: [model] }
+  isNot: ["A generic archetype: no vendor's BMC tree.", "GPUs carry state only; nothing executes."]
+  sources: [{ what: archetype, url: "https://www.dmtf.org/standards/redfish", date: 2026-10-18 }]

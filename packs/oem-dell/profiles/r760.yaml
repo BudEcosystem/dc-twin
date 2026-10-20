@@ -1,0 +1,39 @@
+apiVersion: dc-twin/v1alpha1
+kind: DeviceProfile
+metadata: { name: oem-dell/r760, version: 0.1.0 }
+spec:
+  class: server
+  form: { mounting: rack, units: 2 }
+  identity: { serialFormat: "{upper:2}{digits:5}", macOUI: "b0:7b:25", manufacturer: "Dell Inc.", model: "PowerEdge R760" }
+  components:
+    - { name: cpu, kind: cpu, count: 2, model: "Intel Xeon Gold 6430" }
+    - { name: nic, kind: nic, count: 2, model: "25GbE" }
+    - { name: psu, kind: psu, count: 2, model: "1400 W" }
+    - { name: fan, kind: fan, count: 6, model: "fan" }
+    - { name: nvme, kind: drive, count: 4, model: "NVMe 1.92 TB" }
+    - { name: tpm, kind: tpm, count: 1, model: "TPM 2.0" }
+  bmc: { dialect: oem-dell/idrac, ipmi: true }
+  ports:
+    - { name: bmc0, kind: ethernet, speed: 1G, role: management }
+    - { name: eth0, kind: ethernet, speed: 25G, role: provisioning }
+    - { name: eth1, kind: ethernet, speed: 25G, role: frontend }
+    - { name: "psu-{0..1}", kind: power-in, source: pdu }
+  power: { standbyW: 25, idleW: 220, maxW: 1100 }
+  cooling: { kind: air }
+  sensors:
+    - { name: inlet, quantity: temperature, unit: C, warn: 35, crit: 45, source: inlet }
+    - { name: cpu-max, quantity: temperature, unit: C, warn: 90, crit: 100, source: cpu-max }
+    - { name: power, quantity: power, unit: W, source: power }
+  firmware:
+    - { component: bmc, baseline: "7.10.30.00", applyOn: reset }
+    - { component: bios, baseline: "2.3.5", applyOn: reset }
+  behaviours: { power: { onSeconds: 30, offSeconds: 10 }, bmc: { bootSeconds: 90 } }
+  faults: [generic/power, generic/bmc, generic/thermal, generic/link, generic/firmware]
+  fidelity: { model: {}, vm: { arch: x86_64, firmware: uefi, tpm: true, cost: { ramGB: 4, vcpu: 2 } } }
+  provides:
+    - { capability: "redfish/dialect:oem-dell/idrac", at: [model, vm] }
+    - { capability: redfish/event-service-sse, at: [model, vm] }
+    - { capability: ipmi/lan, at: [model] }
+    - { capability: boot/walk, at: [model] }
+  isNot: ["The iDRAC tree is a captured R750 with R760 identity overlaid."]
+  sources: [{ what: "R760: 2U", url: "https://www.dell.com/en-us/shop/ipovw/poweredge-r760", date: 2026-10-18 }]

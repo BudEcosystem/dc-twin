@@ -1,0 +1,232 @@
+apiVersion: dc-twin/v1alpha1
+kind: DeviceProfile
+metadata: { name: nvidia/gb300-compute-tray, version: 0.1.0 }
+spec:
+  class: compute-tray
+  form: { mounting: tray, units: 1 }
+  identity: { serialFormat: "1{digits:12}", macOUI: "3c:6d:66", manufacturer: "NVIDIA", model: "NVIDIA GB300", partNumber: "699-25859-0310-TS3" }
+  components:
+    - { name: cpu, kind: cpu, count: 2, model: "NVIDIA Grace, 72 cores" }
+    - name: gpu
+      kind: accelerator
+      vendor: nvidia
+      count: 4
+      model: "NVIDIA GB300"   # the NVML name: dcgm-exporter's modelName and GFD's gpu.product derive from it
+      memoryGiB: 288
+      memoryMiB: 284208   # what NVML reports on a GB300 (Mokka's hardware capture)
+      serialShare: 2      # a superchip's two GPUs carry one board serial
+      maxW: 1400
+      ports: [{ name: nvl, kind: scale-up, technology: nvlink, lanes: 18 }]
+    - { name: cx8, kind: nic, count: 4, model: "ConnectX-8 800G" }
+    - { name: bf3, kind: dpu, count: 1, profile: nvidia/bluefield-3 }
+    - { name: nvme, kind: drive, count: 4, model: "NVMe 3.84 TB" }
+    - { name: tpm, kind: tpm, count: 1, model: "TPM 2.0" }
+    - { name: bmc, kind: bmc, count: 1, model: "NVIDIA BMC + HMC" }
+  bmc: { dialect: nvidia/gb300-bmc, ipmi: true, console: sol }
+  ports:
+    - { name: bmc0, kind: ethernet, speed: 1G, role: management }
+    - { name: "cx8-{0..3}", kind: infiniband, speed: 800G, role: scale-out }
+    - { name: pwr-in, kind: power-in, source: busbar }
+  power: { standbyW: 60, idleW: 1600, maxW: 7200, model: per-component }
+  cooling: { kind: liquid, loop: rack-manifold }
+  sensors:
+    - { name: coolant-in, quantity: temperature, unit: C, warn: 45, crit: 55, source: coolant-in }
+    - { name: gpu-max, quantity: temperature, unit: C, warn: 85, crit: 95, source: accelerator-max }
+    - { name: cpu-max, quantity: temperature, unit: C, warn: 90, crit: 100, source: cpu-max }
+    - { name: power, quantity: power, unit: W, source: power }
+    - { name: leak, quantity: leak, source: tray-leak-detector }
+  firmware:
+    - { component: bmc, baseline: "25.09.12", applyOn: reset }
+    - { component: uefi, baseline: "1.07.03", applyOn: reset }
+    - { component: cpld, baseline: "0.3.1", applyOn: ac-cycle }
+    - { component: gpu, baseline: "97.10.4A.00.01", applyOn: ac-cycle }
+  behaviours:
+    power: { onSeconds: 40, offSeconds: 10, requires: "rack.power.sourcesOn >= rack.power.minSources" }
+    boot: { postSeconds: 120 }
+    bmc: { bootSeconds: 90 }
+  faults: [generic/power, generic/bmc, generic/thermal, generic/leak, generic/firmware, generic/link, nvidia/xid, nvidia/nvlink]
+  fidelity:
+    model: {}
+    vm: { arch: aarch64, firmware: uefi, tpm: true, inHost: [nvidia/mokka], cost: { ramGB: 12, vcpu: 4 } }
+  kubernetes:
+    resources: { "nvidia.com/gpu": 4 }
+    labels: { "nvidia.com/gpu.clique": "{domain}" }   # product, count, family, memory: derived from the gpu component
+  metrics: { exporter: dcgm }
+  provides:
+    - { capability: "redfish/dialect:nvidia/gb-bmc", at: [model, vm] }
+    - { capability: "redfish/dialect:nvidia/gb300-bmc", at: [model, vm] }
+    - { capability: redfish/leak-detectors, at: [model, vm] }
+    - { capability: redfish/event-service-sse, at: [model, vm] }
+    - { capability: redfish/update-service, at: [model, vm] }
+    - { capability: redfish/account-service, at: [model, vm] }
+    - { capability: ipmi/lan, at: [model] }
+    - { capability: boot/walk, at: [model] }
+    - { capability: tpm2/measured-boot, at: [vm] }
+    - { capability: accelerator/nvml, at: [vm], via: nvidia/mokka }
+    - { capability: "kubernetes/nodes:kwok", at: [model], via: kwok }
+  isNot:
+    all: ["No NVLink data path: NVLink lanes carry state only.", "The HMC is projected through the BMC Redfish tree; it has no separate network presence.", "The Redfish tree is NICo's captured GB200 tray with GB300 identity overlays; no GB300 capture has been checked."]
+    vm: ["Grace is QEMU aarch64; on an x86 host this profile is model-only (09).", "In os: stack mode the GPUs are PCI stubs with no driver behind them (D23)."]
+  sources:
+    - { what: "tray composition: 4 B300, 2 Grace, 4 ConnectX-8, 1 BlueField-3", url: "https://docs.nvidia.com/enterprise-reference-architectures/nvl72-ai-factory/latest/components.html", date: 2026-10-18 }
+    - { what: "Redfish tree", url: "https://github.com/dsx-ai-factory/libredfish/tree/a51ffb1ffeae15d8f9471224cb799d54007098a2/tests/mockups/nvidia_gb200", date: 2026-10-18 }
+---
+apiVersion: dc-twin/v1alpha1
+kind: DeviceProfile
+metadata: { name: nvidia/gb200-compute-tray, version: 0.1.0 }
+spec:
+  class: compute-tray
+  form: { mounting: tray, units: 1 }
+  identity: { serialFormat: "1{digits:12}", macOUI: "3c:6d:66", manufacturer: "NVIDIA", model: "GB200 NVL", partNumber: "699-25859-0310-TS3" }
+  components:
+    - { name: cpu, kind: cpu, count: 2, model: "NVIDIA Grace, 72 cores" }
+    - name: gpu
+      kind: accelerator
+      vendor: nvidia
+      count: 4
+      model: "NVIDIA GB200"
+      memoryGiB: 186
+      serialShare: 2
+      maxW: 1200
+      ports: [{ name: nvl, kind: scale-up, technology: nvlink, lanes: 18 }]
+    - { name: cx7, kind: nic, count: 4, model: "ConnectX-7 400G" }
+    - { name: bf3, kind: dpu, count: 2, profile: nvidia/bluefield-3 }
+    - { name: nvme, kind: drive, count: 8, model: "NVMe 3.84 TB" }
+    - { name: tpm, kind: tpm, count: 1, model: "TPM 2.0" }
+    - { name: bmc, kind: bmc, count: 1, model: "NVIDIA BMC + HMC" }
+  bmc: { dialect: nvidia/gb-bmc, ipmi: true, console: sol }
+  ports:
+    - { name: bmc0, kind: ethernet, speed: 1G, role: management }
+    - { name: "cx7-{0..3}", kind: infiniband, speed: 400G, role: scale-out }
+    - { name: pwr-in, kind: power-in, source: busbar }
+  power: { standbyW: 60, idleW: 1400, maxW: 6000, model: per-component }
+  cooling: { kind: liquid, loop: rack-manifold }
+  sensors:
+    - { name: coolant-in, quantity: temperature, unit: C, warn: 45, crit: 55, source: coolant-in }
+    - { name: gpu-max, quantity: temperature, unit: C, warn: 85, crit: 95, source: accelerator-max }
+    - { name: cpu-max, quantity: temperature, unit: C, warn: 90, crit: 100, source: cpu-max }
+    - { name: power, quantity: power, unit: W, source: power }
+    - { name: leak, quantity: leak, source: tray-leak-detector }
+  firmware:
+    - { component: bmc, baseline: "24.09.17", applyOn: reset }
+    - { component: uefi, baseline: "1.06.02", applyOn: reset }
+    - { component: cpld, baseline: "0.2.1", applyOn: ac-cycle }
+    - { component: gpu, baseline: "97.00.82.00.01", applyOn: ac-cycle }
+  behaviours:
+    power: { onSeconds: 40, offSeconds: 10, requires: "rack.power.sourcesOn >= rack.power.minSources" }
+    boot: { postSeconds: 120 }
+    bmc: { bootSeconds: 90 }
+  faults: [generic/power, generic/bmc, generic/thermal, generic/leak, generic/firmware, generic/link, nvidia/xid, nvidia/nvlink]
+  fidelity:
+    model: {}
+    vm: { arch: aarch64, firmware: uefi, tpm: true, inHost: [nvidia/mokka], cost: { ramGB: 12, vcpu: 4 } }
+  kubernetes:
+    resources: { "nvidia.com/gpu": 4 }
+    labels: { "nvidia.com/gpu.clique": "{domain}" }
+  metrics: { exporter: dcgm }
+  provides:
+    - { capability: "redfish/dialect:nvidia/gb-bmc", at: [model, vm] }
+    - { capability: redfish/leak-detectors, at: [model, vm] }
+    - { capability: redfish/event-service-sse, at: [model, vm] }
+    - { capability: redfish/update-service, at: [model, vm] }
+    - { capability: redfish/account-service, at: [model, vm] }
+    - { capability: ipmi/lan, at: [model] }
+    - { capability: boot/walk, at: [model] }
+    - { capability: "kubernetes/nodes:kwok", at: [model], via: kwok }
+  isNot:
+    all: ["No NVLink data path: NVLink lanes carry state only.", "The HMC is projected through the BMC Redfish tree; it has no separate network presence."]
+    vm: ["Grace is QEMU aarch64; on an x86 host this profile is model-only (09)."]
+  sources:
+    - { what: "tray composition", url: "https://docs.nvidia.com/enterprise-reference-architectures/nvl72-ai-factory/latest/components.html", date: 2026-10-18 }
+    - { what: "Redfish tree", url: "https://github.com/dsx-ai-factory/libredfish/tree/a51ffb1ffeae15d8f9471224cb799d54007098a2/tests/mockups/nvidia_gb200", date: 2026-10-18 }
+---
+apiVersion: dc-twin/v1alpha1
+kind: DeviceProfile
+metadata: { name: nvidia/nvlink-switch-tray, version: 0.1.0 }
+spec:
+  class: switch-tray
+  form: { mounting: tray, units: 1 }
+  identity: { serialFormat: "MT{digits:7}{upper:3}", macOUI: "b8:3f:d2", manufacturer: "NVIDIA", model: "N5110_LD" }
+  components:
+    - name: nvswitch
+      kind: asic
+      vendor: nvidia
+      count: 2
+      model: "NVLink Switch"
+      maxW: 400
+      ports: [{ name: nvl, kind: scale-up, technology: nvlink, lanes: 72 }]
+    - { name: cpu, kind: cpu, count: 1, model: "Switch tray CPU" }
+    - { name: bmc, kind: bmc, count: 1, model: "NVIDIA BMC" }
+  bmc: { dialect: nvidia/nvswitch-tray, ipmi: false, console: ssh }
+  ports:
+    - { name: bmc0, kind: ethernet, speed: 1G, role: management }
+    - { name: mgmt0, kind: ethernet, speed: 1G, role: management }
+    - { name: pwr-in, kind: power-in, source: busbar }
+  power: { standbyW: 40, idleW: 600, maxW: 1700 }
+  cooling: { kind: liquid, loop: rack-manifold }
+  sensors:
+    - { name: asic-max, quantity: temperature, unit: C, warn: 95, crit: 105, source: asic-max }
+    - { name: power, quantity: power, unit: W, source: power }
+    - { name: leak, quantity: leak, source: tray-leak-detector }
+  firmware:
+    - { component: bmc, baseline: "25.06.2", applyOn: reset }
+    - { component: nvos, baseline: "25.02.2553", applyOn: reset }
+  behaviours:
+    power: { onSeconds: 60, offSeconds: 10, requires: "rack.power.sourcesOn >= rack.power.minSources" }
+    bmc: { bootSeconds: 90 }
+  faults: [generic/power, generic/bmc, generic/leak, generic/firmware, nvidia/nvlink]
+  fidelity: { model: {} }
+  provides:
+    - { capability: "redfish/dialect:nvidia/nvswitch-tray", at: [model] }
+    - { capability: redfish/leak-detectors, at: [model] }
+    - { capability: switch/nvue, at: [model] }
+    - { capability: fabric/nmx-c, at: [model] }
+    - { capability: fabric/nmx-c-telemetry, at: [model] }
+  isNot: ["NVOS is emulated at the NVUE REST surface only; no NVOS image runs and there is no SSH/SFTP surface yet.", "NMX-C's Subscribe carries change notifications and heartbeats, not telemetry counters (Q8)."]
+  sources:
+    - { what: "nine switch trays, two NVLink Switch chips each", url: "https://docs.nvidia.com/enterprise-reference-architectures/nvl72-ai-factory/latest/components.html", date: 2026-10-18 }
+    - { what: "Redfish tree", url: "https://github.com/dsx-ai-factory/libredfish/tree/a51ffb1ffeae15d8f9471224cb799d54007098a2/tests/mockups/nvidia_gbswitch", date: 2026-10-18 }
+---
+apiVersion: dc-twin/v1alpha1
+kind: DeviceProfile
+metadata: { name: nvidia/bluefield-3, version: 0.1.0 }
+spec:
+  class: dpu
+  form: { mounting: none }
+  identity: { serialFormat: "MT{digits:7}{upper:3}", macOUI: "b8:3f:d2", manufacturer: "https://www.mellanox.com", model: "BlueField-3 SmartNIC Main Card", partNumber: "900-9D3B6-00CV-AA0" }
+  components:
+    - { name: arm, kind: cpu, count: 1, model: "16 x Arm A78" }
+    - { name: bmc, kind: bmc, count: 1, model: "BlueField BMC" }
+  bmc: { dialect: nvidia/bluefield, console: ssh }
+  ports:
+    - { name: bmc0, kind: ethernet, speed: 1G, role: management }
+    - { name: p0, kind: ethernet, speed: 200G, role: provisioning }
+    - { name: p1, kind: ethernet, speed: 200G, role: frontend }
+  power: { standbyW: 10, idleW: 60, maxW: 150 }
+  cooling: { kind: liquid, loop: rack-manifold }
+  firmware:
+    # The BMC runs a pushed image after the BMC reboot its updater requests next (DPF: task
+    # Completed, then Manager.Reset), which is where the engine applies a staged bmc component.
+    - { component: bmc, baseline: "BF-24.10-16", applyOn: reset }
+    - { component: nic, baseline: "32.43.1014", applyOn: reset }
+    # The Arm's boot firmware (the BMC's DPU_UEFI, DPU_ATF and DPU_BSP), which a BFB's installer
+    # writes as its ARM capsule and the Arm runs from its next reset. At vm the twin stages the
+    # BFB's versions when the installer reports the capsule written (DPF checks them against the
+    # BFB's before the DPU joins); nothing is flashed, and the Arm's machine keeps QEMU's edk2.
+    - { component: uefi, baseline: "4.9.0-46-g7e3911bd4d", applyOn: reset }
+    - { component: atf, baseline: "v2.2(release):4.9.0-25-g0ce57e322", applyOn: reset }
+    - { component: bsp, baseline: "4.9.0.13378", applyOn: reset }
+  behaviours: { power: { onSeconds: 30, offSeconds: 5 }, bmc: { bootSeconds: 60 } }
+  faults: [generic/bmc, generic/link, nvidia/dpu]
+  # At vm the BMC is still the model's, fronted by the bluefield adapter, and the Arm is a QEMU
+  # machine that a pushed BFB installs and boots (the bluefield adapter's substrate, D52). Its DPU
+  # OS runs in the cost below; the BFB's installer gets 8 GB whatever the cost, the least it
+  # installs with (it unpacks its 1.6 GB initramfs into a RAM file system of half the memory, Q1).
+  fidelity: { model: {}, vm: { arch: aarch64, firmware: uefi, cost: { ramGB: 4, vcpu: 4 } } }
+  provides:
+    - { capability: "redfish/dialect:nvidia/bluefield", at: [model, vm] }
+    - { capability: "dpu/bmc:nvidia/bluefield", at: [model, vm] }
+  isNot:
+    model: ["No DPU OS or BFB runs at model; HBN and the DPU agent are absent (Q1)."]
+    vm: ["The Arm is QEMU's virt machine: no ConnectX-7 ports, representors or SFs, no rshim or tmfifo, no boot FIFO, no IPMI towards the BMC, no eMMC (D52)."]
+  sources: [{ what: "Redfish tree", url: "https://github.com/dsx-ai-factory/libredfish/tree/a51ffb1ffeae15d8f9471224cb799d54007098a2/tests/mockups/nvidia_dpu", date: 2026-10-18 }]

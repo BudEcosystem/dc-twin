@@ -1,0 +1,9 @@
+The files in this directory derive from NVIDIA's Rack Management Service client,
+https://github.com/dsx-ai-factory/nv-rms-client at commit
+966d7a701d6b0f2b6a4c59a805b1b9c1cbeffb61 (proto/rack_manager.proto and
+proto/rack_manager_v2.proto), Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES,
+licensed under the Apache License, Version 2.0 (proto/LICENSE).
+
+proto/ holds the two files unmodified. The *.pb.go files are generated from them by
+generate.sh with protoc 31.1, protoc-gen-go v1.36.12 and protoc-gen-go-grpc v1.5.1; they keep
+the protos' licence header and are not edited by hand.

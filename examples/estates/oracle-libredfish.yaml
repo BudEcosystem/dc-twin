@@ -1,0 +1,43 @@
+# The estate NICo's libredfish integration suite runs against (compat/libredfish): one emulated
+# BMC per vendor the suite covers. Redfish auth is OPTIONAL because the suite sends no
+# credentials (it was written against a mockup server); the fidelity report prints that.
+apiVersion: dc-twin/v1alpha1
+kind: Estate
+metadata: { name: oracle-libredfish }
+spec:
+  seed: 7
+  clock: wall
+  timeScale: 0.02
+  packs: [generic@0.1.0, nvidia@0.1.0, liteon@0.1.0, delta@0.1.0, oem-dell@0.1.0, oem-hpe@0.1.0, oem-lenovo@0.1.0, oem-supermicro@0.1.0]
+  adapters: { redfish: { auth: optional, dpus: capture } }
+  sites:
+    - name: site-1
+      halls:
+        - name: hall-a
+          rows:
+            - name: a
+              positions: 4
+              racks:
+                - { name: a01, position: 1, format: nvidia/gb200-nvl72 }
+                - { name: a02, position: 2, format: nvidia/gb200-nvl72, params: { powerShelf: delta/power-shelf-33kw } }
+            - name: b
+              positions: 8
+              racks:
+                - { name: b01, position: 1, format: generic/hgx-8gpu, params: { server: oem-dell/xe9680-h100, servers: 1 } }
+                - { name: b02, position: 2, format: generic/hgx-8gpu, params: { server: oem-supermicro/sys-821ge-tnhr, servers: 1 } }
+                - { name: b03, position: 3, format: generic/hgx-8gpu, params: { server: oem-lenovo/sr670-v2, servers: 1 } }
+                - { name: b04, position: 4, format: generic/hgx-8gpu, params: { server: nvidia/dgx-h100, servers: 1 } }
+                - { name: c01, position: 5, format: generic/cpu-rack, params: { server: oem-hpe/dl385-gen10p, servers: 1 } }
+                - { name: c02, position: 6, format: generic/network-rack }
+                - { name: c03, position: 7, format: generic/cpu-rack, params: { server: oem-dell/r750-dpu, servers: 1 } }
+                - { name: b06, position: 8, format: generic/hgx-8gpu, params: { server: nvidia/gh200-server, servers: 1 } }
+  networks:
+    oob:      { role: management, dhcp: twin, cidr: 10.30.0.0/20, fabric: oob }
+    frontend: { role: frontend, fabric: frontend }
+    provisioning: { role: provisioning, dhcp: twin, cidr: 10.40.0.0/20, fabric: frontend }
+  fabrics:
+    - { name: oob,      template: oob-flat,   nos: none }
+    - { name: frontend, template: clos-2tier, nos: none, params: { leafsPerRack: 2, spines: 1 }, placeIn: c02 }
+  facility:
+    power: { feeds: [{ name: A, capacityW: 600000 }, { name: B, capacityW: 600000 }] }
+  stacks: []

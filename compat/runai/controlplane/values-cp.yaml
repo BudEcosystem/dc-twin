@@ -1,0 +1,69 @@
+# Values for Run:ai 3.0.20's published control-plane chart (helm.ngc.nvidia.com/nvidia/runai-oss)
+# on one small node: the chart's own switches only, no change to any template or image.
+#
+# - One replica of everything but NATS. The chart's NATS configuration always declares a cluster
+#   with one route per replica (templates/nats/_helpers.tpl), and a single replica then waits for
+#   a JetStream meta leader that never forms until its liveness probe restarts it, so NATS keeps
+#   the chart's three replicas.
+# - Optional services off: Thanos (the metrics store), notifications (service and proxy), Unleash.
+#   Nothing this test drives (identity, organisation units, clusters, workloads, policies, assets)
+#   uses them. The web UI (frontend) and the CLI download server (cliExposer) are switched off too,
+#   but 3.0.20's templates render their Deployments regardless (templates/frontend/deployment.yaml
+#   and templates/cli-exposer/deployment.yaml carry no condition), so both still run.
+#   metrics-service stays: the tenant is only created once it has registered the tenant's metric
+#   store there (tenants-manager's metrics_builder), and with it off the tenant stays Failed.
+# - Requests lowered so the pods schedule on a node far below the documented 10 cores and 12 GB
+#   (docs/installation-and-configuration/system-requirements/infrastructure-requirements.md);
+#   limits are the chart's, except Keycloak's, whose JVM sizes its heap from the limit.
+# controlplane.sh adds global.domain and the TLS and CA settings.
+global:
+  ingress:
+    ingressClass: traefik
+    tlsSecretName: runai-backend-tls
+  customCA:
+    enabled: true
+  config:
+    kubernetesDistribution: kubernetes
+thanos: { enabled: false }
+frontend: { enabled: false }
+notificationsService: { enabled: false }
+notificationsProxy: { enabled: false }
+cliExposer: { enabled: false }
+unleashEdge: { enabled: false }
+nats:
+  resources:
+    requests: { cpu: 100m, memory: 256Mi }
+    limits: { cpu: 2, memory: 2Gi }
+keycloakx:
+  resources:
+    requests: { cpu: 250m, memory: 768Mi }
+    limits: { cpu: '2', memory: 2048Mi }
+postgresql:
+  primary:
+    resources:
+      requests: { cpu: 100m, memory: 256Mi }
+      limits: { cpu: 1, memory: 2Gi }
+assetsService: &small
+  resources:
+    requests: { cpu: 50m, memory: 128Mi }
+    limits: { cpu: 500m, memory: 512Mi }
+auditService: *small
+identityManager: *small
+tenantsManager: *small
+authorization: *small
+clusterService: *small
+orgUnitService: *small
+policyService: *small
+traefik: *small
+workloads: *small
+workloadsHelper: *small
+bffService: *small
+identityProviderReconciler: *small
+metricsService:
+  resources:
+    requests: { cpu: 50m, memory: 256Mi }
+    limits: { cpu: 500m, memory: 2048Mi }
+k8sObjectsTracker:
+  resources:
+    requests: { cpu: 50m, memory: 96Mi }
+    limits: { cpu: 200m, memory: 256Mi }

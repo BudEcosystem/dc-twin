@@ -1,0 +1,30 @@
+# A distributed training step as a plain batch/v1 Job in a Run:ai project's namespace: @PODS@ pods
+# of @GPUS@ GPUs that KAI's pod grouper gangs into one PodGroup (kai.scheduler/batch-min-member)
+# required in one NVLink clique of the `nvlink` Topology. It names no scheduler, queue or node pool:
+# KRM's admission and pod-group-assigner supply them from the project. kube-controller-manager's Job
+# controller creates the pods. run.sh fills the @...@ fields. No kubelet runs behind the twin's
+# Nodes, so bound pods stay Pending; what is tested is the placement.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: @NAME@
+  namespace: kai-llm-train
+  labels: { dc-twin.io/workload: @NAME@ }
+  annotations:
+    kai.scheduler/batch-min-member: "@PODS@"
+    kai.scheduler/topology: nvlink
+    kai.scheduler/topology-required-placement: nvidia.com/gpu.clique
+spec:
+  parallelism: @PODS@
+  completions: @PODS@
+  backoffLimit: 6
+  template:
+    metadata:
+      labels: { dc-twin.io/workload: @NAME@ }
+    spec:
+      restartPolicy: Never
+      terminationGracePeriodSeconds: 0
+      containers:
+        - name: main
+          image: registry.invalid/dc-twin/never-pulled:0
+          resources: { limits: { nvidia.com/gpu: "@GPUS@" } }

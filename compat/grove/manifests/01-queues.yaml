@@ -1,0 +1,22 @@
+# KAI queues for the serving workloads (KAI's quickstart shape): Grove's KAI backend requires every
+# PodCliqueSet to name one queue (label kai.scheduler/queue), and the PodGroup it creates carries it.
+apiVersion: scheduling.run.ai/v2
+kind: Queue
+metadata:
+  name: dc-twin
+spec:
+  resources:
+    cpu: { quota: -1, limit: -1, overQuotaWeight: 1 }
+    gpu: { quota: -1, limit: -1, overQuotaWeight: 1 }
+    memory: { quota: -1, limit: -1, overQuotaWeight: 1 }
+---
+apiVersion: scheduling.run.ai/v2
+kind: Queue
+metadata:
+  name: serving
+spec:
+  parentQueue: dc-twin
+  resources:
+    cpu: { quota: -1, limit: -1, overQuotaWeight: 1 }
+    gpu: { quota: 144, limit: -1, overQuotaWeight: 1 }
+    memory: { quota: -1, limit: -1, overQuotaWeight: 1 }

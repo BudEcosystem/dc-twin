@@ -1,0 +1,13 @@
+apiVersion: dc-twin/v1alpha1
+kind: RedfishDialect
+metadata: { name: delta/power-shelf, version: 0.1.0 }
+spec:
+  backend: mockup
+  mockup: libredfish/delta_powershelf
+  manager: /redfish/v1/Managers/SMC
+  chassis: /redfish/v1/Chassis/chassis
+  bmcInterface: /redfish/v1/Managers/SMC/EthernetInterfaces/eth0
+  bind: { serial: "/redfish/v1/Chassis/chassis#SerialNumber" }
+  factory: { user: root }
+  seedAccounts: true
+  isNot: ["Serves NICo's captured Delta shelf: no Systems resource, no vendor in the service root (stacks select the vendor explicitly)."]

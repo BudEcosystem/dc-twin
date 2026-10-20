@@ -1,0 +1,22 @@
+apiVersion: dc-twin/v1alpha1
+kind: RedfishDialect
+metadata: { name: oem-hpe/ilo, version: 0.1.0 }
+spec:
+  backend: mockup
+  mockup: libredfish/hpe
+  system: /redfish/v1/Systems/1
+  manager: /redfish/v1/Managers/1
+  chassis: /redfish/v1/Chassis/1
+  bmcInterface: /redfish/v1/Managers/1/EthernetInterfaces/1
+  bind: { serial: "/redfish/v1/Systems/1#SerialNumber", uuid: "/redfish/v1/Systems/1#UUID" }
+  factory: { user: root }
+  seedAccounts: true
+  overlays:
+    - { path: "/redfish/v1/Systems/1", set: Model, from: model }
+    - { path: "/redfish/v1/Systems/1", set: Status.HealthRollup, from: health }
+  # the iLO's inventory: 1 is the iLO, 2 the System ROM (the capture's ids)
+  firmware: { "1": bmc, "2": bios }
+  # option 60 as an iLO sends it (NICo's dhcp-common recognises "CPQRIB3" as an x86 HPE BMC)
+  identity: { dhcpVendorClass: "CPQRIB3" }
+  isNot: ["Serves NICo's captured ProLiant DL385 Gen10 Plus v2 iLO 5 tree bound to the model; OEM job queues answer as captured."]
+  sources: [{ what: "captured ProLiant DL385 Gen10 Plus v2 iLO 5", url: "https://github.com/dsx-ai-factory/libredfish/tree/a51ffb1ffeae15d8f9471224cb799d54007098a2/tests/mockups/hpe", date: 2026-10-18 }]

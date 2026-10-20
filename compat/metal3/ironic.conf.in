@@ -1,0 +1,125 @@
+# Ironic for compat/metal3/run.sh: Metal3's own configuration, ironic-image v39.0.0's
+# ironic-config/ironic.conf.j2 rendered with that image's defaults (scripts/configure-ironic.sh,
+# scripts/ironic-common.sh) for one standalone process: no TLS, no basic auth, SQLite, no JSON-RPC,
+# no ironic-networking. Placeholders (@WORK@, @API_PORT@, @HTTP_PORT@) are filled in by run.sh.
+#
+# What differs from the image, and why, is marked HARNESS. Everything else is the image's value,
+# including the defaults it leaves alone (force_power_state_during_sync = True, so Ironic itself
+# puts a host back in the power state it recorded; power_state_sync_max_retries = 3).
+[DEFAULT]
+auth_strategy = noauth
+debug = true
+default_deploy_interface = autodetect
+autodetect_deploy_interfaces = ramdisk,bootc,direct
+default_inspect_interface = agent
+default_network_interface = noop
+enabled_bios_interfaces = no-bios,redfish,idrac-redfish
+enabled_boot_interfaces = ipxe,pxe,fake,redfish-virtual-media,idrac-redfish-virtual-media,redfish-https
+enabled_deploy_interfaces = autodetect,direct,fake,ramdisk,custom-agent,bootc
+enabled_firmware_interfaces = no-firmware,fake,redfish
+enabled_hardware_types = ipmi,idrac,fake-hardware,redfish,manual-management
+enabled_inspect_interfaces = no-inspect,agent,fake,redfish,idrac-redfish
+enabled_management_interfaces = ipmitool,fake,redfish,idrac-redfish,noop
+enabled_network_interfaces = noop
+enabled_power_interfaces = ipmitool,fake,redfish,idrac-redfish
+enabled_raid_interfaces = no-raid,agent,fake,redfish,idrac-redfish
+enabled_vendor_interfaces = no-vendor,ipmitool,idrac-redfish,redfish,fake
+rpc_transport = none
+# HARNESS: a log file rather than the container's stderr
+use_stderr = false
+log_dir = @WORK@/log
+log_file = ironic.log
+hash_ring_algorithm = sha256
+my_ip = 127.0.0.1
+host = metal3-conductor
+state_path = @WORK@/state
+tempdir = @WORK@/tmp
+
+[agent]
+deploy_logs_collect = always
+deploy_logs_local_path = @WORK@/log/deploy
+max_command_attempts = 30
+certificates_path = @WORK@/certs
+
+[api]
+host_ip = 127.0.0.1
+port = @API_PORT@
+
+[conductor]
+automated_clean = true
+deploy_callback_timeout = 4800
+verify_step_priority_override = management.clear_job_queue:90
+node_history = False
+power_state_change_timeout = 120
+deploy_kernel = http://127.0.0.1:@HTTP_PORT@/images/ironic-python-agent.kernel
+deploy_ramdisk = http://127.0.0.1:@HTTP_PORT@/images/ironic-python-agent.initramfs
+file_url_allowed_paths = @WORK@/html/images
+# HARNESS: Ironic's periodic tasks, shortened so that a run takes minutes. The image keeps
+# Ironic's defaults (power sync every 60 s, power-failure recovery every 300 s) and sets the
+# inspection timeout to 1800 s (OS_CONDUCTOR__INSPECT_TIMEOUT in its README).
+sync_power_state_interval = 10
+power_failure_recovery_interval = 15
+inspect_wait_timeout = 150
+
+[database]
+connection = sqlite:///@WORK@/ironic.sqlite
+sqlite_synchronous = False
+
+[deploy]
+default_boot_option = local
+erase_devices_metadata_priority = 10
+erase_devices_priority = 0
+http_root = @WORK@/html
+http_url = http://127.0.0.1:@HTTP_PORT@
+fast_track = true
+iso_master_path = @WORK@/html/master_iso_images
+
+[dhcp]
+dhcp_provider = none
+
+[inspector]
+require_managed_boot = False
+power_off = false
+extra_kernel_params = ipa-inspection-collectors=default,logs,pci-devices ipa-enable-vlan-interfaces=all ipa-inspection-dhcp-all-interfaces=1 ipa-collect-lldp=1
+hooks = $default_hooks,accelerators,parse-lldp
+add_ports = all
+keep_ports = present
+force_dhcp = false
+
+[auto_discovery]
+enabled = false
+driver = ipmi
+
+[ipmi]
+use_ipmitool_retries = false
+min_command_interval = 5
+command_retry_timeout = 60
+cipher_suite_versions = 3,17
+
+[nova]
+send_power_notifications = false
+
+[oslo_concurrency]
+lock_path = @WORK@/locks
+
+[pxe]
+boot_retry_timeout = 1200
+images_path = @WORK@/html/tmp
+instance_master_path = @WORK@/html/master_images
+tftp_master_path = @WORK@/tftpboot/master_images
+tftp_root = @WORK@/tftpboot
+kernel_append_params = nofb nomodeset vga=normal ipa-insecure=1 systemd.journald.forward_to_console=yes
+enable_netboot_fallback = true
+ipxe_fallback_script = inspector.ipxe
+
+[redfish]
+use_swift = false
+kernel_append_params = nofb nomodeset vga=normal ipa-insecure=1 systemd.journald.forward_to_console=yes
+# HARNESS: one connection attempt per call (default 5, 4 s apart). sushy already retries every
+# request 10 times, 3 s apart, so with the default a dead BMC costs about three minutes per call
+# and the BMC-loss phase would take a quarter of an hour.
+connection_attempts = 1
+connection_retry_interval = 1
+
+[service_catalog]
+endpoint_override = http://127.0.0.1:@API_PORT@

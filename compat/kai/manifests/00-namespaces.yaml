@@ -1,0 +1,12 @@
+# Namespaces KAI's components use (as the chart creates them) and one for the workloads.
+apiVersion: v1
+kind: Namespace
+metadata: { name: kai-scheduler }
+---
+apiVersion: v1
+kind: Namespace
+metadata: { name: kai-resource-reservation }
+---
+apiVersion: v1
+kind: Namespace
+metadata: { name: dc-twin-kai }

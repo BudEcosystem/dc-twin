@@ -1,0 +1,25 @@
+apiVersion: dc-twin/v1alpha1
+kind: RedfishDialect
+metadata: { name: generic/dmtf, version: 0.1.0 }
+spec:
+  backend: generated
+  serviceRoot: { Vendor: "dc-twin", Product: "Generic BMC" }
+  system: /redfish/v1/Systems/1
+  manager: /redfish/v1/Managers/1
+  chassis: /redfish/v1/Chassis/1
+  bmcInterface: /redfish/v1/Managers/1/EthernetInterfaces/1
+  factory: { user: admin }
+  isNot: ["A DMTF-schema tree generated from the model: no vendor's OEM resources, error shapes or quirks."]
+  sources: [{ what: "DMTF Redfish schema 2024.3", url: "https://www.dmtf.org/standards/redfish", date: 2026-10-18 }]
+---
+apiVersion: dc-twin/v1alpha1
+kind: RedfishDialect
+metadata: { name: generic/dmtf-pdu, version: 0.1.0 }
+spec:
+  backend: generated
+  serviceRoot: { Vendor: "dc-twin", Product: "Generic PDU" }
+  manager: /redfish/v1/Managers/1
+  chassis: /redfish/v1/Chassis/1
+  bmcInterface: /redfish/v1/Managers/1/EthernetInterfaces/1
+  factory: { user: admin }
+  isNot: ["Redfish PowerEquipment generated from the model; outlet metering is the modelled draw."]

@@ -1,0 +1,16 @@
+# Namespaces KAI's and Grove's components use (as their charts create them) and one for workloads.
+apiVersion: v1
+kind: Namespace
+metadata: { name: kai-scheduler }
+---
+apiVersion: v1
+kind: Namespace
+metadata: { name: kai-resource-reservation }
+---
+apiVersion: v1
+kind: Namespace
+metadata: { name: grove-system }
+---
+apiVersion: v1
+kind: Namespace
+metadata: { name: dc-twin-serving }

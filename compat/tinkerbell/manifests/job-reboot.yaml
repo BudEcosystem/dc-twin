@@ -1,0 +1,13 @@
+# Rufio's "reset": bmclib sends Redfish ComputerSystem.Reset PowerCycle (falling back to off and
+# on where the BMC refuses it), or `ipmitool chassis power reset` over IPMI.
+apiVersion: bmc.tinkerbell.org/v1alpha1
+kind: Job
+metadata:
+  name: @JOB@
+  namespace: dctwin
+spec:
+  machineRef:
+    name: @MACHINE@
+    namespace: dctwin
+  tasks:
+    - powerAction: reset

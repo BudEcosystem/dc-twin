@@ -1,0 +1,7 @@
+apiVersion: dc-twin/v1alpha1
+kind: Pack
+metadata: { name: intel, version: 0.1.0 }
+spec:
+  title: Intel Gaudi 3 platforms and the Gaudi fault catalogue
+  dependsOn: [generic@0.1.0, oem-supermicro@0.1.0]
+  isNot: ["No HLML shim yet (Q7): hl-smi sees nothing; Redfish, power, Kubernetes and metrics projections only."]

@@ -1,0 +1,7 @@
+# ISC Kea DHCPv4 for the dhcp adapter's end-to-end tests: Alpine's kea-dhcp4 package, built by
+# Alpine from ISC's release tarball. The test binary is copied in and starts kea-dhcp4 itself
+# (DCTWIN_KEA=auto), so the twin relay and Kea share one network namespace.
+FROM alpine:3.21
+RUN apk add --no-cache 'kea-dhcp4~2.6' \
+ && mkdir -p /work/internal/adapter/dhcp /work/examples/estates
+WORKDIR /work/internal/adapter/dhcp

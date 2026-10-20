@@ -1,0 +1,24 @@
+apiVersion: dc-twin/v1alpha1
+kind: FaultCatalogue
+metadata: { name: amd/ras, version: 0.1.0 }
+spec:
+  isNot: ["RAS classes as health and counters; no amdgpu driver state."]
+  faults:
+    - name: uncorrectable-ecc
+      title: "Uncorrectable ECC error (RAS UE)"
+      target: { component: accelerator, vendor: amd }
+      effects:
+        - set: { health: Critical }
+        - counter: { "ras.ue": "+1" }
+        - kernelLog: { line: "amdgpu {pci}: amdgpu: {count} uncorrectable hardware errors detected in umc block", appliesAt: [vm] }
+        - redfish.logEntry: { severity: Critical, message: "{component}: uncorrectable memory error.", messageId: "ResourceEvent.1.0.ResourceErrorsDetected" }
+      clears: { on: [device.reset], manual: true }
+      isNot: []
+    - name: xgmi-link-down
+      title: "xGMI link down"
+      target: { component: accelerator, vendor: amd }
+      effects:
+        - set: { health: Warning }
+        - ports: { owner: self, kind: scale-up, state: down }
+      clears: { on: [device.reset], manual: true }
+      isNot: []

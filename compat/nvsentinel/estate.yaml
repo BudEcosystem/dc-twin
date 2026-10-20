@@ -1,0 +1,43 @@
+# The estate compat/nvsentinel runs NVSentinel against: one HGX rack with one Dell PowerEdge
+# XE9680 (8 x H100) at vm fidelity with the twin's own OS (os: twin, D23), so that it is a real
+# x86_64 virtual machine under KVM behind its emulated iDRAC, with the in-host agent in its guest;
+# everything else is at model fidelity. The harness replaces the `stacks:` line (it must stay the
+# file's last key) with the cluster's kubeconfig as the stack's output.
+apiVersion: dc-twin/v1alpha1
+kind: Estate
+metadata: { name: nvsentinel-xe9680 }
+spec:
+  seed: 4242
+  clock: wall                       # a vm device forces the wall clock (D22)
+  timeScale: 0.05                   # model behaviours only; the VM boots in its own time
+  packs: [generic@0.1.0, nvidia@0.1.0, oem-dell@0.1.0]
+  fidelity:
+    default: model
+    overrides:
+      - { select: "b01/server-01", level: vm, os: twin }
+  adapters:
+    vm: { memoryMB: 1024, cpus: 2 }  # the profile asks 8 GB and 4 vCPU; the report prints the scaling
+  sites:
+    - name: site-1
+      halls:
+        - name: hall-a
+          rows:
+            - name: b
+              positions: 4
+              racks:
+                - { name: b01, position: 1, format: generic/hgx-8gpu, params: { server: oem-dell/xe9680-h100, servers: 1 } }
+                - { name: c03, position: 3, format: generic/network-rack, params: { ufm: nvidia/ufm-appliance } }
+  networks:
+    oob:          { role: management,   dhcp: twin, cidr: 10.30.0.0/20, fabric: oob }
+    provisioning: { role: provisioning, dhcp: twin, cidr: 10.40.0.0/20, fabric: frontend }
+    frontend:     { role: frontend,     fabric: frontend }
+    backend-ib:   { role: scale-out,    fabric: backend-ib }
+    service:      { role: service,      cidr: 10.90.0.0/24, dhcp: none }
+  fabrics:
+    - { name: oob,        template: oob-flat,       nos: none }
+    - { name: frontend,   template: clos-2tier,     nos: none, params: { leafsPerRack: 2, spines: 2 }, placeIn: c03 }
+    - { name: backend-ib, template: rail-optimised, nos: none, technology: infiniband, manager: nvidia/ufm, params: { rails: 4 }, select: "b01", placeIn: c03 }
+  facility:
+    power:
+      feeds: [{ name: A, capacityW: 300000 }, { name: B, capacityW: 300000 }]
+  stacks: []

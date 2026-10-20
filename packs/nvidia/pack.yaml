@@ -1,0 +1,17 @@
+apiVersion: dc-twin/v1alpha1
+kind: Pack
+metadata: { name: nvidia, version: 0.1.0 }
+spec:
+  title: NVIDIA rack-scale systems, NVLink switch trays, BlueField, InfiniBand, the NVIDIA Redfish dialects, DSX Exchange topics and NVIDIA fault catalogues
+  dependsOn: [generic@0.1.0]
+  assets:
+    - name: libredfish
+      licence: MIT
+      obtain: { source: "https://github.com/dsx-ai-factory/libredfish", ref: a51ffb1ffeae15d8f9471224cb799d54007098a2, path: tests/mockups }
+    # The NMX-C interface definition the nmxc adapter compiles at run time (D13): NVIDIA
+    # proprietary, so it is obtained from NICo at a pinned commit and never committed, and no
+    # code generated from it is committed either.
+    - name: nico-nmxc-proto
+      licence: "NVIDIA proprietary (LicenseRef-NvidiaProprietary); obtained, not redistributed"
+      obtain: { source: "https://github.com/dsx-ai-factory/infra-controller", ref: 02b92f18fed776c8ef0056803338707c5e6bcb6b, path: crates/rpc/proto, files: [nmx_c.proto] }
+  isNot: ["Profiles are written from public documentation and NICo's captured mockups; none is checked against hardware yet (ledger: documentation)."]

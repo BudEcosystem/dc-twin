@@ -1,0 +1,84 @@
+# Standalone Ironic for compat/ironic/run.sh: one process (`ironic`, the API embedded in the
+# conductor), sqlite, no Keystone, no message bus, the redfish hardware type only. Placeholders
+# (@WORK@, @API_PORT@, @HOST@) are filled in by run.sh. Nothing here is twin-specific: these are
+# the options a standalone (Bifrost- or Metal3-style) Ironic sets, with the periodic intervals
+# shortened so a run takes minutes rather than an hour.
+[DEFAULT]
+host = @HOST@
+auth_strategy = noauth
+rpc_transport = none
+debug = true
+log_dir = @WORK@/log
+log_file = ironic.log
+use_stderr = false
+state_path = @WORK@/state
+tempdir = @WORK@/tmp
+enabled_hardware_types = redfish
+enabled_power_interfaces = redfish
+enabled_management_interfaces = redfish
+enabled_inspect_interfaces = redfish,no-inspect
+enabled_bios_interfaces = redfish,no-bios
+enabled_firmware_interfaces = redfish,no-firmware
+enabled_vendor_interfaces = redfish,no-vendor
+# no IPA ramdisk is booted in this harness: virtual media is the boot interface Metal3 uses with
+# Redfish, and validate reports what it would still need (deploy kernel/ramdisk or ISO)
+enabled_boot_interfaces = redfish-virtual-media
+enabled_deploy_interfaces = ramdisk
+enabled_network_interfaces = noop
+enabled_raid_interfaces = no-raid
+enabled_rescue_interfaces = no-rescue
+enabled_console_interfaces = no-console
+enabled_storage_interfaces = noop
+default_deploy_interface = ramdisk
+default_network_interface = noop
+
+[api]
+host_ip = 127.0.0.1
+port = @API_PORT@
+
+[database]
+connection = sqlite:///@WORK@/ironic.sqlite
+
+[dhcp]
+dhcp_provider = none
+
+[oslo_concurrency]
+lock_path = @WORK@/locks
+
+[deploy]
+http_root = @WORK@/httpboot
+http_url = http://127.0.0.1:1/
+default_boot_mode = uefi
+
+[pxe]
+tftp_root = @WORK@/tftpboot
+tftp_master_path = @WORK@/tftpboot/master_images
+images_path = @WORK@/images
+instance_master_path = @WORK@/images/master
+
+[conductor]
+# provide goes straight to available; cleaning here is manual and out-of-band only
+automated_clean = false
+# Ironic records a power state it did not cause rather than forcing it back (Metal3's setting)
+force_power_state_during_sync = false
+sync_power_state_interval = 10
+# one failed sync is retried once before the node goes to maintenance (default 3)
+power_state_sync_max_retries = 1
+power_failure_recovery_interval = 15
+check_provision_state_interval = 10
+power_state_change_timeout = 60
+
+[redfish]
+# one connection attempt per call (default 5, 4 s apart): sushy already retries every request
+# 10 times, 3 s apart, before Ironic sees a connection error, so a dead BMC costs 30 s per call
+connection_attempts = 1
+connection_retry_interval = 1
+connect_timeout = 5
+read_timeout = 30
+# BIOS apply_configuration polls the system with this interval while the node is in clean wait
+firmware_update_status_interval = 5
+use_swift = false
+
+[inspector]
+# inspection here is out of band (the redfish inspect interface); nothing boots the agent
+require_managed_boot = false

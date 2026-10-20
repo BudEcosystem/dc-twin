@@ -1,0 +1,18 @@
+# One pod for KAI to place. run.sh fills the @...@ fields. No kubelet runs behind the twin's Nodes,
+# so the image is never pulled and the pod stays Pending once bound: what is tested is the binding.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: @NAME@
+  namespace: dc-twin-kai
+  labels: { kai.scheduler/queue: @QUEUE@, dc-twin.io/workload: @WORKLOAD@ }
+  annotations: { @ANNOTATIONS@ }
+spec:
+  schedulerName: kai-scheduler
+  nodeSelector: { @SELECTOR@ }
+  terminationGracePeriodSeconds: 0
+  containers:
+    - name: main
+      image: registry.invalid/dc-twin/never-pulled:0
+      resources:
+        limits: { "@RESOURCE@": "@COUNT@" }

@@ -1,0 +1,17 @@
+# A training pod on the tray, bound to its Node as a scheduler would bind it. Nothing runs it: no
+# kubelet runs in the twin's guest (the Node is the in-host agent's, D24), so it stays Pending,
+# which is enough for node-drainer to find a user pod on the quarantined Node and evict it.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: training-0
+  namespace: dc-twin-training
+  labels: { app: training }
+spec:
+  nodeName: @NODE@
+  restartPolicy: Never
+  containers:
+    - name: train
+      image: registry.invalid/dc-twin/training:none
+      resources:
+        limits: { nvidia.com/gpu: 4 }

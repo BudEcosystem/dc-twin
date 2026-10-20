@@ -1,0 +1,31 @@
+# A Volcano Job: one task of @REPLICAS@ pods, gang-scheduled (minAvailable @MIN@). run.sh fills the
+# @...@ fields; @TOPOLOGY@ is either empty or a networkTopology constraint (hard, tier 1: every pod
+# inside one HyperNode, i.e. one NVLink domain). vc-controller-manager creates the PodGroup and
+# the pods; vc-scheduler binds them. No kubelet runs behind the twin's Nodes, so the image is
+# never pulled and a bound pod stays Pending: what is tested is the binding.
+apiVersion: batch.volcano.sh/v1alpha1
+kind: Job
+metadata:
+  name: @NAME@
+  namespace: dc-twin-volcano
+  labels: { dc-twin.io/workload: @NAME@ }
+spec:
+  schedulerName: volcano
+  queue: dc-twin
+  minAvailable: @MIN@
+  @TOPOLOGY@
+  tasks:
+    - name: worker
+      replicas: @REPLICAS@
+      template:
+        metadata:
+          labels: { dc-twin.io/workload: @NAME@ }
+        spec:
+          restartPolicy: Never
+          terminationGracePeriodSeconds: 0
+          nodeSelector: { @SELECTOR@ }
+          containers:
+            - name: main
+              image: registry.invalid/dc-twin/never-pulled:0
+              resources:
+                limits: { "@RESOURCE@": "@PER_POD@" }

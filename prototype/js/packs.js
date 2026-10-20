@@ -16,7 +16,7 @@ DCT.packs = (() => {
     pack: 'nvidia', class: 'compute-tray', vendor: 'NVIDIA', title: 'GB300 compute tray', units: 1, dialect: 'nvidia/gb-bmc',
     components: [
       { kind: 'cpu', prefix: 'cpu', count: 2, model: 'NVIDIA Grace, 72 cores' },
-      { kind: 'accelerator', prefix: 'gpu', count: 4, model: 'NVIDIA B300', vendor: 'nvidia', nvlinkLanes: 18, maxW: 1400 },
+      { kind: 'accelerator', prefix: 'gpu', count: 4, model: 'NVIDIA GB300', vendor: 'nvidia', nvlinkLanes: 18, maxW: 1400 },
       { kind: 'nic', prefix: 'cx8', count: 4, model: 'ConnectX-8 800G', role: 'scale-out' },
       { kind: 'dpu', prefix: 'bf3', count: 1, model: 'BlueField-3', role: 'frontend' },
       { kind: 'drive', prefix: 'nvme', count: 4, model: 'NVMe 3.84 TB' },

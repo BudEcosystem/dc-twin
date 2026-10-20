@@ -1,0 +1,8 @@
+# Volcano's system namespace (the chart's) and one for the workloads, with a Queue for them.
+apiVersion: v1
+kind: Namespace
+metadata: { name: volcano-system }
+---
+apiVersion: v1
+kind: Namespace
+metadata: { name: dc-twin-volcano }

@@ -1,0 +1,19 @@
+# The CDU loses flow: coolant temperature at the NVL72 trays climbs past its warning and critical
+# thresholds, the trays' health follows, and the BMS publishes the loss of flow.
+apiVersion: dc-twin/v1alpha1
+kind: Scenario
+metadata: { name: cdu-flow-loss }
+spec:
+  estate: { requires: { formats: [nvidia/gb300-nvl72] } }
+  stack: {}
+  timeout: 5m
+  steps:
+    - fault: { id: flow, select: "facility/cdu-1", inject: generic/thermal/cdu-flow-loss }
+    - expect:
+        within: 60s
+        all:
+          - event: { field: sensor.coolant-in, to: Warning, on: "a01/compute-tray-01" }
+          - event: { field: sensor.coolant-in, to: Critical, on: "a01/compute-tray-01" }
+          - model: { expr: 'model.device("a01/compute-tray-01").health == "Critical"' }
+    - fault: { clear: flow }
+  report: fidelity

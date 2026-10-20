@@ -1,0 +1,37 @@
+# A minimal stand-in for Mokka's gb300 profile (deployments/nvml-mock/helm/nvml-mock/profiles at
+# v0.5.0), written for these tests in the shape of that schema: the harness renders over the real
+# one, read from the pinned chart. Values here are placeholders.
+version: "1.0"
+system:
+  driver_version: "580.65.06"
+  nvml_version: "13.580.65"
+  cuda_version: "13.0"
+  cuda_version_major: 13
+  cuda_version_minor: 0
+device_defaults:
+  name: "NVIDIA GB300 NVL"
+  brand: "nvidia"
+  serial: "1000000000000"
+  vbios_version: "97.00.00.00.01"
+  architecture: "blackwell"
+  compute_capability: { major: 10, minor: 0 }
+  fabric: { cluster_uuid: "00000000-0000-0000-0000-000000000001", clique_id: 0, state: "auto" }
+  platform: { chassis_serial_number: "1000000000001", slot_number: 26, tray_index: 16, host_id: 1, peer_type: "switch_connected" }
+  memory: { total_bytes: 298500227072, reserved_bytes: 1610612736, free_bytes: 296889614336, used_bytes: 0, memory_bus_width: 8192 }
+  pci: { device_id: 0x31C210DE, subsystem_id: 0x21F110DE }
+  fan: { count: 0, speed_percent: "N/A" }
+devices:
+  - { index: 0, uuid: "GPU-00000000-0000-0000-0000-000000000000", serial: "1000000000000", pci: { bus_id: "0000:0A:00.0" }, minor_number: 0, grace_cpu_pair: 0, platform: { module_id: 2 } }
+  - { index: 1, uuid: "GPU-00000000-0000-0000-0000-000000000001", serial: "1000000000000", pci: { bus_id: "0000:0B:00.0" }, minor_number: 1, grace_cpu_pair: 0, platform: { module_id: 1 } }
+  - { index: 2, uuid: "GPU-00000000-0000-0000-0000-000000000002", serial: "1000000000001", pci: { bus_id: "0000:4A:00.0" }, minor_number: 2, grace_cpu_pair: 1, platform: { module_id: 4 } }
+  - { index: 3, uuid: "GPU-00000000-0000-0000-0000-000000000003", serial: "1000000000001", pci: { bus_id: "0000:4B:00.0" }, minor_number: 3, grace_cpu_pair: 1, platform: { module_id: 3 } }
+nvlink:
+  version: 5
+  links_per_gpu: 18
+  switches:
+    - { bdf: "0000:01:00.0", uuid: "NVSwitch-0000-0000-0000-000000000000" }
+infiniband: { enabled: true, hca_type: "MT4129", rate_gbps: 400 }
+pcie_topology:
+  root_complexes:
+    - { id: "pci0000:00", numa_node: 0, devices: ["0000:0A:00.0", "0000:0B:00.0"] }
+    - { id: "pci0000:40", numa_node: 1, devices: ["0000:4A:00.0", "0000:4B:00.0"] }

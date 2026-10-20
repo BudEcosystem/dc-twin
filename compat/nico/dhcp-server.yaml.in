@@ -1,0 +1,15 @@
+# NICo dhcp-server (crates/dhcp-server) in controller mode: every relayed request is answered from
+# nico-api's DiscoverDhcp, which allocates from the underlay segment the relay's link selection
+# names. Filled by run.sh.
+lease_time_secs: 604800
+renewal_time_secs: 3600
+rebinding_time_secs: 432000
+dhcpv6_preferred_lifetime_secs: 3600
+dhcpv6_valid_lifetime_secs: 7200
+carbide_nameservers:
+  - 10.90.0.53
+carbide_api_url: https://localhost:@API_PORT@
+carbide_ntpservers:
+  - 10.90.0.123
+carbide_provisioning_server_ipv4: 10.90.0.17
+carbide_dhcp_server: 10.90.0.16

@@ -1,0 +1,28 @@
+# The WorkloadRunner admission webhooks as Run:ai's go-operator defines them
+# (runai-cluster/cluster/go-operator/internal/run/operands/init-ca/resources/config_maps.go:
+# runai-anyworkload-validation and runai-anyworkload-mutation), pointed by URL at the
+# anyworkload-controller process. run.sh fills @URL@ and @CA@.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata: { name: runai-anyworkload-validation }
+webhooks:
+  - name: anyworkload-controller.runai.svc
+    admissionReviewVersions: [v1]
+    sideEffects: None
+    failurePolicy: Fail
+    clientConfig: { url: "@URL@/validate-workloadrunner", caBundle: "@CA@" }
+    rules:
+      - { operations: [CREATE, UPDATE], apiGroups: [run.ai], apiVersions: [v1alpha1], resources: [workloadrunners] }
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata: { name: runai-anyworkload-mutation }
+webhooks:
+  - name: anyworkload-controller.runai.svc
+    admissionReviewVersions: [v1]
+    sideEffects: None
+    failurePolicy: Fail
+    reinvocationPolicy: IfNeeded
+    clientConfig: { url: "@URL@/mutate-workloadrunner", caBundle: "@CA@" }
+    rules:
+      - { operations: [CREATE, UPDATE], apiGroups: [run.ai], apiVersions: [v1alpha1], resources: [workloadrunners] }

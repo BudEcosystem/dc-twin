@@ -55,6 +55,7 @@ spec:
       placeIn: "a10"                # the NVL72 rack has no free U for its leaves
     - name: backend
       template: rail-optimised
+      nos: none
       technology: infiniband        # no packet path; ports, GUIDs and partitions behind UFM REST
       manager: nvidia/ufm
       params: { rails: 4 }

@@ -1,0 +1,16 @@
+# Node Feature Discovery 0.19.0 (the release Mokka's CI pins, tests/e2e/VERSION-MATRIX.md at
+# k8s-test-infra v0.5.0). Its worker runs on the container hosts only and turns the feature file
+# Mokka's node agent writes into feature.node.kubernetes.io/pci-10de.present; GPU Feature
+# Discovery publishes its nvidia.com/gpu.* labels through the master. The garbage collector is
+# off: nodes do not come and go in this run, and the Docker host is shared.
+master:
+  nodeSelector: { node-role.kubernetes.io/control-plane: "" }
+  tolerations: [{ key: node-role.kubernetes.io/control-plane, operator: Exists, effect: NoSchedule }]
+  config:
+    extraLabelNs: ["nvidia.com"]
+  resources: { requests: { cpu: 10m, memory: 32Mi } }
+worker:
+  nodeSelector: { dc-twin.io/host: container }
+  resources: { requests: { cpu: 10m, memory: 32Mi } }
+gc:
+  enable: false

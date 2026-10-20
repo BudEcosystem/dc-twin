@@ -1,0 +1,54 @@
+apiVersion: dc-twin/v1alpha1
+kind: DeviceProfile
+metadata: { name: oem-dell/xe9680-h100, version: 0.1.0 }
+spec:
+  class: server
+  form: { mounting: rack, units: 6 }
+  identity: { serialFormat: "{upper:2}{digits:5}", macOUI: "b0:7b:25", manufacturer: "Dell Inc.", model: "PowerEdge XE9680" }
+  components:
+    - { name: cpu, kind: cpu, count: 2, model: "x86-64 server CPU" }
+    - name: gpu
+      kind: accelerator
+      vendor: nvidia
+      count: 8
+      model: "NVIDIA H100 80GB HBM3"
+      memoryMiB: 81559   # what NVML reports (Mokka's hardware capture)
+      maxW: 700
+      ports: [{ name: link, kind: scale-up, technology: nvlink, lanes: 7 }]
+    - { name: nic, kind: nic, count: 8, model: "400G scale-out NIC" }
+    - { name: psu, kind: psu, count: 6, model: "3000 W" }
+    - { name: fan, kind: fan, count: 10, model: "fan module" }
+    - { name: nvme, kind: drive, count: 8, model: "NVMe 3.84 TB" }
+    - { name: tpm, kind: tpm, count: 1, model: "TPM 2.0" }
+  bmc: { dialect: oem-dell/idrac, ipmi: true }
+  ports:
+    - { name: bmc0, kind: ethernet, speed: 1G, role: management }
+    - { name: "nic-{0..7}", kind: infiniband, speed: 400G, role: scale-out }
+    - { name: eth0, kind: ethernet, speed: 100G, role: provisioning }
+    - { name: eth1, kind: ethernet, speed: 100G, role: frontend }
+    - { name: "psu-{0..1}", kind: power-in, source: pdu }
+  power: { standbyW: 60, idleW: 2200, maxW: 11500 }
+  cooling: { kind: air }
+  sensors:
+    - { name: inlet, quantity: temperature, unit: C, warn: 35, crit: 45, source: inlet }
+    - { name: gpu-max, quantity: temperature, unit: C, warn: 85, crit: 95, source: accelerator-max }
+    - { name: cpu-max, quantity: temperature, unit: C, warn: 90, crit: 100, source: cpu-max }
+    - { name: power, quantity: power, unit: W, source: power }
+  firmware:
+    - { component: bmc, baseline: "7.10.30.00", applyOn: reset }
+    - { component: bios, baseline: "2.3.5", applyOn: reset }
+  behaviours: { power: { onSeconds: 45, offSeconds: 12 }, boot: { postSeconds: 150 }, bmc: { bootSeconds: 90 } }
+  faults: [generic/power, generic/bmc, generic/thermal, generic/link, generic/firmware, nvidia/xid]
+  fidelity: { model: {}, vm: { arch: x86_64, firmware: uefi, tpm: true, cost: { ramGB: 8, vcpu: 4 } } }
+  kubernetes: { resources: { "nvidia.com/gpu": 8 } }
+  metrics: { exporter: dcgm }
+  provides:
+    - { capability: "redfish/dialect:oem-dell/idrac", at: [model, vm] }
+    - { capability: redfish/event-service-sse, at: [model, vm] }
+    - { capability: redfish/update-service, at: [model, vm] }
+    - { capability: redfish/account-service, at: [model, vm] }
+    - { capability: ipmi/lan, at: [model] }
+    - { capability: boot/walk, at: [model] }
+    - { capability: "kubernetes/nodes:kwok", at: [model], via: kwok }
+  isNot: ["The BMC tree is the dialect's capture with this model's identity overlaid; accelerator resources follow the capture, not this model.", "Accelerators carry state only; nothing executes."]
+  sources: [{ what: "XE9680: 6U, 8 x H100 SXM", url: "https://www.dell.com/en-us/shop/ipovw/poweredge-xe9680", date: 2026-10-18 }]

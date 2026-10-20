@@ -1,0 +1,11 @@
+apiVersion: dc-twin/v1alpha1
+kind: Pack
+metadata: { name: oem-supermicro, version: 0.1.0 }
+spec:
+  title: "Supermicro GPU servers and the Supermicro dialect"
+  dependsOn: [generic@0.1.0]
+  assets:
+    - name: libredfish
+      licence: MIT
+      obtain: { source: "https://github.com/dsx-ai-factory/libredfish", ref: a51ffb1ffeae15d8f9471224cb799d54007098a2, path: tests/mockups }
+  isNot: ["The Supermicro tree is a captured SYS-821GE-TNHR; other models overlay their identity on it."]

@@ -1,0 +1,4 @@
+# The namespace the workloads run in.
+apiVersion: v1
+kind: Namespace
+metadata: { name: dc-twin-kueue }

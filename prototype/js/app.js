@@ -12,8 +12,16 @@
   };
 
   // ------------------------------------------------------------- boot
-  const model = DCT.estate.compile(DCT.estate.file);
-  E.init(model); DCT.stack.init(E);
+  // LIVE mode (js/live.js) is selected when the page carries ?token= and the twin's /v1/status
+  // answers; otherwise the in-memory estate, engine and simulated stack below run as before.
+  let live = false, booted = false;
+  function bootDemo() {
+    const model = DCT.estate.compile(DCT.estate.file);
+    E.init(model); DCT.stack.init(E);
+    E.on((ev) => { if (ev.kind === 'tick') { DCT.scenarios.tick(); } markDirty(); });
+    E.start();
+    booted = true; render(true);
+  }
   const theme = U.store('dct-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
   document.documentElement.dataset.theme = theme;
 
@@ -32,8 +40,25 @@
   function markDirty() { dirty = true; if (!raf) raf = requestAnimationFrame(() => { raf = null; const now = performance.now(); if (now - lastRender > 350) render(); else setTimeout(() => { if (dirty) render(); }, 350 - (now - lastRender)); }); }
   function typing() { const a = document.activeElement; return a && a.closest && a.closest('#app, #modal') && ((a.tagName === 'INPUT' && a.type !== 'checkbox') || a.tagName === 'TEXTAREA' || a.tagName === 'SELECT'); }
   function render(force) {
+    if (!booted) return;
     if (!force && typing()) { dirty = true; return; }
     dirty = false; lastRender = performance.now();
+    const f = live ? DCT.live.frame(st) : demoFrame();
+    const scrollers = {}; for (const id of ['drawer-body', 'events-body']) { const el = document.getElementById(id); if (el) scrollers[id] = { top: el.scrollTop, atEnd: el.scrollTop + el.clientHeight >= el.scrollHeight - 8 }; }
+    const viewEl = document.querySelector('.view'); const viewScroll = viewEl ? viewEl.scrollTop : 0;
+    const openMenus = force ? [] : [...document.querySelectorAll('#app .menu')].map((el, i) => (el.classList.contains('open') ? i : -1)).filter((i) => i >= 0);
+    document.getElementById('app').innerHTML = `
+      <div class="topbar">${f.top}</div>
+      <div class="body"><nav class="rail">${f.rail}</nav>
+        <div class="main ${f.withDrawer ? 'with-drawer' : ''}"><div class="view">${f.view}</div>${f.withDrawer ? `<div class="drawer">${f.drawer}</div>` : ''}</div></div>`;
+    const modal = document.getElementById('modal'); modal.hidden = !st.modal; if (force || !st.modal || st.modal.type === 'apply') modal.innerHTML = st.modal ? (live ? DCT.live.modal(st) : V.modal(st)) : '';
+    for (const [id, s] of Object.entries(scrollers)) { const el = document.getElementById(id); if (!el) continue; if (st.ev.follow || s.atEnd) el.scrollTop = el.scrollHeight; else el.scrollTop = s.top; }
+    const nv = document.querySelector('.view'); if (nv && !force) nv.scrollTop = viewScroll;
+    if (openMenus.length) { const menus = document.querySelectorAll('#app .menu'); for (const i of openMenus) if (menus[i]) menus[i].classList.add('open'); } // a background re-render keeps an open menu open
+    const fresh = document.getElementById('drawer-body') || document.getElementById('events-body'); if (fresh && st.ev.follow) fresh.scrollTop = fresh.scrollHeight;
+  }
+  // The in-memory demo's top bar, rail, view and drawer.
+  function demoFrame() {
     const r = st.route; const m = E.model;
     const crumbs = [`<a href="#/floor">${esc(m.hall.site)}</a>`, `<a href="#/floor">${esc(m.hall.name)}</a>`];
     if (r.name === 'rack' && r.arg) crumbs.push(`<b>${esc(U.lastSeg(r.arg))}</b>`);
@@ -53,29 +78,20 @@
       case 'stack': view = V.stack(st); break;
       default: { const floor = V.floor(st); view = st.mode === 'design' ? `<div class="grid side">${`<div>${floor}</div>`}<div>${V.design(st)}</div></div>` : floor; drawer = V.drawer(st, st.selection && m.racks[st.selection] ? U.lastSeg(st.selection) + '/**' : ''); }
     }
-    const scrollers = {}; for (const id of ['drawer-body', 'events-body']) { const el = document.getElementById(id); if (el) scrollers[id] = { top: el.scrollTop, atEnd: el.scrollTop + el.clientHeight >= el.scrollHeight - 8 }; }
-    const viewEl = document.querySelector('.view'); const viewScroll = viewEl ? viewEl.scrollTop : 0;
-    document.getElementById('app').innerHTML = `
-      <div class="topbar"><span class="brand">dc-twin<small>console · prototype</small></span><span class="crumbs">${crumbs.join(' / ')}</span><span class="spacer"></span>
+    const top = `<span class="brand">dc-twin<small>console · prototype</small></span><span class="crumbs">${crumbs.join(' / ')}</span><span class="spacer"></span>
         <span class="sim" title="the software under test is a simulation (see Stack)">simulated stack</span>
         <span class="clock" title="clock: ${esc(m.estate.spec.clock)}">${esc(m.estate.spec.clock)} ${U.fmtClock(E.now)}</span>
         <div class="seg"><button class="${st.mode === 'operate' ? 'on' : ''}" data-act="mode" data-arg="operate">Operate</button><button class="${st.mode === 'design' ? 'on' : ''}" data-act="mode" data-arg="design">Design${st.draft.adds.length + st.draft.removes.length + st.draft.fidelity.length ? ' •' : ''}</button></div>
         <button class="btn sm" data-act="report" title="fidelity report for what this view shows">Report</button>
-        <button class="btn sm" data-act="theme" title="light / dark">◐</button></div>
-      <div class="body"><nav class="rail">${rail.map(([k, l, c]) => `<a href="#/${k}" class="${r.name === k ? 'active' : ''}">${l}<span class="count">${esc(c)}</span></a>`).join('')}
+        <button class="btn sm" data-act="theme" title="light / dark">◐</button>`;
+    const railHTML = `${rail.map(([k, l, c]) => `<a href="#/${k}" class="${r.name === k ? 'active' : ''}">${l}<span class="count">${esc(c)}</span></a>`).join('')}
         <div class="sect">estate</div><div class="small muted" style="padding:0 10px">${esc(m.estate.metadata.name)}<br>${Object.keys(m.racks).length} racks · ${m.order.length} devices<br>${m.links.length} links · ${m.estate.spec.packs.length} packs<br>${m.order.filter((p) => m.devices[p].fidelity === 'vm').length} vm · ${m.order.filter((p) => m.devices[p].fidelity === 'model').length} model</div>
-        <div class="sect">about</div><div class="small faint" style="padding:0 10px">Prototype over an in-browser estate; no backend. Durations are shortened. <a href="../docs/spec/12-ui.md">spec 12 — UI</a></div></nav>
-        <div class="main ${withDrawer ? 'with-drawer' : ''}"><div class="view">${view}</div>${withDrawer ? `<div class="drawer">${drawer}</div>` : ''}</div></div>`;
-    const modal = document.getElementById('modal'); modal.hidden = !st.modal; if (force || !st.modal || st.modal.type === 'apply') modal.innerHTML = st.modal ? V.modal(st) : '';
-    for (const [id, s] of Object.entries(scrollers)) { const el = document.getElementById(id); if (!el) continue; if (st.ev.follow || s.atEnd) el.scrollTop = el.scrollHeight; else el.scrollTop = s.top; }
-    const nv = document.querySelector('.view'); if (nv && !force) nv.scrollTop = viewScroll;
-    const fresh = document.getElementById('drawer-body') || document.getElementById('events-body'); if (fresh && st.ev.follow) fresh.scrollTop = fresh.scrollHeight;
+        <div class="sect">about</div><div class="small faint" style="padding:0 10px">Prototype over an in-browser estate; no backend. Durations are shortened. <a href="../docs/spec/12-ui.md">spec 12 — UI</a></div>`;
+    return { top, rail: railHTML, view, drawer, withDrawer };
   }
 
-  E.on((ev) => { if (ev.kind === 'tick') { DCT.scenarios.tick(); } markDirty(); });
-  E.start();
-
   // ------------------------------------------------------------- actions
+  const LIVE_SHARED = new Set(['menu', 'select', 'open-rack', 'overlay', 'theme', 'rack-side', 'tab', 'modal-close', 'copy-text', 'download-text', 'ev-apply']);
   const closeMenus = () => document.querySelectorAll('.menu.open').forEach((m) => m.classList.remove('open'));
   function openInject(target) { st.modal = { type: 'inject', target, sub: null, faultId: null, when: 'now', inSec: 30, clearAfter: 0 }; render(true); }
   function doInject(faultId, target, when, inSec, clearAfter, source = 'user:priya') {
@@ -99,9 +115,10 @@
     const act = el.dataset.act, arg = el.dataset.arg;
     if (el.tagName === 'INPUT' || el.tagName === 'SELECT') return; // handled on change
     if (el.tagName === 'A' && el.getAttribute('href') === '#') e.preventDefault();
+    if (live) { if (DCT.live.act(st, act, arg, el, e)) return; if (!LIVE_SHARED.has(act)) return; }
     switch (act) {
       case 'menu': el.parentElement.classList.toggle('open'); return;
-      case 'select': st.selection = arg || ''; render(true); return;
+      case 'select': if ((arg || '') === st.selection) return; st.selection = arg || ''; render(true); return; // no re-render on a repeat click, so a double-click keeps its target
       case 'goto': { e.preventDefault(); const p = arg; if (E.model.devices[p]) go(`#/device/${encodeURIComponent(p)}`); else if (E.model.racks[p]) go(`#/rack/${encodeURIComponent(p)}`); else if (E.model.devices[U.parentPath(p)]) go(`#/device/${encodeURIComponent(U.parentPath(p))}`); else if (/\/domain\//.test(p)) go(`#/rack/${encodeURIComponent(p.split('/domain/')[0])}`); return; }
       case 'open-rack': go(`#/rack/${encodeURIComponent(arg)}`); return;
       case 'overlay': st.overlay = arg; render(true); return;
@@ -146,11 +163,12 @@
       case 'm-add': { const M = st.modal; const name = (M.name || '').trim(); if (!name) return; const fmt = P.formats[M.format]; const params = {}; for (const [k, v] of Object.entries(fmt.params)) { let val = M.params[k] !== undefined ? M.params[k] : v.default; if (v.range) val = parseInt(val, 10); params[k] = val; } const entry = { row: M.row, position: M.position, name, format: M.format, params, vmHosts: M.vmHosts || 0 }; const idx = st.draft.adds.findIndex((a) => a.row === M.row && a.position === M.position); if (idx >= 0) st.draft.adds[idx] = entry; else st.draft.adds.push(entry); st.modal = null; st.designPick = null; render(true); return; }
     }
   });
-  document.addEventListener('dblclick', (e) => { const el = e.target.closest('[data-open]'); if (!el) return; const p = el.dataset.open; if (E.model.devices[p]) go(`#/device/${encodeURIComponent(p)}`); else if (E.model.racks[p]) go(`#/rack/${encodeURIComponent(p)}`); });
-  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { closeMenus(); if (st.modal) { st.modal = null; render(true); } } if (e.key === 'Enter' && e.target.dataset && e.target.dataset.act === 'ev-sel') { st.ev.sel = e.target.value; render(true); } if (e.key === 'Enter' && e.target.dataset && e.target.dataset.act === 'fx-sel') { st.fx.sel = e.target.value; st.fx.target = null; render(true); } });
-  document.addEventListener('input', (e) => { const el = e.target; const act = el.dataset && el.dataset.act; if (!act) return; if (act === 'fx-sel') { st.fx.sel = el.value; st.fx.target = null; } if (act === 'ev-sel') st.ev.sel = el.value; if (act === 'm-name') st.modal.name = el.value; if (act === 'm-param' && el.type === 'text') st.modal.params[el.dataset.arg] = el.value; });
+  document.addEventListener('dblclick', (e) => { const el = e.target.closest('[data-open]'); if (!el) return; const p = el.dataset.open; const M = live ? DCT.live.index() : E.model; if (M.devices[p]) go(`#/device/${encodeURIComponent(p)}`); else if (M.racks[p]) go(`#/rack/${encodeURIComponent(p)}`); });
+  document.addEventListener('keydown', (e) => { if (live && DCT.live.key(st, e)) return; if (e.key === 'Escape') { closeMenus(); if (st.modal) { st.modal = null; render(true); } } if (e.key === 'Enter' && e.target.dataset && e.target.dataset.act === 'ev-sel') { st.ev.sel = e.target.value; render(true); } if (e.key === 'Enter' && e.target.dataset && e.target.dataset.act === 'fx-sel') { st.fx.sel = e.target.value; st.fx.target = null; render(true); } });
+  document.addEventListener('input', (e) => { const el = e.target; const act = el.dataset && el.dataset.act; if (!act) return; if (live && DCT.live.input(st, act, el)) return; if (act === 'fx-sel') { st.fx.sel = el.value; st.fx.target = null; } if (act === 'ev-sel') st.ev.sel = el.value; if (act === 'm-name') st.modal.name = el.value; if (act === 'm-param' && el.type === 'text') st.modal.params[el.dataset.arg] = el.value; });
   document.addEventListener('change', (e) => {
     const el = e.target; const act = el.dataset && el.dataset.act; if (!act) return;
+    if (live && DCT.live.change(st, act, el)) return;
     switch (act) {
       case 'ev-follow': st.ev.follow = el.checked; break;
       case 'ev-minor': st.ev.minor = el.checked; break;
@@ -178,5 +196,11 @@
     render(true);
   });
 
-  render(true);
+  if (DCT.live && DCT.live.requested()) {
+    document.getElementById('app').innerHTML = '<div class="connecting">connecting to the twin…</div>';
+    DCT.live.connect(st, { changed: markDirty, render: () => render(true), go }).then((ok) => {
+      if (!ok) { bootDemo(); console.warn('dc-twin console: ?token= given but /v1/status did not answer; running the in-memory demo'); return; }
+      live = true; booted = true; render(true);
+    });
+  } else bootDemo();
 })();

@@ -1,0 +1,13 @@
+# The generic/frr-dhcrelay NOS (internal/nos): the two SONiC components a lifecycle manager meets
+# on a management network, without SONiC. FRR is SONiC's routing suite (its bgp container), and
+# ISC dhcrelay is the relay SONiC's dhcp_relay container runs. Both come from Debian bookworm,
+# SONiC's own base, as Debian builds them: dhcrelay here is UNPATCHED, so its option 82 circuit
+# id is the interface name, where SONiC's patched build formats "%h:%p" (hostname:port).
+#
+# The twin creates one container per switch with no network, moves the switch's ports into it as
+# veths named after the model's ports, and runs the start script it renders (internal/nos).
+FROM debian:bookworm-slim
+RUN apt-get update \
+ && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      frr isc-dhcp-relay iproute2 procps tcpdump \
+ && rm -rf /var/lib/apt/lists/*
