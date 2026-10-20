@@ -151,6 +151,42 @@ func TestHostPortRelaysTheGuestsDHCP(t *testing.T) {
 	}
 }
 
+// A client renews by unicast to its server's identifier (RFC 2131 4.4.5). The twin site DHCP
+// takes its identifier from its network's range, which can fall inside a segment (a BlueField's
+// Arm leases in its BMC's), so the client ARPs for it on the link: the gateway's stack is
+// promiscuous and answers for every address there, and the renewal, UDP to port 67, reaches the
+// relay like a broadcast.
+func TestHostPortRelaysARenewalToAnOnLinkServer(t *testing.T) {
+	cab, relay, _, _ := startPort(t, nil, nil)
+	cab.toPort <- UDPFrame{SrcMAC: guestMAC, DstMAC: BroadcastMAC, SrcIP: netip.IPv4Unspecified(),
+		DstIP: netip.AddrFrom4([4]byte{255, 255, 255, 255}), SrcPort: 68, DstPort: 67, Payload: bootp(1, false, netip.Addr{})}.Marshal()
+	<-relay.sent
+	ack := append(bootp(2, false, netip.MustParseAddr("10.40.2.10")), 53, 1, 5, 54, 4, 10, 40, 2, 2, 255)
+	relay.replies <- ack
+	guestFrame(t, cab)
+
+	s := guestStack(t, cab)
+	c, err := gonet.DialUDP(s, &tcpip.FullAddress{NIC: 1, Addr: tcpip.AddrFrom4([4]byte{10, 40, 2, 10}), Port: 68},
+		&tcpip.FullAddress{NIC: 1, Addr: tcpip.AddrFrom4([4]byte{10, 40, 2, 2}), Port: 67}, ipv4.ProtocolNumber)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	renew := bootp(1, false, netip.Addr{})
+	copy(renew[12:16], []byte{10, 40, 2, 10}) // ciaddr
+	if _, err := c.Write(renew); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case got := <-relay.sent:
+		if !bytes.Equal(got, renew) {
+			t.Fatal("the relay got another message than the guest's renewal")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the guest's unicast renewal to the on-link server 10.40.2.2 did not reach the relay")
+	}
+}
+
 func guestFrame(t *testing.T, cab *memCable) UDPFrame {
 	t.Helper()
 	deadline := time.After(5 * time.Second)

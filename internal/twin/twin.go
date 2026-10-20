@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strings"
 	"sync"
 
 	"github.com/BudEcosystem/dc-twin/internal/adapter"
@@ -152,23 +153,26 @@ func UpEstate(est *schema.Estate, file string, reg *pack.Registry, opt Options) 
 		insts = append(insts, f())
 	}
 	nosSwitches := NOSSwitches(res.Model)
+	var subs []adapter.Substrate
+	for _, a := range insts {
+		if s, ok := a.(adapter.Substrate); ok {
+			subs = append(subs, s)
+		}
+	}
+	claims := map[string]string{}
 	for _, d := range res.Model.Devices {
 		if _, ok := nosSwitches[d]; ok && d.Fidelity == "vm" {
 			continue // its NOS runs it, on the network substrate (below)
 		}
 		if d.Fidelity == "vm" {
-			// a vm device runs only where an enabled substrate adapter accepts it (09)
-			var why error = fmt.Errorf("the vm adapter is not enabled (--adapters)")
-			for _, a := range insts {
-				if s, ok := a.(adapter.Substrate); ok {
-					if why = s.Accepts(est, d, opt.AllowTCG); why == nil {
-						break
-					}
-				}
-			}
+			// a vm device runs only where an enabled substrate adapter accepts it (09), and in
+			// exactly one: the one claimed for it, which alone plans it (a BlueField's Arm in the
+			// bluefield adapter even with the vm adapter enabled)
+			s, why := adapter.ClaimSubstrate(est, d, subs, opt.AllowTCG)
 			if why != nil {
 				return nil, fmt.Errorf("%s is at vm fidelity and cannot run here: %v; run it at model fidelity, or where QEMU can run its guest (09)", d.Path, why)
 			}
+			claims[d.Path] = s.Name()
 		}
 		if d.Fidelity == "hardware" {
 			return nil, fmt.Errorf("%s is at hardware fidelity: no hardware bridge is configured on this host (07)", d.Path)
@@ -238,7 +242,18 @@ func UpEstate(est *schema.Estate, file string, reg *pack.Registry, opt Options) 
 	for k, v := range opt.Outputs {
 		outputs[k] = v
 	}
-	rt := &adapter.Runtime{Engine: eng, Reg: reg, Net: n, StateDir: opt.StateDir, Assets: AssetsDir(), Log: opt.Log, Outputs: outputs, AllowTCG: opt.AllowTCG}
+	// The stack's services at their site addresses (siteServices) are the site's, not one
+	// adapter's: the site gateway routes a stack process to them as a vm guest's segment gateway
+	// routes the guest, so DPF and a DPU (or NICo and a booting host) name a service by one address.
+	if s := strings.TrimSpace(outputs["siteServices"]); s != "" {
+		svcs, err := netsim.ParseServices(s)
+		if err != nil {
+			n.Close()
+			return nil, fmt.Errorf("the stack's siteServices output: %w", err)
+		}
+		n.SetServices(svcs)
+	}
+	rt := &adapter.Runtime{Engine: eng, Reg: reg, Net: n, StateDir: opt.StateDir, Assets: AssetsDir(), Log: opt.Log, Outputs: outputs, AllowTCG: opt.AllowTCG, Claims: claims}
 	t := &Twin{Estate: est, File: file, Engine: eng, Reg: reg, Net: n, Lock: res.Lock, Warnings: warnings, Runtime: rt}
 	ctx, cancel := context.WithCancel(context.Background())
 	t.cancel = cancel

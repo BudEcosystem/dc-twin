@@ -164,8 +164,9 @@ type request struct {
 	cause     uint64
 }
 
-// Start plans a machine for every `vm` device, attaches each as its device's power substrate
-// and powers on those the estate starts on.
+// Start plans a machine for every `vm` device up claimed for this adapter (every one another
+// substrate does not run), attaches each as its device's power substrate and powers on those the
+// estate starts on.
 func (a *Adapter) Start(ctx context.Context, rt *adapter.Runtime) error {
 	a.rt, a.log = rt, rt.Log
 	est := rt.Engine.M.Estate
@@ -177,7 +178,9 @@ func (a *Adapter) Start(ctx context.Context, rt *adapter.Runtime) error {
 	rt.Engine.Read(func(m *model.Model) {
 		nos := twin.NOSSwitches(m) // a real NOS's switches are `vm` by their NOS (D21), not machines here
 		for _, d := range m.Devices {
-			if _, ok := nos[d]; !ok && d.Fidelity == "vm" {
+			// a device another substrate claims (a BlueField's Arm, the bluefield adapter's) is
+			// that adapter's to plan, not this one's
+			if _, ok := nos[d]; !ok && d.Fidelity == "vm" && rt.Runs(a.Name(), d.Path) {
 				devs = append(devs, d)
 				initialOn[d.Path] = d.State.Power != model.Off && d.State.AC
 			}

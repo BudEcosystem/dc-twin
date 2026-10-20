@@ -552,7 +552,7 @@ func (r *renderer) dynamic(path string) (map[string]any, bool) {
 				state := t.State
 				doc := map[string]any{"@odata.id": path, "@odata.type": "#Task.v1_7_1.Task", "Id": t.ID, "Name": "Task " + t.ID,
 					"TaskState": state, "TaskStatus": taskStatus(state), "PercentComplete": t.Percent, "StartTime": t.Started.Format(time.RFC3339),
-					"Messages": []any{map[string]any{"Message": t.Message, "MessageId": "TaskEvent.1.0.TaskProgressChanged"}}}
+					"Messages": []any{map[string]any{"Message": t.Message, "MessageId": taskMessageID(state)}}}
 				if !t.Ends.IsZero() {
 					doc["EndTime"] = t.Ends.Format(time.RFC3339)
 				}
@@ -580,6 +580,18 @@ func (r *renderer) dynamic(path string) (map[string]any, bool) {
 		return r.logResource(path, svc, entry)
 	}
 	return nil, false
+}
+
+// taskMessageID is the TaskEvent message a task's state ends with (DMTF's TaskEvent registry):
+// an update a BMC lost when it went down ends in Exception with TaskAborted (D53).
+func taskMessageID(state string) string {
+	switch state {
+	case "Completed":
+		return "TaskEvent.1.0.TaskCompletedOK"
+	case "Exception", "Killed":
+		return "TaskEvent.1.0.TaskAborted"
+	}
+	return "TaskEvent.1.0.TaskProgressChanged"
 }
 
 func taskStatus(state string) string {

@@ -533,3 +533,75 @@ func behaviourPost(d *model.Device) float64 {
 	}
 	return 0
 }
+
+// A firmware update whose task is still running when its BMC is reset is lost with it (D53):
+// once the BMC answers again, TaskService reports the task ended in Exception with TaskAborted,
+// and nothing was staged.
+func TestFirmwareTaskAbortedByBMCReset(t *testing.T) {
+	tw, a := up(t)
+	d := dev(tw, "site-1/hall-a/c02/server-01") // generated tree
+	addr, _, _ := a.BMC(d.Path)
+	cl := &http.Client{Timeout: 5 * time.Second, Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}}
+	req, _ := http.NewRequest("POST", "https://"+addr+"/redfish/v1/UpdateService/Actions/UpdateService.SimpleUpdate",
+		strings.NewReader(`{"ImageURI":"http://images.example/bmc-9.9.9.bin"}`))
+	req.SetBasicAuth(d.Identity.BMCUser, d.Identity.BMCPassword)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := cl.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	loc := resp.Header.Get("Location")
+	if resp.StatusCode != http.StatusAccepted || loc == "" {
+		t.Fatalf("SimpleUpdate: %d, Location %q", resp.StatusCode, loc)
+	}
+	// the task takes 20 s at the estate's timeScale (1 s); the BMC goes down 1 s (50 ms) after
+	if err := tw.Engine.ResetBMC(engine.Request{Path: d.Path, Canonical: "bmc.reset", Source: schema.EventSource{Class: "stack", Principal: "test"}}); err != nil {
+		t.Fatal(err)
+	}
+	type taskDoc struct {
+		TaskState, TaskStatus string
+		Messages              []struct{ MessageId string }
+	}
+	var task taskDoc
+	went, back := false, false
+	for deadline := time.Now().Add(time.Minute); time.Now().Before(deadline) && !back; time.Sleep(100 * time.Millisecond) {
+		up, _, _ := tw.Engine.BMCBehaviour(d)
+		if !up {
+			went = true
+			continue
+		}
+		if !went {
+			continue
+		}
+		req, _ := http.NewRequest("GET", "https://"+addr+loc, nil)
+		req.SetBasicAuth(d.Identity.BMCUser, d.Identity.BMCPassword)
+		resp, err := cl.Do(req)
+		if err != nil {
+			continue
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode == http.StatusOK && json.Unmarshal(body, &task) == nil {
+			back = true
+		}
+	}
+	if !back {
+		t.Fatalf("the BMC did not go down and come back (went down %v)", went)
+	}
+	if task.TaskState != "Exception" || task.TaskStatus != "Critical" || len(task.Messages) == 0 || task.Messages[0].MessageId != "TaskEvent.1.0.TaskAborted" {
+		t.Fatalf("after the BMC's reset: task %+v, want Exception/Critical/TaskAborted", task)
+	}
+	time.Sleep(2 * time.Second) // past the task's own completion time
+	getJSON(t, a, d, loc, &task)
+	if task.TaskState != "Exception" {
+		t.Fatalf("the lost task later reports %s", task.TaskState)
+	}
+	tw.Engine.Read(func(*model.Model) {
+		for comp, fw := range d.State.Firmware {
+			if fw.Staged != "" || fw.Version == "bmc-9.9.9" {
+				t.Errorf("%s: version %q staged %q after a lost update", comp, fw.Version, fw.Staged)
+			}
+		}
+	})
+}

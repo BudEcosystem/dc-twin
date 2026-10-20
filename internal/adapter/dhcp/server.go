@@ -15,8 +15,9 @@ import (
 // serving DHCP, a labelled server the twin provides. It is a real DHCPv4 server on its own
 // socket, reached only through the twin relays, and like the relayed-only servers stacks run
 // (NICo's Kea hook) it answers relayed requests only. It selects a segment by link selection,
-// else giaddr, and hands each port the address its cabling implies (staticOffset); a request
-// from a port it cannot place gets the first free address of a dynamic range instead.
+// else giaddr, and hands each port's own client the address its cabling implies (staticOffset);
+// a request from a port it cannot place, or from a second client behind a port (a BlueField's
+// Arm behind its BMC's), gets the first free address of a dynamic range instead.
 type twinServer struct {
 	a     *Adapter
 	plan  *addressing
@@ -89,8 +90,10 @@ func (s *twinServer) segmentOf(m *dhcpv4.DHCPv4) (*segment, string) {
 func (sg *segment) hasCircuit(c string) bool {
 	sg.relay.up.mu.RLock()
 	defer sg.relay.up.mu.RUnlock()
-	ep := sg.relay.up.byCircuit[c]
-	return ep != nil && ep.seg == sg
+	for _, ep := range sg.relay.up.byCircuit[c] {
+		return ep.seg == sg // every client behind a port is on the port's segment
+	}
+	return false
 }
 
 func (s *twinServer) handle(m *dhcpv4.DHCPv4) *dhcpv4.DHCPv4 {
@@ -138,7 +141,7 @@ func (s *twinServer) handle(m *dhcpv4.DHCPv4) *dhcpv4.DHCPv4 {
 }
 
 // allocate returns the address for a client in a segment: the one it holds, else the one its
-// port's cabling implies, else the first free one from .200.
+// port's cabling implies (for the port's own client), else the first free one from .200.
 func (s *twinServer) allocate(sg *segment, mac, circuit string) (netip.Addr, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -161,8 +164,11 @@ func (s *twinServer) allocate(sg *segment, mac, circuit string) (netip.Addr, boo
 		return ip, true
 	}
 	if s.plan.scheme != schemeShared {
+		// the cabling's address belongs to the port's own client (a BMC's port to the BMC): a
+		// second client behind the port (a BlueField's Arm behind its BMC's) has no offset and
+		// leases from the dynamic range, whichever of the two asks first
 		sg.relay.up.mu.RLock()
-		ep := sg.relay.up.byCircuit[circuit]
+		ep := sg.relay.up.client(circuit, mac)
 		sg.relay.up.mu.RUnlock()
 		if ep != nil && ep.offset > 0 {
 			if ip, ok := take(ep.offset); ok {
