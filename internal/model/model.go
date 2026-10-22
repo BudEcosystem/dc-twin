@@ -64,7 +64,11 @@ type Model struct {
 	Networks map[string]*Network
 	Fabrics  map[string]*Fabric
 	Feeds    map[string]*Feed
-	Loops    map[string]*Loop
+	// Power is the power chain between the feeds and the racks (facility.power.topology), each
+	// node after the node it is fed from; PowerBy finds a node by its device's path.
+	Power   []*PowerNode
+	PowerBy map[string]*PowerNode
+	Loops   map[string]*Loop
 	// Warnings are what validation reported without refusing.
 	Warnings []string
 }
@@ -110,6 +114,9 @@ type PowerInput struct {
 	Serves     []*Device
 	// SourceFeed is the estate feed each source draws from.
 	SourceFeed map[string]string
+	// SourceNode is the power-chain node each source draws through, when its feed reaches the
+	// rack through one (a panel, a busway or a UPS); a source not in it is fed by the feed itself.
+	SourceNode map[string]*PowerNode
 }
 
 type Device struct {
@@ -259,6 +266,27 @@ type Feed struct {
 	Path      string
 	CapacityW float64
 	Up        bool
+}
+
+// PowerNode is a node of the power chain between a feed and the racks: a UPS, a busway or a
+// power panel. Its state is owned by the engine.
+type PowerNode struct {
+	Name      string
+	Kind      string // ups, busway or pdu-panel
+	Device    *Device
+	CapacityW float64
+	RuntimeS  float64    // a UPS's battery ride-through at its rated load
+	Parent    *PowerNode // the node it is fed from; nil when it is fed by Feed itself
+	Feed      *Feed      // the feed at the head of its chain
+	Children  []*PowerNode
+	Racks     []*Rack   // the racks it serves
+	Sources   []*Device // the rack power sources (PDUs, shelves) that draw through it
+	Up        bool      // delivering
+	Mode      string    // a UPS: online, battery, depleted or fault; a busway or panel: closed or open
+	Charge    float64   // a UPS's battery, 0..1, as of ChargeAt
+	ChargeAt  time.Time
+	DrainPerS float64 // the charge lost per behaviour second (negative while recharging)
+	Timer     uint64  // the pending battery-depleted timer
 }
 
 type Loop struct {

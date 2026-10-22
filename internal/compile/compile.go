@@ -77,8 +77,17 @@ func Compile(est *schema.Estate, reg *pack.Registry, opt Options) (*Result, erro
 	if sp.TimeScale == 0 {
 		sp.TimeScale = 1
 	}
+	if sp.TimeScale < 0 {
+		c.errf("spec.timeScale %v: must be positive", sp.TimeScale)
+	}
 	if sp.Fidelity.Default == "" {
 		sp.Fidelity.Default = "model"
+	}
+	if !validLevel(sp.Fidelity.Default) {
+		c.errf("spec.fidelity.default %q: model, vm or hardware", sp.Fidelity.Default)
+	}
+	if sp.InitialState != "" && sp.InitialState != "on" && sp.InitialState != "off" {
+		c.errf("spec.initialState %q: on or off", sp.InitialState)
 	}
 	lock, enabled, err := reg.Resolve(est.Metadata.Name, sp.Packs)
 	if err != nil {
@@ -119,6 +128,7 @@ func Compile(est *schema.Estate, reg *pack.Registry, opt Options) (*Result, erro
 	c.fabrics()
 	c.cabling()
 	c.powerInputs()
+	c.powerChain()
 	c.networks()
 	c.domains()
 	c.loops()
@@ -151,13 +161,30 @@ func (c *compiler) profile(name, where string) *schema.DeviceProfile {
 // ---------------------------------------------------------------- halls, rows, racks
 
 func (c *compiler) halls(site schema.Site) {
+	hallNames := map[string]bool{}
 	for _, h := range site.Halls {
+		if hallNames[h.Name] {
+			c.errf("site %s: two halls named %s", site.Name, h.Name)
+		}
+		hallNames[h.Name] = true
+		rowNames := map[string]bool{}
+		for _, r := range h.Rows {
+			if rowNames[r.Name] {
+				c.errf("hall %s: two rows named %s", h.Name, r.Name)
+			}
+			rowNames[r.Name] = true
+		}
 		hall := &model.Hall{Name: h.Name, Path: site.Name + "/" + h.Name}
 		c.m.Halls = append(c.m.Halls, hall)
 		names := map[string]bool{}
 		for ri, r := range h.Rows {
 			if r.Positions < 1 {
 				c.errf("hall %s row %s: positions must be ≥ 1", h.Name, r.Name)
+			}
+			if r.Positions > maxPositions {
+				// port allocation is a pure function of a rack's row and position (rackOrdinal),
+				// which gives each row 16 positions
+				c.errf("hall %s row %s: %d positions; a row has at most %d (port allocation is by row and position)", h.Name, r.Name, r.Positions, maxPositions)
 			}
 			row := &model.Row{Name: r.Name, Index: ri, Positions: r.Positions}
 			hall.Rows = append(hall.Rows, row)
@@ -248,6 +275,9 @@ func (c *compiler) rack(hall *model.Hall, row *model.Row, spec schema.Rack) {
 			if p == nil {
 				continue
 			}
+			if pn == profName && !accepts(slot.Accepts, p) {
+				c.errf("rack %s slot %s: profile %s is not accepted by the slot (%v)", spec.Name, name, pn, slot.Accepts)
+			}
 			d := c.newDevice(r, hall, r.Path, name, p, nil)
 			d.Slot = group
 			d.SlotIndex = slotIdx[group]
@@ -317,18 +347,43 @@ func accepts(a map[string]any, p *schema.DeviceProfile) bool {
 	if v, ok := a["cooling"]; ok && fmt.Sprint(v) != p.Spec.Cooling.Kind {
 		return false
 	}
+	if v, ok := a["units"]; ok {
+		if n, isInt := toInt(v); isInt && n != p.Spec.Form.Units {
+			return false
+		}
+	}
+	if v, ok := a["maxW"]; ok {
+		if n, isInt := toInt(v); isInt && p.Spec.Power.MaxW > float64(n) {
+			return false
+		}
+	}
 	return true
 }
 
 func (c *compiler) formatParams(spec schema.Rack, f *schema.RackFormat) map[string]any {
+	return c.checkParams("rack "+spec.Name, f.Metadata.Name, f.Spec.Params, spec.Params, true, true)
+}
+
+// checkParams resolves declared parameters (a rack format's or a fabric template's) against the
+// values given: ints are range- and allowed-checked, profiles must resolve and be of the
+// declared class. An undeclared name is refused when strict (a rack format), and otherwise kept
+// with a warning (a fabric template: settings written ahead of a generator that reads them). A
+// template's profile defaults are only checked when the estate names a value, because a default
+// may name a pack the estate does not pin.
+func (c *compiler) checkParams(owner, declarer string, decls map[string]schema.FormatParam, given map[string]any, checkDefaults, strict bool) map[string]any {
 	out := map[string]any{}
-	for k := range spec.Params {
-		if _, ok := f.Spec.Params[k]; !ok {
-			c.errf("rack %s: parameter %q is not declared by %s", spec.Name, k, f.Metadata.Name)
+	for k, v := range given {
+		if _, ok := decls[k]; !ok {
+			if strict {
+				c.errf("%s: parameter %q is not declared by %s", owner, k, declarer)
+			} else {
+				c.warnf("%s: parameter %q is not declared by %s; its generator ignores it", owner, k, declarer)
+				out[k] = v
+			}
 		}
 	}
-	for k, decl := range f.Spec.Params {
-		v, set := spec.Params[k]
+	for k, decl := range decls {
+		v, set := given[k]
 		if !set {
 			v = decl.Default
 		}
@@ -336,11 +391,11 @@ func (c *compiler) formatParams(spec schema.Rack, f *schema.RackFormat) map[stri
 		case "int":
 			n, ok := toInt(v)
 			if !ok {
-				c.errf("rack %s: parameter %s: want an integer, got %v", spec.Name, k, v)
+				c.errf("%s: parameter %s: want an integer, got %v", owner, k, v)
 				continue
 			}
 			if len(decl.Range) == 2 && (n < decl.Range[0] || n > decl.Range[1]) {
-				c.errf("rack %s: parameter %s=%d out of range %v", spec.Name, k, n, decl.Range)
+				c.errf("%s: parameter %s=%d out of range %v", owner, k, n, decl.Range)
 			}
 			if len(decl.Allowed) > 0 {
 				ok := false
@@ -350,7 +405,7 @@ func (c *compiler) formatParams(spec schema.Rack, f *schema.RackFormat) map[stri
 					}
 				}
 				if !ok {
-					c.errf("rack %s: parameter %s=%d not in %v", spec.Name, k, n, decl.Allowed)
+					c.errf("%s: parameter %s=%d not in %v", owner, k, n, decl.Allowed)
 				}
 			}
 			out[k] = n
@@ -359,10 +414,14 @@ func (c *compiler) formatParams(spec schema.Rack, f *schema.RackFormat) map[stri
 			if v != nil {
 				s = fmt.Sprint(v)
 			}
-			if s != "" {
-				p := c.profile(s, "rack "+spec.Name+" parameter "+k)
+			if s != "" && (set || checkDefaults) {
+				p := c.profile(s, owner+" parameter "+k)
 				if p != nil && decl.Class != "" && p.Spec.Class != decl.Class {
-					c.errf("rack %s: parameter %s: %s is a %s, the format wants a %s", spec.Name, k, s, p.Spec.Class, decl.Class)
+					what := "format"
+					if strings.HasPrefix(owner, "fabric ") {
+						what = "template"
+					}
+					c.errf("%s: parameter %s: %s is a %s, the %s wants a %s", owner, k, s, p.Spec.Class, what, decl.Class)
 				}
 			}
 			out[k] = s
@@ -950,6 +1009,9 @@ func (c *compiler) loops() {
 		if l.SupplyC == 0 {
 			l.SupplyC = 30
 		}
+		if len(lp.Racks) == 0 {
+			c.warnf("cooling loop %s: no racks are on it", lp.Name)
+		}
 		for _, rn := range lp.Racks {
 			var found *model.Rack
 			for _, r := range c.m.Racks {
@@ -977,6 +1039,7 @@ func (c *compiler) loops() {
 
 func (c *compiler) validate() {
 	sp := c.est.Spec
+	c.unconnected()
 	if sp.Clock == "virtual" {
 		for _, d := range c.m.Devices {
 			if d.Fidelity == "vm" || d.Fidelity == "hardware" {
@@ -1092,4 +1155,44 @@ func accelMemoryMiB(cs schema.ComponentSpec) float64 {
 		return gb * 1024
 	}
 	return 0
+}
+
+// unconnected warns about a rack's host ports that no fabric cables: a role the device has but
+// the estate gives it no network for (for example InfiniBand scale-out NICs in racks that no
+// InfiniBand fabric selects).
+func (c *compiler) unconnected() {
+	roles := map[string]bool{"scale-out": true, "frontend": true, "provisioning": true, "storage": true}
+	for _, r := range c.m.Racks {
+		type key struct{ kind, role string }
+		n := map[key]int{}
+		var order []key
+		seen := map[*model.Device]bool{}
+		var walk func(d *model.Device)
+		walk = func(d *model.Device) {
+			if seen[d] {
+				return
+			}
+			seen[d] = true
+			if d.Generated == "" && d.BaseClass != "switch" && d.Class != "switch" {
+				for _, p := range d.Ports {
+					if p.Link == nil && roles[p.Role] && (p.Kind == "ethernet" || p.Kind == "infiniband") {
+						k := key{p.Kind, p.Role}
+						if n[k] == 0 {
+							order = append(order, k)
+						}
+						n[k]++
+					}
+				}
+			}
+			for _, ch := range d.Children {
+				walk(ch)
+			}
+		}
+		for _, d := range r.Devices {
+			walk(d)
+		}
+		for _, k := range order {
+			c.warnf("rack %s: %d %s %s ports are on no fabric", r.Name, n[k], k.kind, k.role)
+		}
+	}
 }

@@ -471,7 +471,9 @@ func (e *Engine) outletOff(pdu *model.Device, outlet int) bool {
 // supply is gone lose AC and are hard off; devices whose supply returns get AC back with the
 // BMC booting and the host off.
 func (e *Engine) recomputePower(cause uint64) {
-	// sources first: a shelf or PDU has AC when its feed is up and the rack is not isolated
+	// the power chain first, then the sources: a shelf or PDU has AC when what it draws through
+	// delivers (its feed, or the chain node between) and the rack is not isolated
+	e.recomputeChain(cause)
 	for _, r := range e.M.Racks {
 		for _, in := range r.Inputs {
 			for _, s := range in.Sources {
@@ -480,6 +482,9 @@ func (e *Engine) recomputePower(cause uint64) {
 					if f := e.M.Feeds[fn]; f != nil && !f.Up {
 						feedUp = false
 					}
+				}
+				if n := in.SourceNode[s.Path]; n != nil {
+					feedUp = n.Up
 				}
 				want := feedUp && !r.Isolated["electrical"]
 				if want && !s.State.AC {
@@ -521,6 +526,7 @@ func (e *Engine) recomputePower(cause uint64) {
 			}
 		}
 	}
+	e.rearmBatteries(cause)
 	e.rollup(cause)
 	e.evalDomains(cause)
 }

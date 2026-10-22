@@ -54,7 +54,7 @@ may add values ([04 — Open registries](04-devices-and-racks.md#open-registries
 | `fabric.select` | O | selector, D every rack | Which racks the template wires |
 | `fabric.placeIn` | O | rack selector | Where generated switches are placed when the format reserves no room ([13 — Rack format](#rack-format) `reserved`); D the hall's network racks |
 | `spec.facility.power.feeds[]` | R | `{name, capacityW, phases?: 1\|3, voltage?}` | |
-| `spec.facility.power.topology[]` | O | `{name, kind: ups\|busway\|pdu-panel, from: feed\|node, capacityW, serves: [rack selector]}` | The one-line diagram between feeds and racks; D feeds serve racks directly |
+| `spec.facility.power.topology[]` | O | `{name, kind: ups\|busway\|pdu-panel, from: feed\|node, capacityW, serves: [rack selector], runtimeS?, profile?}` | The one-line diagram between feeds and racks; D feeds serve racks directly. Each node is a facility device at `<hall>/facility/power/<name>` made from `profile` (D `generic/<kind>`). A rack source draws through the deepest node of its feed's chain that serves its rack; two nodes on different branches serving one rack from one feed is refused, and so is a loop. `runtimeS` is a UPS's battery ride-through at its rated load (a UPS only) |
 | `spec.facility.cooling.loops[]` | O | `{name, profile, racks: [rackName], capacityKW, supplyC?}` | |
 | `spec.facility.devices[]` | O | `{name, profile, at: hall\|row\|floor, position?}` | Facility devices that belong to no rack: UPS, under-floor leak sensors, room sensors |
 | `spec.facility.bms.dialect` | R if any device publishes BMS points | `pack/dialect` | |
@@ -72,7 +72,7 @@ may add values ([04 — Open registries](04-devices-and-racks.md#open-registries
 
 | Field | | Meaning |
 |---|---|---|
-| `class` | R | registry; core classes: `server`, `compute-tray`, `switch`, `switch-tray`, `dpu`, `power-shelf`, `pdu`, `ups`, `cdu`, `sensor`, `rack-controller`, `appliance`. A pack class names the core class whose behaviours it inherits |
+| `class` | R | registry; core classes: `server`, `compute-tray`, `switch`, `switch-tray`, `dpu`, `power-shelf`, `pdu`, `ups`, `busway`, `pdu-panel`, `cdu`, `sensor`, `rack-controller`, `appliance`. A pack class names the core class whose behaviours it inherits |
 | `form` | R | `{mounting: rack\|tray\|zero-u\|none, units}` |
 | `identity` | R if the device has a BMC, MAC or serial | `{serialFormat, macOUI, guidPrefix?, uuidNamespace?}` ([Identity derivation](#identity-derivation)) |
 | `components[]` | O | `{name, kind, count, model, vendor?, profile?, ports?, maxW?, pad?}`. `kind` is a registry over core kinds `cpu`, `accelerator`, `nic`, `dpu`, `drive`, `psu`, `fan`, `tpm`, `bmc`, `memory`, `asic`, `pump`, `valve`, `breaker`. Component names are `<name>-<index>`, index from 0, zero-padded to `pad` digits when given. A component with `profile` is a **sub-device** ([04](04-devices-and-racks.md#sub-devices)). Components may own ports (`ports`), which is how a GPU owns its scale-up lanes |
@@ -129,7 +129,7 @@ function of the endpoint's path** so that adding a rack never moves another rack
 |---|---|---|
 | `name` | R | Fault id is `pack/catalogue/name` |
 | `title` | R | |
-| `target` | R | `{component?: kind, device?: class, port?: true, deviceWith?: bmc\|firmware\|tpm, vendor?}` |
+| `target` | R | `{component?: kind, device?: class, port?: true, deviceWith?: bmc\|firmware\|tpm\|leak-detector\|breaker, vendor?}`. `breaker` is a node of the power chain (a UPS, busway or panel) |
 | `params` | O | map of typed parameters the injector may set |
 | `effects[]` | R | Effect verbs ([08](08-scenarios-and-faults.md#faults)): `set`, `counter`, `ports`, `kernelLog`, `shim`, `redfish.logEntry`, `redfish.property`, `bms`, `power.loss`, `link`, `attestation`, or a pack `EffectHandler`. Each may carry `appliesAt: [levels]`; `kernelLog` takes `line`, `level` (default 4) and `when: boot` for a line written at every boot while the fault holds rather than when it is injected |
 | `clears` | R | `{on: [triggers], after?: duration, manual: bool}`; triggers from the registry ([14](14-expressions.md#triggers)) |
