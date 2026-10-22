@@ -339,6 +339,8 @@ func (e *Engine) loseAC(d *model.Device, cause uint64) {
 		d.State.BMCUp = false
 		e.stateEvent(d.Path, "bmc", "Enabled", "Unavailable", behaviourSrc, cause, "")
 	}
+	// the BMC lost its standby power with the rest: an update task it was running is lost
+	e.abortFirmwareTasks(d, "the management controller lost power", cause)
 	for _, ch := range d.Children {
 		e.loseAC(ch, cause)
 	}
@@ -394,6 +396,10 @@ func (e *Engine) ResetBMC(r Request) error {
 		}
 		d.State.BMCUp = false
 		e.stateEvent(d.Path, "bmc", "Enabled", "Unavailable", behaviourSrc, cause, "")
+		// a task the BMC was still running is lost with it; one that completed before the reset
+		// staged its image, which the reboot below applies (DPF's order: the task completes, then
+		// the BMC is reset)
+		e.abortFirmwareTasks(d, "the management controller was reset", cause)
 		e.after(secs(behaviour(d, "bmc", "bootSeconds", 30)), "bmc-boot", func() {
 			d.State.BMCUp = true
 			e.stateEvent(d.Path, "bmc", "Unavailable", "Enabled", behaviourSrc, cause, "")

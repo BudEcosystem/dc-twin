@@ -1,7 +1,9 @@
 // Package netsim is the portable substrate for endpoints on a host without TAPs (macOS, CI
 // containers): every device endpoint gets its own loopback port, allocated in a stable order,
 // and a site gateway (HTTP CONNECT) routes a stack's connections to a device's site address
-// (the IP its DHCP lease gave it) to that endpoint. The estate CA issues each BMC's certificate.
+// (the IP its DHCP lease gave it) to that endpoint, and to a stack service at the site address
+// the stack's outputs name (`siteServices`), so a stack process and a `vm` guest reach a service
+// at one address. The estate CA issues each BMC's certificate.
 //
 // What this substrate is not: there is no L2 segment, so link-layer facts (ARP, LLDP frames,
 // a switch port's MAC table) are not visible to a stack; the fidelity report says so. On Linux
@@ -42,6 +44,7 @@ type Net struct {
 	next      int
 	Endpoints map[string]map[string]string // device path -> kind -> host:port
 	routes    map[string]string            // site host[:port] -> local host:port
+	services  []Service                    // the stack's site services (siteServices)
 	caCert    *x509.Certificate
 	caKey     *ecdsa.PrivateKey
 	CAPEM     []byte
@@ -169,11 +172,26 @@ func (n *Net) Substrate() string {
 // SubstrateIsNot is the substrate's part of the fidelity report: on the TAP substrate what it
 // wired and observed, then what it is not.
 func (n *Net) SubstrateIsNot() []string {
+	var out []string
 	if n.L2 != nil {
 		r := n.L2.Report()
-		return append(append([]string{}, r.Lines...), r.IsNot...)
+		out = append(append(out, r.Lines...), r.IsNot...)
+	} else {
+		out = append(out, IsNot)
 	}
-	return []string{IsNot}
+	n.mu.Lock()
+	var svcs []string
+	for _, s := range n.services {
+		if s.Proto == "tcp" {
+			svcs = append(svcs, s.String())
+		}
+	}
+	n.mu.Unlock()
+	if len(svcs) > 0 {
+		sort.Strings(svcs)
+		out = append(out, "The site gateway routes a stack process's TCP to the stack's own services at the site addresses its outputs name (siteServices), as a vm guest's segment gateway does, through the same proxy (a service sees this host's loopback address): "+strings.Join(svcs, ", "))
+	}
+	return out
 }
 
 func (n *Net) listenLoopback(device, kind string) (net.Listener, error) {
@@ -241,7 +259,48 @@ func (n *Net) Unroute(site string) {
 	delete(n.routes, site)
 }
 
-// Routes is a copy of the routing table.
+// SetServices gives the substrate the stack's site services (its `siteServices` output): the site
+// gateway routes a stack process's TCP to each at its site address, as a `vm` guest's segment
+// gateway routes the guest's (HostPort), so every client names a service by one address.
+func (n *Net) SetServices(svcs []Service) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.services = append([]Service(nil), svcs...)
+}
+
+// Services is a copy of the stack's site services.
+func (n *Net) Services() []Service {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return append([]Service(nil), n.services...)
+}
+
+// Resolve says where the site gateway routes a TCP site address (ip:port, or a hostname[:port]):
+// a stack service at its site address, else an estate endpoint at its route; a hostname without
+// a port is taken as :443.
+func (n *Net) Resolve(site string) (string, bool) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.resolveLocked(site)
+}
+
+func (n *Net) resolveLocked(site string) (string, bool) {
+	for _, s := range n.services {
+		if s.Proto == "tcp" && s.Site.String() == site {
+			return s.Local, true
+		}
+	}
+	if local, ok := n.routes[site]; ok {
+		return local, true
+	}
+	if !strings.Contains(site, ":") {
+		local, ok := n.routes[site+":443"]
+		return local, ok
+	}
+	return "", false
+}
+
+// Routes is a copy of the routing table (estate endpoints; the stack's services are Services).
 func (n *Net) Routes() map[string]string {
 	n.mu.Lock()
 	defer n.mu.Unlock()
@@ -253,8 +312,8 @@ func (n *Net) Routes() map[string]string {
 }
 
 // StartGateway starts the site gateway: an HTTP CONNECT proxy that routes only to estate
-// endpoints and refuses everything else, so nothing behind it can reach the control plane or
-// the internet through it (15 — isolation).
+// endpoints and to the stack's site services (SetServices), and refuses everything else, so
+// nothing behind it can reach the control plane or the internet through it (15 — isolation).
 func (n *Net) StartGateway(addr string) error {
 	if addr == "" {
 		addr = n.BindIP + ":0"
@@ -280,14 +339,9 @@ func (n *Net) serveConnect(w http.ResponseWriter, r *http.Request) {
 			target += ":80"
 		}
 	}
-	n.mu.Lock()
-	local, ok := n.routes[target]
-	if !ok && !strings.Contains(target, ":") {
-		local, ok = n.routes[target+":443"]
-	}
-	n.mu.Unlock()
+	local, ok := n.Resolve(target)
 	if !ok {
-		http.Error(w, "dc-twin site gateway: no estate endpoint at "+target, http.StatusBadGateway)
+		http.Error(w, "dc-twin site gateway: no estate endpoint or stack service (siteServices) at "+target, http.StatusBadGateway)
 		return
 	}
 	up, err := net.DialTimeout("tcp", local, 5*time.Second)
@@ -354,6 +408,15 @@ func (n *Net) Write() error {
 	}
 	sort.Strings(devs)
 	out := map[string]any{"gateway": n.Gateway, "endpoints": n.Endpoints, "routes": n.routes, "ca": filepath.Join(n.stateDir, "estate-ca.pem")}
+	if len(n.services) > 0 {
+		svcs := map[string]string{}
+		for _, s := range n.services {
+			if s.Proto == "tcp" {
+				svcs[s.Site.String()] = s.Local
+			}
+		}
+		out["services"] = svcs
+	}
 	b, _ := json.MarshalIndent(out, "", "  ")
 	return os.WriteFile(filepath.Join(n.stateDir, "endpoints.json"), b, 0o644)
 }

@@ -79,8 +79,9 @@ type Adapter struct {
 	nosLeases  map[string]string      // port ref -> the address NVOS holds (committed as an event)
 	nosSkipped map[string]int         // why an NVOS port has no DHCP client -> count
 
-	// plugged are vm host ports plugged into their segment's relay for their guest's own DHCP
-	// client (hostport.go, D48), by port ref
+	// plugged are DHCP clients the twin does not run, plugged into their segment's relay
+	// (hostport.go): vm host ports for their guest's own client (D48), by port ref, and second
+	// clients behind a port another holds (a BlueField's Arm, D52), by port ref and MAC
 	plugged map[string]*endpoint
 	// upstreams are the relay legs to stack servers, by server address (one per server)
 	upstreams map[string]*upstream
@@ -650,6 +651,20 @@ func (a *Adapter) Report() adapter.Report {
 		if noEcho > 0 || unmatched > 0 {
 			rep.Lines = append(rep.Lines, fmt.Sprintf("relay: %d replies came back without option 82 (delivered by chaddr), %d matched no port", noEcho, unmatched))
 		}
+		var shared []string
+		var sharedReplies int64
+		seenUp := map[*upstream]bool{}
+		for _, name := range names {
+			if up := a.nets[name].up; up != nil && !seenUp[up] {
+				seenUp[up] = true
+				shared = append(shared, up.sharedPorts()...)
+				sharedReplies += up.shared.Load()
+			}
+		}
+		if len(shared) > 0 {
+			rep.Lines = append(rep.Lines, fmt.Sprintf("relay: %d switch ports have more than one DHCP client behind them; %d replies to them were delivered by chaddr within the port (%s)",
+				len(shared), sharedReplies, strings.Join(shared, "; ")))
+		}
 		rep.Lines = append(rep.Lines, fmt.Sprintf("leases: %d ACKs, %d renewals at T1 (relayed: a RENEWING client's unicast has no route on this substrate)", a.acks.Load(), a.renewals.Load()))
 	}
 	if a.classes["default"] > 0 {
@@ -665,13 +680,24 @@ func (a *Adapter) Report() adapter.Report {
 	sort.Strings(rep.Lines[len(rep.Lines)-len(a.skipped):])
 	rep.Lines = append(rep.Lines, a.nvosReport()...)
 	if len(a.plugged) > 0 {
-		refs := make([]string, 0, len(a.plugged))
-		for ref := range a.plugged {
-			refs = append(refs, ref)
+		var refs, seconds []string
+		for key, ep := range a.plugged {
+			if ep.second {
+				seconds = append(seconds, ep.port.Ref+" ("+ep.mac.String()+")")
+			} else {
+				refs = append(refs, key)
+			}
 		}
 		sort.Strings(refs)
-		rep.Lines = append(rep.Lines, fmt.Sprintf("relay: %d vm host ports plugged into their segment's relay, their guests' own DHCP clients relayed with the port's circuit id (D48): %s",
-			len(refs), strings.Join(refs, ", ")))
+		sort.Strings(seconds)
+		if len(refs) > 0 {
+			rep.Lines = append(rep.Lines, fmt.Sprintf("relay: %d vm host ports plugged into their segment's relay, their guests' own DHCP clients relayed with the port's circuit id (D48): %s",
+				len(refs), strings.Join(refs, ", ")))
+		}
+		if len(seconds) > 0 {
+			rep.Lines = append(rep.Lines, fmt.Sprintf("relay: %d second DHCP clients behind a port another client holds (a BlueField's Arm behind its BMC's port, D52), relayed with the port's circuit id; the relay delivers each reply to the client its chaddr names within the port, and the twin site DHCP leases a second client from its dynamic range, the port's cabled address being its own client's: %s",
+				len(seconds), strings.Join(seconds, ", ")))
+		}
 	}
 	if len(a.walks) > 0 {
 		steps := map[string]int{}

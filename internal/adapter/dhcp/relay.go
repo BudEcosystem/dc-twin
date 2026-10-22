@@ -1,8 +1,11 @@
 package dhcp
 
 import (
+	"fmt"
 	"net"
 	"net/netip"
+	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -63,37 +66,102 @@ type upstream struct {
 	twin    bool   // the server is the twin site DHCP
 	giaddr  net.IP
 
+	// byCircuit holds the clients behind each switch port (its circuit id), by their hardware
+	// address. A port usually has one; a BlueField's out-of-band port has two, its BMC and its
+	// Arm, each with its own MAC (D52), as any port with a host behind a hub or a bridge may.
 	mu        sync.RWMutex
-	byCircuit map[string]*endpoint
+	byCircuit map[string]map[string]*endpoint
 	byMAC     map[string]*endpoint
 
-	requests, replies, noEcho, unmatched, foreign atomic.Int64
+	requests, replies, noEcho, unmatched, foreign, shared atomic.Int64
+
+	// sharedTo counts the replies delivered on a port with more than one client, by circuit id
+	// and client: the evidence that each client of a shared port gets its own
+	sharedMu sync.Mutex
+	sharedTo map[string]map[string]int64
 }
 
 func newUpstream(network string, conn *net.UDPConn, server *net.UDPAddr, label string, twin bool) *upstream {
 	u := &upstream{network: network, conn: conn, server: server, label: label, twin: twin,
-		byCircuit: map[string]*endpoint{}, byMAC: map[string]*endpoint{}}
+		byCircuit: map[string]map[string]*endpoint{}, byMAC: map[string]*endpoint{}, sharedTo: map[string]map[string]int64{}}
 	u.giaddr = conn.LocalAddr().(*net.UDPAddr).IP.To4()
 	_ = conn.SetReadBuffer(4 << 20)
 	return u
 }
 
+// attach places a client behind its switch port, beside any other client there: a second
+// client never takes the first one's replies (a client plugged in again with the same MAC
+// replaces itself).
 func (u *upstream) attach(ep *endpoint) {
 	u.mu.Lock()
 	defer u.mu.Unlock()
-	u.byCircuit[ep.circuit] = ep
+	port := u.byCircuit[ep.circuit]
+	if port == nil {
+		port = map[string]*endpoint{}
+		u.byCircuit[ep.circuit] = port
+	}
+	port[ep.mac.String()] = ep
 	u.byMAC[ep.mac.String()] = ep
 }
 
 func (u *upstream) detach(ep *endpoint) {
 	u.mu.Lock()
 	defer u.mu.Unlock()
-	if u.byCircuit[ep.circuit] == ep {
-		delete(u.byCircuit, ep.circuit)
+	if port := u.byCircuit[ep.circuit]; port[ep.mac.String()] == ep {
+		delete(port, ep.mac.String())
+		if len(port) == 0 {
+			delete(u.byCircuit, ep.circuit)
+		}
 	}
 	if u.byMAC[ep.mac.String()] == ep {
 		delete(u.byMAC, ep.mac.String())
 	}
+}
+
+// client is the client behind a switch port that a message for chaddr is for: the port's client
+// with that hardware address, else, when the port has one client, that client, whatever chaddr
+// says (as a switch port with one host behind it delivers everything to that host). A port with
+// several clients and none of them chaddr has no client for it. The caller holds u.mu.
+func (u *upstream) client(circuit, chaddr string) *endpoint {
+	port := u.byCircuit[circuit]
+	if ep := port[chaddr]; ep != nil {
+		return ep
+	}
+	if len(port) == 1 {
+		for _, ep := range port {
+			return ep
+		}
+	}
+	return nil
+}
+
+// sharedPorts lists the switch ports with more than one client behind them, sorted, each with
+// the replies delivered to each of its clients while it had more than one.
+func (u *upstream) sharedPorts() []string {
+	u.mu.RLock()
+	var circuits []string
+	for c, port := range u.byCircuit {
+		if len(port) > 1 {
+			circuits = append(circuits, c)
+		}
+	}
+	u.mu.RUnlock()
+	sort.Strings(circuits)
+	u.sharedMu.Lock()
+	defer u.sharedMu.Unlock()
+	out := make([]string, 0, len(circuits))
+	for _, c := range circuits {
+		var to []string
+		for mac, n := range u.sharedTo[c] {
+			to = append(to, fmt.Sprintf("%d to %s", n, mac))
+		}
+		sort.Strings(to)
+		if len(to) == 0 {
+			to = []string{"no replies yet"}
+		}
+		out = append(out, c+": "+strings.Join(to, ", "))
+	}
+	return out
 }
 
 func (u *upstream) send(m *dhcpv4.DHCPv4) {
@@ -101,9 +169,11 @@ func (u *upstream) send(m *dhcpv4.DHCPv4) {
 	_, _ = u.conn.WriteToUDP(marshal(m), u.server)
 }
 
-// serve takes the server's replies and hands each to the port it is for: by the circuit id
-// the server echoed (RFC 3046 requires the echo, and it is how a relay picks the interface),
-// else by chaddr, which the report counts.
+// serve takes the server's replies and hands each to the client it is for: the port by the
+// circuit id the server echoed (RFC 3046 requires the echo, and it is how a relay picks the
+// interface), and within the port the client by chaddr, as a switch delivers a frame for a MAC
+// out of the port it learned the MAC on; without the echo, by chaddr alone, which the report
+// counts.
 func (u *upstream) serve() {
 	buf := make([]byte, 4096)
 	for {
@@ -120,14 +190,18 @@ func (u *upstream) serve() {
 			continue
 		}
 		var ep *endpoint
+		chaddr := m.ClientHWAddr.String()
+		shared := false
 		u.mu.RLock()
+		circuit := ""
 		if rai := m.Options.Get(optRAI); rai != nil {
-			ep = u.byCircuit[string(subOptions(rai)[subCircuitID])]
+			circuit = string(subOptions(rai)[subCircuitID])
+			ep, shared = u.client(circuit, chaddr), len(u.byCircuit[circuit]) > 1
 		} else {
 			u.noEcho.Add(1)
 		}
 		if ep == nil {
-			ep = u.byMAC[m.ClientHWAddr.String()]
+			ep = u.byMAC[chaddr]
 		}
 		u.mu.RUnlock()
 		if ep == nil {
@@ -135,6 +209,15 @@ func (u *upstream) serve() {
 			continue
 		}
 		u.replies.Add(1)
+		if shared {
+			u.shared.Add(1)
+			u.sharedMu.Lock()
+			if u.sharedTo[circuit] == nil {
+				u.sharedTo[circuit] = map[string]int64{}
+			}
+			u.sharedTo[circuit][ep.mac.String()]++
+			u.sharedMu.Unlock()
+		}
 		m.Options.Del(optRAI) // the relay strips option 82 before the client sees the reply
 		ep.seg.relay.deliver(ep, m)
 	}

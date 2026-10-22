@@ -521,7 +521,9 @@ zero-DPU host's boot NIC). NICo answers a relay at one fixed port, which two ups
 **Supersedes:** the first `vm` implementation's `user,restrict=on` NICs (D42). **Amends:** D34,
 which refused `vm` devices on the loopback substrate. **Reversed if:** the TAP substrate (D20) gives
 `vm` hosts TAPs on their segments' bridges, where the gateway can be a real router; the observer
-contract stays.
+contract stays. *Amended by D52's amendment:* the site gateway routes `siteServices` for stack
+processes too, and a switch port's relay serves more than one DHCP client behind it, each by its
+own MAC (a BlueField's BMC and its Arm).
 
 ### D49 — Container hosts: real kubelets whose GPUs are the model, through Mokka
 A twin host's Kubernetes software may run on a **container host**: a real kubelet and containerd
@@ -668,7 +670,61 @@ a UART, and that DPF's first boot needs only a network to run. Run with DPF (`co
 ConnectX; told by its flavor to skip those, the DPU joins its cluster and DPF puts it in service
 (Q1). **Refines:** D25, D48, D51. **Reversed if:** the twin relay serves two clients behind one
 switch port (the address stand-in goes), or a machine model with a BlueField's UART map, rshim and
-ConnectX ports exists.
+ConnectX ports exists. *Amended (2026-10-20): the address stand-in is gone, and the two other
+things the first form left to the `bluefield` adapter are the twin's.* **The twin relay serves
+several clients behind one switch port:** it keeps each port's clients by hardware address and
+delivers a server's reply by the circuit id the server echoed and then, within the port, by
+chaddr, as a switch delivers a frame out of the port it learned the MAC on (a port with one client
+still takes every reply for its circuit, as before). The Arm's NIC is plugged into its BMC's
+switch port by its own MAC (`netsim.Net.PlugRelay(ref, mac)`), a second client behind the port,
+so its DHCP is the network's: on a `dhcp: twin` network the twin site DHCP leases it from the
+segment's dynamic range (from .200: the port's cabled address stays the BMC's whichever of the two
+asks first), on a `dhcp: stack` network the stack's server answers it (where the first form refused
+the Arm), and the BMC keeps its lease and its renewals. The Arm's lease is observed (`oob.lease`,
+not `lease`, which is its BMC's field on the same device path), and the dhcp adapter's report
+counts each shared port's replies by client. **The site gateway routes the stack's site
+services:** up gives the substrate the `siteServices` output, and the site gateway routes a stack
+process's TCP to a service at its site address, as a guest's segment gateway does, whichever
+adapters run; the `bluefield` adapter no longer adds those routes. **A `vm` device is run by one
+substrate:** up claims each `vm` device for one enabled substrate adapter that accepts it, a
+specialised one (`bluefield`, which runs only BlueFields' Arms) before the general `vm` adapter,
+in `--adapters` order among equals, and each plans only the devices claimed for it, so
+`--adapters …,vm,bluefield` runs a BlueField's Arm once (the `vm` adapter had planned every `vm`
+device, and the engine kept whichever substrate attached last). **Why:** the stand-in gave the Arm
+an address no site DHCP chose and refused `dhcp: stack` networks, stack processes reached the
+stack's services at their site addresses only when an Arm ran, and a BlueField at `vm` could not
+run beside `vm` hosts. **Amends:** D48 (the site gateway, not only a guest's segment gateway,
+routes `siteServices`).
+
+### D53 — A firmware update task lives in its BMC and is lost when the BMC goes down
+An update's task (`firmware.update.simple`, `.multipart`, `.push`, and the RMS updates that start
+the same tasks) runs only while its BMC is up. When the BMC goes down while the task is running —
+its reset (`Manager.Reset`, `ResetToDefaults`, the `generic/bmc/reset` fault), the loss of its
+standby power (an AC cycle, a reseat, a feed, outlet or isolation that removes the device's input),
+or a hang (`generic/bmc/unreachable`) — the task ends there: `TaskState` Exception, its end time the
+moment the BMC went down, its percentage where it stood, the Redfish message `TaskAborted`, and a
+`task.<id>` state event in the log. Nothing is staged and nothing is applied; once the BMC answers
+again the task reads Exception, never Running and never Completed. A BMC that is down refuses an
+update outright (`ErrBMCDown`, as it refuses a power request). An update whose task **completed**
+before the BMC went down is unaffected: its image is staged, and a BMC component staged
+`applyOn: reset` is applied when the BMC reboots (D51), so DPF's order — the task completes, DPF
+resets the BMC — still lands, and a second push DPF makes in the second before the reset takes the
+BMC down (it reads the version again within about 100 ms and finds the old one, `compat/dpf`) is
+accepted, then lost with the BMC, while the first push's image is applied at the reboot. **Why:**
+the engine completed the task on its own timer whatever happened to the BMC meanwhile, so an
+update survived a reset, a power loss or a hang that a real BMC's would not, and a stack's recovery
+from a lost update (polling a task that never completes, re-pushing after a reset) went untested.
+DMTF's TaskState offers Exception ("stopped due to an exception condition"), Interrupted ("expected
+to restart") and Cancelled ("by an operator or internal process"); the task does not restart, so
+it is Exception, with the TaskEvent registry's `TaskAborted`. bmcweb, which holds its tasks in
+memory, answers 404 for the task after its reboot instead; the twin keeps the task so that its
+numbering stays stable and a client keyed on its id (RMS's jobs, which treat a missing task as
+still running) sees it end — a client polling it sees a failed update either way. **Amends:** D51
+(the BMC's reboot applies what a completed task staged, not what a running one would have).
+**Reversed if:** a dialect's behaviour is captured that resumes an interrupted update after the
+BMC's reboot (then that dialect's tasks go Interrupted and resume), or a stack is found that
+behaves differently on a 404 from a rebooted bmcweb than on an Exception (then bmcweb dialects
+forget the task, with task ids that do not collide).
 
 ## Open questions
 

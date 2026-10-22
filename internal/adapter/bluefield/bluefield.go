@@ -39,7 +39,6 @@ import (
 	"net"
 	"net/http"
 	"sort"
-	"strings"
 	"sync"
 	"time"
 
@@ -73,7 +72,8 @@ type Adapter struct {
 	unrouted map[string]bool // fronts whose redfish service never appeared
 
 	// arms are the BlueFields at vm fidelity, whose Arm is a QEMU machine (arm.go), and
-	// services the stack's site services (siteServices) their segment gateway routes to.
+	// services the stack's site services (siteServices, the substrate's: netsim.Net.Services)
+	// their segment gateway routes to.
 	arms     map[string]*arm
 	services []netsim.Service
 	workers  sync.WaitGroup // one per Arm: carries out its requests in order
@@ -134,13 +134,7 @@ func (a *Adapter) Start(ctx context.Context, rt *adapter.Runtime) error {
 		a.order = append(a.order, d.Path)
 		rt.Engine.SetEndpoint(d.Path, "bluefield", f.addr)
 	}
-	if s := strings.TrimSpace(rt.Outputs["siteServices"]); s != "" {
-		svcs, err := netsim.ParseServices(s)
-		if err != nil {
-			return fmt.Errorf("bluefield: the stack's siteServices output: %w", err)
-		}
-		a.services = svcs
-	}
+	a.services = rt.Net.Services()
 	// A BMC fetches an image from where its network routes the ImageURI's address: a stack
 	// service at its site address, an estate endpoint, or (a loopback URL) this host.
 	if tr, ok := a.fetch.Transport.(*http.Transport); ok {
@@ -161,7 +155,7 @@ func (a *Adapter) startArms() error {
 	var initialOn []string
 	for _, p := range a.order {
 		f := a.fronts[p]
-		if f.dev.Fidelity != "vm" || !armEligible(f.dev) {
+		if f.dev.Fidelity != "vm" || !armEligible(f.dev) || !a.rt.Runs(a.Name(), p) {
 			continue
 		}
 		m, err := a.newArm(f)
@@ -175,14 +169,9 @@ func (a *Adapter) startArms() error {
 	if len(a.arms) == 0 {
 		return nil
 	}
-	// The site gateway routes stack processes to estate endpoints; a stack service at its site
-	// address is reached there too, as the Arm reaches it through its segment gateway, so DPF
-	// and a DPU name the DPU cluster's API (and the bfb-registry) by one address.
-	for _, s := range a.services {
-		if s.Proto == "tcp" {
-			a.rt.Net.Route(s.Site.String(), s.Local)
-		}
-	}
+	// The site gateway itself routes stack processes to the stack's site services (the twin
+	// gives the substrate the siteServices output), as the Arm's segment gateway routes the Arm,
+	// so DPF and a DPU name the DPU cluster's API (and the bfb-registry) by one address.
 	for _, p := range a.order {
 		m := a.arms[p]
 		if m == nil {
@@ -216,16 +205,11 @@ func (a *Adapter) closeArms() {
 }
 
 // dialSite dials an address as a host on the management network reaches it: a stack service at
-// its site address, an estate endpoint at its site route, anything else directly.
+// its site address, an estate endpoint at its site route (as the site gateway routes them),
+// anything else directly.
 func (a *Adapter) dialSite(ctx context.Context, network, addr string) (net.Conn, error) {
-	for _, s := range a.services {
-		if s.Proto == "tcp" && s.Site.String() == addr {
-			addr = s.Local
-			break
-		}
-	}
 	if a.rt != nil {
-		if l, ok := a.rt.Net.Routes()[addr]; ok {
+		if l, ok := a.rt.Net.Resolve(addr); ok {
 			addr = l
 		}
 	}
@@ -360,17 +344,10 @@ func (a *Adapter) Report() adapter.Report {
 		}
 	}
 	if len(a.arms) > 0 {
-		var routed []string
-		for _, s := range a.services {
-			if s.Proto == "tcp" {
-				routed = append(routed, s.String())
-			}
-		}
-		r.Lines = append(r.Lines, "bluefield: the site gateway also routes the stack's site services, so stack processes reach them at the site addresses the Arms reach them at: "+strings.Join(routed, ", "))
 		r.IsNot = append(r.IsNot,
 			"An Arm at vm is QEMU's virt machine, not a BlueField: it has no ConnectX-7 (p0/p1, representors, SFs), no rshim or tmfifo network to the host, no boot FIFO (a cpio archive carrying the bf.cfg stands in for it at installation), no IPMI towards the BMC, no eMMC and none of BlueField's ACPI tables; what the DPU OS finds missing it reports, and nothing answers in its place.",
 			"An Arm at vm boots with earlycon=pl011,0x9000000 (virt's UART) ahead of GRUB's command line, which follows verbatim: a BlueField's early console address is firmware flash or a PCIe hole on virt, where the kernel's first line never ends.",
-			"An Arm at vm gets its out-of-band address from the bluefield adapter on its own cable (a fixed host .9 in its BMC's segment), not from the twin relay, which serves one client per switch port; its OOB NIC is named oob_net0 by a systemd link file the twin writes into the installed root once the installer has finished.",
+			"An Arm at vm leases its out-of-band address from its network's DHCP through the twin relay of its BMC's switch port, a second client behind the port by its own MAC (the relay delivers each reply by chaddr within the port); the twin site DHCP leases it from the segment's dynamic range, the port's cabled address being the BMC's. Its OOB NIC is a virtio NIC on the segment's userspace gateway (D48), named oob_net0 by a systemd link file the twin writes into the installed root once the installer has finished.",
 			"An Arm reboot is a new QEMU process booting GRUB's default entry, read from the disk; UEFI's boot manager and GRUB do not run after the installer.")
 	}
 	if len(a.arms) < len(a.fronts) {

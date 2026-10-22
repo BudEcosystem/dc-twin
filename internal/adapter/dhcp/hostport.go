@@ -12,13 +12,18 @@ import (
 	"github.com/BudEcosystem/dc-twin/internal/model"
 )
 
-// plugPort plugs a host's port into the twin relay of its segment for a DHCP client the twin
-// does not run: a `vm` host's NIC, whose guest's own firmware and OS speak DHCP through the
-// port's switch port in the vm adapter (netsim.HostPort, D48). The relay treats the port as it
-// treats a BMC's: the port's own socket is how it knows the ingress port, so the circuit id,
-// remote id and link selection are the cabling's, never anything the guest claims. Registered
-// with the substrate as its relay directory (netsim.Net.SetRelayDirectory).
-func (a *Adapter) plugPort(ref string) (netsim.PortRelay, error) {
+// plugPort plugs a DHCP client the twin does not run into the twin relay of the segment a host's
+// port is cabled to: a `vm` host's NIC, whose guest's own firmware and OS speak DHCP through the
+// port's switch port in the vm adapter (netsim.HostPort, D48), or a second client behind a port
+// another client holds, by its own MAC: a BlueField's Arm, whose out-of-band NIC shares the
+// switch port its BMC's DHCP client is behind (D52). The relay treats each as it treats a BMC:
+// the client's own socket is how it knows the ingress port, so the circuit id, remote id and
+// link selection are the cabling's, never anything the guest claims; a reply comes back to the
+// client by the circuit id and, within the port, chaddr, so two clients behind one port each get
+// their own (relay.go). A second client gets no address from the port's cabling (that is the
+// port's own client's): the twin site DHCP leases it from its dynamic range. Registered with the
+// substrate as its relay directory (netsim.Net.SetRelayDirectory).
+func (a *Adapter) plugPort(ref string, client net.HardwareAddr) (netsim.PortRelay, error) {
 	if a.stopped.Load() {
 		return nil, errors.New("the dhcp adapter has stopped")
 	}
@@ -51,6 +56,9 @@ func (a *Adapter) plugPort(ref string) (netsim.PortRelay, error) {
 	if ep.seg.relay == nil {
 		return nil, fmt.Errorf("a real NOS (%s) relays the segment of %s", ep.nos, ref)
 	}
+	if len(client) == 6 && client.String() != ep.mac.String() {
+		ep.mac, ep.offset, ep.second = append(net.HardwareAddr(nil), client...), 0, true
+	}
 	ep.dev = d
 	c, err := a.rt.Net.ListenUDP(d.Path, "dhcp-port:"+p.Name)
 	if err != nil {
@@ -60,7 +68,7 @@ func (a *Adapter) plugPort(ref string) (netsim.PortRelay, error) {
 	ep.addr = c.LocalAddr().(*net.UDPAddr).AddrPort()
 	ep.seg.relay.attach(ep)
 	a.mu.Lock()
-	a.plugged[ref] = ep
+	a.plugged[ep.plugKey()] = ep
 	a.mu.Unlock()
 	return &portRelay{a: a, ep: ep}, nil
 }
@@ -108,10 +116,19 @@ func (r *portRelay) Close() error {
 		r.ep.seg.relay.detach(r.ep)
 		r.ep.conn.Close()
 		r.a.mu.Lock()
-		if r.a.plugged[r.ep.port.Ref] == r.ep {
-			delete(r.a.plugged, r.ep.port.Ref)
+		if r.a.plugged[r.ep.plugKey()] == r.ep {
+			delete(r.a.plugged, r.ep.plugKey())
 		}
 		r.a.mu.Unlock()
 	})
 	return nil
+}
+
+// plugKey is a plugged client's key: its port's ref, and its MAC when it is a second client
+// behind the port.
+func (ep *endpoint) plugKey() string {
+	if ep.second {
+		return ep.port.Ref + " " + ep.mac.String()
+	}
+	return ep.port.Ref
 }

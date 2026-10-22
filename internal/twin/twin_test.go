@@ -1,9 +1,15 @@
 package twin
 
 import (
+	"bufio"
 	"encoding/json"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/BudEcosystem/dc-twin/internal/model"
@@ -80,5 +86,78 @@ func TestStackInputsCarryNVOSMACs(t *testing.T) {
 			}
 			t.Logf("e.g. %v", r)
 		}
+	}
+}
+
+// The site gateway routes a stack process to the stack's own services at the site addresses its
+// outputs name (siteServices), as a vm guest's segment gateway does, whatever adapters run: DPF
+// and a DPU's Arm name the DPU cluster's API by one address. It routes nothing else, and the
+// services are not estate routes. A malformed output refuses up.
+func TestSiteGatewayRoutesStackServices(t *testing.T) {
+	echo, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { echo.Close() })
+	go func() {
+		for {
+			c, err := echo.Accept()
+			if err != nil {
+				return
+			}
+			go func() { io.Copy(c, c); c.Close() }()
+		}
+	}()
+	tw, err := Up("../../examples/estates/lab-model.yaml", Options{StateDir: t.TempDir(), Adapters: []string{},
+		Outputs: map[string]string{"siteServices": "dpu-api@10.90.0.11:443=" + echo.Addr().String() + " tftp@udp:10.90.0.17:69=127.0.0.1:1069"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tw.Down()
+	connect := func(target string) (int, net.Conn, *bufio.Reader) {
+		t.Helper()
+		c, err := net.Dial("tcp", tw.Net.Gateway)
+		if err != nil {
+			t.Fatal(err)
+		}
+		fmt.Fprintf(c, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", target, target)
+		br := bufio.NewReader(c)
+		resp, err := http.ReadResponse(br, &http.Request{Method: http.MethodConnect})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return resp.StatusCode, c, br
+	}
+	code, c, br := connect("10.90.0.11:443")
+	defer c.Close()
+	if code != 200 {
+		t.Fatalf("CONNECT to the stack's dpu-api at its site address: %d", code)
+	}
+	c.Write([]byte("ping"))
+	got := make([]byte, 4)
+	if _, err := io.ReadFull(br, got); err != nil || string(got) != "ping" {
+		t.Fatalf("relayed %q, %v", got, err)
+	}
+	if code, c2, _ := connect("10.90.0.12:443"); code != http.StatusBadGateway {
+		t.Fatalf("CONNECT to an address no service or endpoint has: %d", code)
+	} else {
+		c2.Close()
+	}
+	if code, c3, _ := connect("10.90.0.17:69"); code != http.StatusBadGateway {
+		t.Fatalf("CONNECT to a UDP service's address: %d", code)
+	} else {
+		c3.Close()
+	}
+	if _, ok := tw.Net.Routes()["10.90.0.11:443"]; ok {
+		t.Fatal("a stack service became an estate route")
+	}
+	if rep := strings.Join(tw.Net.SubstrateIsNot(), "\n"); !strings.Contains(rep, "The site gateway routes a stack process's TCP to the stack's own services") ||
+		!strings.Contains(rep, "dpu-api@10.90.0.11:443="+echo.Addr().String()) || strings.Contains(rep, "tftp@") {
+		t.Fatalf("the substrate report does not say the gateway routes the services: %v", tw.Net.SubstrateIsNot())
+	}
+
+	if _, err := Up("../../examples/estates/lab-model.yaml", Options{StateDir: t.TempDir(), Adapters: []string{},
+		Outputs: map[string]string{"siteServices": "dpu-api@not-an-address=127.0.0.1:1"}}); err == nil || !strings.Contains(err.Error(), "siteServices") {
+		t.Fatalf("a malformed siteServices output: %v", err)
 	}
 }

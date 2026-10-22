@@ -187,6 +187,11 @@ func (e *Engine) injectLocked(selStr, faultID string, params map[string]any, id 
 			Message: "inject " + faultID + ": " + ref.Spec.Title, Data: map[string]any{"fault": faultID, "id": fid, "params": f.Params}})
 		e.faults = append(e.faults, f)
 		e.applyEffects(f)
+		if tg.c == nil && tg.p == nil && tg.d.HasBMC() && !e.bmcAvailable(tg.d) {
+			// a fault that hangs or resets the BMC (generic/bmc/unreachable, generic/bmc/reset)
+			// takes it down as a reset does: the update tasks it was running are lost (D53)
+			e.abortFirmwareTasks(tg.d, "the management controller became unavailable ("+faultID+")", f.Seq)
+		}
 		if ref.Spec.Clears.After != "" {
 			if d, err := time.ParseDuration(ref.Spec.Clears.After); err == nil {
 				ff := f

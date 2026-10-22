@@ -14,6 +14,7 @@ import (
 	"github.com/BudEcosystem/dc-twin/internal/adapter/netsim"
 	"github.com/BudEcosystem/dc-twin/internal/compile"
 	"github.com/BudEcosystem/dc-twin/internal/engine"
+	"github.com/BudEcosystem/dc-twin/internal/schema"
 	"github.com/BudEcosystem/dc-twin/internal/substrate/qemu"
 )
 
@@ -163,5 +164,57 @@ func TestRunDirIsShortEnoughForSockets(t *testing.T) {
 	}
 	if p := runDir("/s/vm/x", "k"); p != "/s/vm/x" {
 		t.Fatalf("a short state directory holds its own sockets, got %s", p)
+	}
+}
+
+// A `vm` device another substrate claims is that substrate's: with the vm and bluefield
+// adapters both enabled, up claims a BlueField at vm for the bluefield adapter (its Arm,
+// adapter.ClaimSubstrate), and the vm adapter plans no machine for it, where it used to plan
+// every vm device and leave the engine with whichever substrate attached last.
+func TestStartSkipsDevicesAnotherSubstrateClaims(t *testing.T) {
+	reg, err := compile.Registry()
+	if err != nil {
+		t.Fatal(err)
+	}
+	est, _, err := compile.LoadEstate("../../../examples/estates/lab-model.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const dpu = tray + "/bf3-0"
+	est.Spec.Fidelity.Overrides = append(est.Spec.Fidelity.Overrides, schema.FidelityOverride{Select: "a01/compute-tray-01/bf3-0", Level: "vm", OS: "stack"})
+	res, err := compile.Compile(est, reg, compile.Options{HostArch: compile.HostArch(), AllowTCG: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var vms []string
+	for _, d := range res.Model.Devices {
+		if d.Fidelity == "vm" {
+			vms = append(vms, d.Path)
+		}
+	}
+	if len(vms) != 1 || vms[0] != dpu {
+		t.Fatalf("vm devices %v, want only %s", vms, dpu)
+	}
+	eng, err := engine.New(res.Model, reg, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	n, err := netsim.New(t.TempDir(), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(n.Close)
+	a := New()
+	rt := &adapter.Runtime{Engine: eng, Net: n, StateDir: t.TempDir(), Assets: t.TempDir(), Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Claims: map[string]string{dpu: "bluefield"}}
+	if err := a.Start(t.Context(), rt); err != nil {
+		t.Fatalf("the vm adapter planned a device the bluefield adapter claims: %v", err)
+	}
+	defer a.Stop()
+	if len(a.machines) != 0 || len(a.order) != 0 {
+		t.Fatalf("the vm adapter planned %v; %s is the bluefield adapter's", a.order, dpu)
+	}
+	if rt.Runs(Name, dpu) || !rt.Runs("bluefield", dpu) {
+		t.Fatal("Runs does not follow the claim")
 	}
 }
