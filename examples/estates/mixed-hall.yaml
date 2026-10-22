@@ -71,6 +71,15 @@ spec:
   facility:
     power:
       feeds: [{ name: A, capacityW: 900000 }, { name: B, capacityW: 900000 }]
+      # each feed through a UPS to a panel per row: a feed loss rides through on the battery for
+      # as long as it lasts at the load, then that side of every rack goes dark (13)
+      topology:
+        - { name: ups-a, kind: ups, from: A, capacityW: 800000, runtimeS: 300 }
+        - { name: ups-b, kind: ups, from: B, capacityW: 800000, runtimeS: 300 }
+        - { name: rpp-a1, kind: pdu-panel, from: ups-a, capacityW: 450000, serves: ["a0*"] }
+        - { name: rpp-a2, kind: pdu-panel, from: ups-a, capacityW: 300000, serves: ["b0*", "c0*"] }
+        - { name: rpp-b1, kind: pdu-panel, from: ups-b, capacityW: 450000, serves: ["a0*"] }
+        - { name: rpp-b2, kind: pdu-panel, from: ups-b, capacityW: 300000, serves: ["b0*", "c0*"] }
     cooling:
       loops: [{ name: cdu-a, profile: generic/cdu-inrow, racks: [a01, a02, a03, a04], capacityKW: 600 }]
     bms: { dialect: nvidia/dsx-exchange }

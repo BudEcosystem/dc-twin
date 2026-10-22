@@ -1,0 +1,80 @@
+/* console.css — the twin console v2. Dark only, as the design is. Layout and computed values are
+   inline in the views (the design writes them so); this file holds the base, the hover states the
+   inline styles cannot express, the Bud design-system buttons, and the animations. */
+:root {
+  --bg: #0a0a0a; --bg1: #101010; --bg2: #18191b; --line: #1f1f1f; --line2: #2a2a2a;
+  --text: #eeeeee; --text-hi: #edeef0; --text2: #cfcfcf; --muted: #b3b3b3; --dim: #757575; --faint: #4d4d4d;
+  --accent: #965cde; --accent2: #b48ae8; --info: #5b9dff; --warn: #d1b854; --crit: #ec7575; --ok: #5cde7b; --amber: #d4a853;
+  --mono: ui-monospace, Menlo, monospace;
+  color-scheme: dark;
+}
+html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); font: 13px/1.45 ui-sans-serif, system-ui, sans-serif; overflow: hidden; }
+a { color: var(--accent); text-decoration: none; } a:hover { color: var(--accent2); }
+* { box-sizing: border-box; }
+button { font-family: inherit; }
+::-webkit-scrollbar { width: 8px; height: 8px; } ::-webkit-scrollbar-thumb { background: #2a2a2a; border-radius: 4px; } ::-webkit-scrollbar-track { background: transparent; }
+#app { height: 100vh; }
+
+@keyframes dcPulse { 0% { opacity: 1; transform: scale(1); } 100% { opacity: 0; transform: scale(1.35); } }
+@keyframes dcFlash { 0% { background: rgba(150, 92, 222, .22); } 100% { background: transparent; } }
+@keyframes dcFlow { to { stroke-dashoffset: -24; } }
+@keyframes dcRing { 0% { transform: scale(.25); opacity: 1; } 100% { transform: scale(2.4); opacity: 0; } }
+@keyframes dcBlink { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
+
+/* hover states (the design's style-hover) */
+.hv-rail:hover { color: #edeef0 !important; background: #ffffff06 !important; }
+.hv-accent:hover { border-color: #965cde !important; }
+.hv-row:hover { background: #ffffff08 !important; }
+.hv-slot:hover { background: #212225 !important; }
+.hv-ev:hover { background: #ffffff06 !important; }
+.hv-danger:hover { border-color: #ec7575 !important; }
+.hv-act:hover { border-color: #965cde !important; color: #edeef0 !important; }
+.hv-act-danger:hover { border-color: #ec7575 !important; color: #edeef0 !important; }
+.hv-bright:hover { filter: brightness(1.25); }
+.hv-text:hover { color: #edeef0 !important; }
+.hv-empty:hover { background: #965cde14 !important; }
+
+/* Bud design system buttons (BudDS.PrimaryButton, BudDS.SecondaryButton) */
+.ds-btn { display: inline-flex; justify-content: center; align-items: center; height: 1.75rem; min-width: 4rem; padding: 0 .7rem; border-radius: .3rem; cursor: pointer;
+  font: 600 .75rem/100% ui-sans-serif, system-ui, sans-serif; color: #eeeeee; flex: none; transition: background .15s; }
+.ds-primary { border: .5px solid #965cde; background: #1e0c34; }
+.ds-primary:hover:not(:disabled) { background: #965cde; }
+.ds-primary:disabled { color: #888888; border-color: #965cde55; background: #1e0c3466; cursor: not-allowed; }
+.ds-secondary { border: .5px solid #757575; background: #1f1f1f; font-weight: 400; }
+.ds-secondary:disabled { color: #757575; cursor: not-allowed; }
+
+/* form fields the live screens add (scenario files, fault params) */
+.tc-input { background: #0a0a0a; border: 1px solid #2a2a2a; border-radius: 5px; color: #cfcfcf; font: 11px var(--mono); padding: 3px 6px; outline: none; }
+.tc-input:focus { border-color: #965cde; }
+textarea.tc-input { width: 100%; resize: vertical; line-height: 1.5; padding: 8px 10px; }
+
+.tc-toast { position: fixed; right: 14px; bottom: 14px; z-index: 50; max-width: 460px; padding: 9px 12px; border-radius: 8px; font-size: 12px; color: #edeef0;
+  background: rgba(12, 12, 14, .92); border: 1px solid #2a2a2a; box-shadow: 0 12px 40px rgba(0, 0, 0, .55); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px); }
+.tc-toast.crit { border-color: #ec757566; }
+
+/* while the camera moves, animations hold still so each frame is only a re-composite */
+.tc-moving * { animation-play-state: paused !important; }
+
+/* Design: a rack tile's remove button shows on hover (and stays on a tile marked for removal) */
+.tc-tile .tc-x { opacity: 0; transition: opacity .12s; }
+.tc-tile:hover .tc-x, .tc-tile .tc-x:focus { opacity: 1; }
+
+/* the orbit centre (always the middle of the view): a ring drawn above the scene while the
+   camera moves */
+.tc-pivot { position: absolute; left: 50%; top: 50%; width: 0; height: 0; pointer-events: none; opacity: 0; transition: opacity .2s; z-index: 2; }
+.tc-moving .tc-pivot { opacity: 1; }
+.tc-pivot::before { content: ''; position: absolute; left: -14px; top: -14px; width: 28px; height: 28px; border: 1.5px solid #b48ae8; border-radius: 50%; box-shadow: 0 0 12px #965cde, inset 0 0 6px #965cde66; }
+.tc-pivot::after { content: ''; position: absolute; left: -2.5px; top: -2.5px; width: 5px; height: 5px; border-radius: 50%; background: #edeef0; box-shadow: 0 0 6px #b48ae8; }
+.tc-pivot span { position: absolute; left: 20px; top: -7px; font: 600 9.5px ui-monospace, Menlo, monospace; letter-spacing: .12em; text-transform: uppercase; color: #b48ae8; white-space: nowrap; text-shadow: 0 0 6px #000; }
+
+/* the designer's fields */
+.dz-in:focus { border-color: #965cde !important; box-shadow: 0 0 0 2px #965cde26; }
+.dz-in::placeholder { color: #4d4d4d; }
+select.dz-in option { background: #101010; color: #e4e4e4; }
+input.dz-in[type=number]::-webkit-inner-spin-button { opacity: .4; }
+
+/* the top bar on narrower screens: the subtitle, then the estate summary (also in the clock's
+   tooltip row), then the logo's wordmark give way */
+@media (max-width: 1500px) { .tc-tb-sub { display: none !important; } }
+@media (max-width: 1360px) { .tc-tb-estate { display: none !important; } }
+@media (max-width: 1180px) { .tc-logo-full { display: none !important; } .tc-logo-mark { display: block !important; } }

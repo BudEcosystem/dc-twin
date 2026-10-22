@@ -52,7 +52,7 @@ spec:
         params: { leafsPerRack: 2, spines: 2, underlay: bgp-unnumbered, overlay: evpn,
                   relay: { linkSelection: twin } } }                       # SONiC-VS has none (05)
     - { name: backend,  template: rail-optimised, technology: infiniband, manager: nvidia/ufm,
-        params: { rails: 4 }, select: "a0[1-4]" }
+        params: { rails: 4 }, select: "a0{1..4}" }
 
   facility:
     power:

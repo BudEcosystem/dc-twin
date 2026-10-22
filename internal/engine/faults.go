@@ -151,6 +151,10 @@ func (e *Engine) injectLocked(selStr, faultID string, params map[string]any, id 
 				if !hasSensorSource(d, "tray-leak-detector") {
 					continue
 				}
+			case "breaker":
+				if e.M.PowerBy[d.Path] == nil {
+					continue
+				}
 			}
 			targets = append(targets, target{d: d, path: d.Path})
 		}
@@ -209,6 +213,8 @@ func describeTarget(t schema.FaultTarget) string {
 		return "component of kind " + t.Component
 	case t.Device != "":
 		return "device of class " + t.Device
+	case t.DeviceWith == "breaker":
+		return "power-chain node (UPS, busway or panel)"
 	case t.DeviceWith != "":
 		return "device with a " + t.DeviceWith
 	}
@@ -537,7 +543,9 @@ func (e *Engine) clearLocked(f *ActiveFault, why string, src schema.EventSource,
 			e.clearLocked(x, "parent cleared", src, c)
 		}
 	}
-	if _, ok := f.Sets["output"]; ok {
+	_, out := f.Sets["output"]
+	_, brk := f.Sets["breaker"]
+	if out || brk {
 		e.recomputePower(c)
 	}
 	for k := range f.Sets {

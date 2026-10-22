@@ -38,6 +38,22 @@ spec:
         - power.loss: {}
       clears: { manual: true }
       isNot: []
+    - name: ups-failure
+      title: "UPS failed (inverter down, no bypass)"
+      target: { device: ups }
+      effects:
+        - set: { health: Critical, output: "off" }
+        - power.loss: {}
+      clears: { manual: true }
+      isNot: ["No static bypass: the load downstream is lost at once, not transferred to the input."]
+    - name: breaker-trip
+      title: "Breaker tripped (a panel's main, a busway's feeder or a UPS's output)"
+      target: { deviceWith: breaker }
+      effects:
+        - set: { health: Critical, breaker: "open" }
+        - power.loss: {}
+      clears: { manual: true }
+      isNot: ["No trip curve: the breaker opens when the fault is injected, never from overload."]
 ---
 apiVersion: dc-twin/v1alpha1
 kind: FaultCatalogue

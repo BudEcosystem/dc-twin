@@ -172,7 +172,8 @@ func up(args []string) error {
 	if *adapters != "" {
 		names = strings.Split(*adapters, ",")
 	}
-	t, err := twin.Up(file, twin.Options{StateDir: *state, Adapters: names, AllowTCG: *allowTCG, GatewayAddr: *gateway})
+	opts := twin.Options{StateDir: *state, Adapters: names, AllowTCG: *allowTCG, GatewayAddr: *gateway}
+	t, err := twin.Up(file, opts)
 	if err != nil {
 		return err
 	}
@@ -185,6 +186,7 @@ func up(args []string) error {
 		t.Down()
 		return err
 	}
+	srv.Restart = restarter(opts)
 	// an estate started with an explicit --state is addressed by it (or DCTWIN_STATE); only the
 	// default location becomes ~/.dc-twin/current, so a second estate does not take it over
 	if !explicitState {
@@ -211,8 +213,41 @@ func up(args []string) error {
 	}
 	fmt.Println("estate going down")
 	srv.Close()
-	t.Down()
+	srv.Twin().Down()
 	return nil
+}
+
+// restarter is how a running `up` applies a changed estate file (POST /v1/estate/apply): the
+// estate goes down and comes up again on the new file, on the same control address, token and
+// site gateway. If the new estate does not come up, the previous one is brought back. The event
+// log of the estate that went down is kept beside the new one.
+func restarter(opts twin.Options) control.Restarter {
+	return func(old *twin.Twin, est *schema.Estate, file string) (*twin.Twin, error) {
+		reg, err := compile.Registry()
+		if err != nil {
+			return old, err
+		}
+		fmt.Printf("applying %s: estate going down to restart\n", file)
+		gw := old.Net.Gateway
+		old.Down()
+		logPath := filepath.Join(old.Runtime.StateDir, "events.jsonl")
+		_ = os.Rename(logPath, filepath.Join(old.Runtime.StateDir, fmt.Sprintf("events.%s.jsonl", time.Now().UTC().Format("20060102T150405"))))
+		o := opts
+		o.GatewayAddr = gw
+		nt, err := twin.UpEstate(est, file, reg, o)
+		if err == nil {
+			st := nt.Engine.Status()
+			fmt.Printf("estate %s up again: %v devices, %v links (from %s)\n", est.Metadata.Name, st["devices"], st["links"], file)
+			return nt, nil
+		}
+		fmt.Println("  the changed estate did not come up:", err)
+		back, err2 := twin.UpEstate(old.Estate, old.File, reg, o)
+		if err2 != nil {
+			return nil, fmt.Errorf("%v; and the previous estate did not come back: %v", err, err2)
+		}
+		fmt.Println("  the previous estate is back up")
+		return back, err
+	}
 }
 
 // ---------------------------------------------------------------- client verbs

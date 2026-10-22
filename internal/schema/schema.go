@@ -230,6 +230,10 @@ type PowerNode struct {
 	From      string   `json:"from"`
 	CapacityW float64  `json:"capacityW"`
 	Serves    []string `json:"serves"`
+	// RuntimeS is a UPS's battery ride-through at its rated load, in seconds.
+	RuntimeS float64 `json:"runtimeS,omitempty"`
+	// Profile is the facility profile the node is made from (D generic/<kind>).
+	Profile string `json:"profile,omitempty"`
 }
 
 type FacilityCooling struct {
@@ -1119,6 +1123,17 @@ func Decode(data []byte, v any) error {
 	if err := dec.Decode(v); err != nil {
 		return fmt.Errorf("error unmarshaling JSON: %w", err)
 	}
+	return nil
+}
+
+// DecodeAny reads one YAML document into plain JSON-shaped values (string-keyed maps, slices
+// and scalars), with the same 1.2 semantics as Decode: the estate as a tree, for clients.
+func DecodeAny(data []byte, v *any) error {
+	var doc any
+	if err := yaml3.Unmarshal(data, &doc); err != nil {
+		return err
+	}
+	*v = normaliseYAML(doc)
 	return nil
 }
 

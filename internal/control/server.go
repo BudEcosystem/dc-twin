@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/BudEcosystem/dc-twin/internal/adapter"
@@ -45,6 +46,22 @@ type Server struct {
 	Static http.Handler // the console bundle, when served
 	// Down is closed when a client asks the estate to come down.
 	Down chan struct{}
+	// Restart, when set, lets POST /v1/estate/apply bring the estate down and up again on a
+	// changed file. T is swapped under mu; requests hold mu for reading.
+	Restart Restarter
+	mu      sync.RWMutex
+
+	genMu      sync.Mutex
+	gen        chan struct{} // closed when a restart begins: event streams end
+	restarting bool
+	lastApply  *ApplyResult
+}
+
+// Twin is the running twin (it changes when an apply restarts the estate).
+func (s *Server) Twin() *twin.Twin {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.T
 }
 
 // Serve starts the API on addr (loopback) and writes control.json to the state directory.
@@ -63,7 +80,7 @@ func Serve(t *twin.Twin, addr string, static http.Handler) (*Server, error) {
 	tok := make([]byte, 16)
 	_, _ = rand.Read(tok)
 	s := &Server{T: t, Static: static, Info: Info{Addr: l.Addr().String(), Token: hex.EncodeToString(tok), Estate: t.Estate.Metadata.Name,
-		StateDir: t.Runtime.StateDir, PID: os.Getpid(), Gateway: t.Net.Gateway}, Down: make(chan struct{})}
+		StateDir: t.Runtime.StateDir, PID: os.Getpid(), Gateway: t.Net.Gateway}, Down: make(chan struct{}), gen: make(chan struct{})}
 	b, _ := json.MarshalIndent(s.Info, "", "  ")
 	if err := os.WriteFile(filepath.Join(t.Runtime.StateDir, "control.json"), b, 0o600); err != nil {
 		return nil, err
@@ -82,6 +99,9 @@ func (s *Server) Close() {
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if !strings.HasPrefix(r.URL.Path, "/v1/") {
 		if s.Static != nil {
+			// revalidate on every load (a 304 when nothing changed), so an edited console is
+			// never served stale from the browser's cache
+			w.Header().Set("Cache-Control", "no-cache")
 			s.Static.ServeHTTP(w, r)
 			return
 		}
@@ -96,6 +116,23 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, http.StatusUnauthorized, "a valid estate token is required")
 		return
 	}
+	s.genMu.Lock()
+	restarting, gen, last := s.restarting, s.gen, s.lastApply
+	s.genMu.Unlock()
+	if restarting {
+		if r.URL.Path == "/v1/status" {
+			writeJSON(w, map[string]any{"restarting": true, "apply": last})
+			return
+		}
+		jsonErr(w, http.StatusServiceUnavailable, "the estate is restarting to apply a change")
+		return
+	}
+	if r.URL.Path == "/v1/events/stream" && r.Method == http.MethodGet {
+		s.stream(w, r, s.Twin(), gen, eventFilter(r.URL.Query()))
+		return
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	eng := s.T.Engine
 	user := schema.EventSource{Class: "user", Principal: "control-api"}
 	p := strings.TrimPrefix(r.URL.Path, "/v1")
@@ -130,6 +167,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			adapters = append(adapters, a.Name())
 		}
 		st["adapters"] = adapters
+		st["estateFile"] = s.T.File
+		st["etag"] = fileEtag(s.T)
+		st["canApply"] = s.Restart != nil && s.T.File != ""
+		if last != nil {
+			st["apply"] = last
+		}
 		writeJSON(w, st)
 	case p == "/devices" && r.Method == http.MethodGet:
 		views, err := eng.Select(q.Get("select"))
@@ -154,8 +197,49 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			evs = evs[len(evs)-n:]
 		}
 		writeJSON(w, evs)
-	case p == "/events/stream" && r.Method == http.MethodGet:
-		s.stream(w, r, eventFilter(q))
+	case p == "/estate" && r.Method == http.MethodGet:
+		// the file the running estate came from: as text, or with ?format=json as a tree
+		b, err := os.ReadFile(s.T.File)
+		if err != nil {
+			jsonErr(w, 404, "the running estate has no file: "+err.Error())
+			return
+		}
+		w.Header().Set("ETag", etagOf(b))
+		if q.Get("format") == "json" {
+			var tree any
+			if err := schema.DecodeAny(b, &tree); err != nil {
+				jsonErr(w, 500, err.Error())
+				return
+			}
+			writeJSON(w, map[string]any{"etag": etagOf(b), "file": s.T.File, "tree": tree})
+			return
+		}
+		w.Header().Set("Content-Type", "application/yaml")
+		w.Write(b)
+	case (p == "/estate/plan" || p == "/estate/apply") && r.Method == http.MethodPost:
+		// a draft: ops on the estate file (or, from the first API, racks to add and remove)
+		var req struct {
+			Etag   string    `json:"etag"`
+			Ops    []Op      `json:"ops"`
+			Racks  []RackAdd `json:"racks"`
+			Remove []string  `json:"remove"`
+			DryRun bool      `json:"dryRun"`
+		}
+		b, _ := json.Marshal(body)
+		if err := json.Unmarshal(b, &req); err != nil {
+			jsonErr(w, 400, err.Error())
+			return
+		}
+		ops := req.Ops
+		if len(ops) == 0 {
+			ops = legacyOps(req.Racks, req.Remove)
+		}
+		res, code := s.apply(ops, req.Etag, req.DryRun || p == "/estate/plan")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(code)
+		_ = json.NewEncoder(w).Encode(res)
+	case p == "/host" && r.Method == http.MethodGet:
+		writeJSON(w, hostInfo())
 	case p == "/power" && r.Method == http.MethodPost:
 		ds, err := eng.SelectDevices(str("select"))
 		if err != nil || len(ds) == 0 {
@@ -231,6 +315,25 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			_ = eng.Reseat(d.Path, user)
 		}
 		writeJSON(w, map[string]any{"devices": len(ds)})
+	case p == "/bmc/reset" && r.Method == http.MethodPost:
+		// a technician's BMC reset: the management controller reboots, the host keeps running
+		ds, err := eng.SelectDevices(str("select"))
+		if err != nil || len(ds) == 0 {
+			jsonErr(w, 400, "select matches no device")
+			return
+		}
+		var errs []string
+		n := 0
+		for _, d := range ds {
+			if !d.HasBMC() {
+				continue
+			}
+			n++
+			if err := eng.ResetBMC(engine.Request{Path: d.Path, Canonical: "bmc.reset", Source: user, Protocol: "control", Method: "POST", Target: "/v1/bmc/reset"}); err != nil {
+				errs = append(errs, d.Path+": "+err.Error())
+			}
+		}
+		writeJSON(w, map[string]any{"devices": n, "errors": errs})
 	case p == "/utilisation" && r.Method == http.MethodPost:
 		v, _ := body["value"].(float64)
 		ds, _ := eng.SelectDevices(str("select"))
@@ -240,6 +343,15 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{"devices": len(ds), "value": v})
 	case p == "/layout" && r.Method == http.MethodGet:
 		writeJSON(w, s.layout())
+	case p == "/links" && r.Method == http.MethodGet:
+		links, err := eng.Links(q.Get("select"))
+		if err != nil {
+			jsonErr(w, 400, err.Error())
+			return
+		}
+		writeJSON(w, links)
+	case p == "/facility" && r.Method == http.MethodGet:
+		writeJSON(w, eng.Facility())
 	case p == "/domains" && r.Method == http.MethodGet:
 		writeJSON(w, eng.Domains())
 	case p == "/endpoints" && r.Method == http.MethodGet:
@@ -262,6 +374,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		res := scenario.Run(r.Context(), s.T, &sc, scenario.Options{})
 		writeJSON(w, res)
 	case p == "/catalogue" && r.Method == http.MethodGet:
+		if q.Get("detail") == "full" {
+			writeJSON(w, s.catalogueFull())
+			return
+		}
 		writeJSON(w, s.catalogue())
 	case p == "/credentials" && r.Method == http.MethodGet:
 		// the BMC credentials of devices, for the operator's own tools (redacted from events)
@@ -334,7 +450,9 @@ func eventFilter(q map[string][]string) func(schema.Event) bool {
 	}
 }
 
-func (s *Server) stream(w http.ResponseWriter, r *http.Request, filter func(schema.Event) bool) {
+// stream sends the twin's events as server-sent events until the client goes, or until an apply
+// restarts the estate (the client reconnects to the new one).
+func (s *Server) stream(w http.ResponseWriter, r *http.Request, t *twin.Twin, gen chan struct{}, filter func(schema.Event) bool) {
 	fl, ok := w.(http.Flusher)
 	if !ok {
 		jsonErr(w, 500, "streaming unsupported")
@@ -342,12 +460,14 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request, filter func(sche
 	}
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
-	id, ch := s.T.Engine.Subscribe(4096)
-	defer s.T.Engine.Unsubscribe(id)
+	id, ch := t.Engine.Subscribe(4096)
+	defer t.Engine.Unsubscribe(id)
 	fl.Flush()
 	for {
 		select {
 		case <-r.Context().Done():
+			return
+		case <-gen:
 			return
 		case ev, ok := <-ch:
 			if !ok {
@@ -366,28 +486,9 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request, filter func(sche
 // layout is what the console draws from (12, D18): halls, rows with their positions, racks with
 // their format's height, and every device's slot, U and state.
 func (s *Server) layout() map[string]any {
-	eng := s.T.Engine
-	var halls []any
-	eng.Read(func(m *model.Model) {
-		for _, h := range m.Halls {
-			var rows []any
-			for _, row := range h.Rows {
-				var racks []any
-				for _, r := range row.Racks {
-					var devs []any
-					for _, d := range r.Devices {
-						devs = append(devs, map[string]any{"path": d.Path, "name": d.Name, "slot": d.Slot, "u": d.U, "units": d.Units,
-							"side": d.Side, "class": d.Class, "profile": d.ProfileName, "fidelity": d.Fidelity, "generated": d.Generated})
-					}
-					racks = append(racks, map[string]any{"name": r.Name, "path": r.Path, "position": r.Position, "format": r.FormatName,
-						"archetype": r.Format.Spec.Archetype, "height": r.Format.Spec.Layout.Height, "devices": devs})
-				}
-				rows = append(rows, map[string]any{"name": row.Name, "positions": row.Positions, "racks": racks})
-			}
-			halls = append(halls, map[string]any{"name": h.Name, "path": h.Path, "rows": rows})
-		}
-	})
-	return map[string]any{"estate": s.T.Estate.Metadata.Name, "site": eng.M.Site, "halls": halls}
+	var out map[string]any
+	s.T.Engine.Read(func(m *model.Model) { out = layoutOf(m, s.T.Estate.Metadata.Name) })
+	return out
 }
 
 func (s *Server) catalogue() map[string]any {

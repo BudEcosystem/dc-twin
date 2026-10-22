@@ -49,6 +49,8 @@ type Engine struct {
 	anchors  map[string]anchor // first-order lag anchors (derived, never logged)
 	domains  map[string]string
 	flowLost map[string]time.Time
+	// chainLoad is the load each UPS on battery was carrying when its drain was last set
+	chainLoad map[string]float64
 
 	rng        *rand.Rand
 	chaosRate  float64
@@ -427,6 +429,7 @@ func (e *Engine) tick() {
 	e.evalThresholds()
 	e.rollup(0)
 	e.evalDomains(0)
+	e.tickChain()
 	e.chaos()
 }
 

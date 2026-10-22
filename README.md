@@ -13,22 +13,11 @@ NVSentinel, Fleet Intelligence, DSX Exchange, AI Cluster Runtime and KAI Schedul
 vendor-neutral. AMD Instinct, Intel Gaudi, other OEMs and other rack formats are added as **packs**
 of device profiles and stack definitions, without changing the engine.
 
-> **Status: a first implementation runs, and real stacks run against it.** The engine, the
-> compiler, ten packs and twelve protocol adapters (Redfish, DHCP with the twin relay and boot
-> walker, DSX Exchange BMS, SNMP, IPMI, UFM, NVUE, NMX-C, RMS, a Kubernetes projection, accelerator
-> exporters, and `vm` hosts on QEMU), on a loopback or a Linux TAP network substrate with real NOS
-> containers, run, each checked against a real, unmodified client. Run against the twin, unmodified:
-> **NVIDIA Infra Controller (NICo)** itself (22 PASS, 0 FAIL: it leases, explores and ingests every
-> GB300 tray with its DPU, brings its NVLink switches and power shelves to `ready`, powers off a
-> leaking tray through the twin's RMS and has the twin's BMS isolate a rack), NICo's `libredfish`,
-> `libnmxc` and `librms`, **OpenStack Ironic** (125 PASS), **Tinkerbell** (144 of 144), **KAI
-> Scheduler**, **AICR** and **Prometheus**, sushy, gofish, bmclib, ISC Kea, FRR with ISC dhcrelay,
-> ipmitool, net-snmp and a kube-apiserver. Scenarios run end to end across power, cooling, leaks,
-> accelerator faults and BMC failures. What is not built (the in-host agent, a DPU OS, SONiC-VS on
-> ARM hosts) and every result with its limits are in the
-> **[implementation status](docs/implementation.md)**. The specification (draft 0.3) is in
-> [docs/spec](docs/spec/README.md); the [console](prototype/README.md) runs live against a running
-> twin (`dctwin up … --console prototype`, then `dctwin ui`) and as an in-memory demo without one.
+> **Status: early, and it runs.** The engine, the compiler, ten packs and twelve protocol adapters
+> work, and real stacks run against the twin unmodified, among them NVIDIA Infra Controller (NICo),
+> OpenStack Ironic, Tinkerbell, KAI Scheduler and Prometheus. The estate schema is `v1alpha1` and
+> may still change. What runs, what is not built yet, and every result with its limits are in the
+> **[implementation status](docs/implementation.md)**.
 
 ## Quick start
 
@@ -43,6 +32,36 @@ bin/dctwin down
 make test                                    # unit, adapter and end-to-end suites
 make compat-libredfish                       # NICo's libredfish integration suite against the twin
 ```
+
+## The console
+
+The console watches, breaks and designs a running twin from the browser. Start a twin with it and
+open the address `dctwin ui` prints (it carries the estate's token):
+
+```bash
+bin/dctwin up examples/estates/mixed-hall.yaml --adapters redfish,bms --console console
+bin/dctwin ui
+```
+
+![Operate: the hall in ISO with its power chain, networks and cooling on the floor; a GPU fallen off the bus (Xid 79) on a01's compute tray 7, and the event stream with the cause chain](docs/images/console-operate.png)
+
+**Operate** draws the hall from the twin's layout: racks with their health, and on the floor the
+power chain from switchgear and UPS through each row's panels, a lane per network fabric, and each
+cooling loop. Click a rack for its elevation, a device for its components, interfaces and fidelity,
+and **Break it** to inject a catalogue fault or a technician act; the event stream follows every
+consequence and every request the software under test makes. Above, Xid 79 on a GPU has taken
+its tray Critical and the NVL72 domain to degraded.
+
+<img src="docs/images/console-design.png" width="49%" alt="Design: a draft that adds rack c03 and puts b01 on the InfiniBand fabric, checked by the twin, with its impact on feeds, cooling and fabrics"> <img src="docs/images/console-facility.png" width="49%" alt="Facility: feed A lost and UPS-A carrying its side on battery, the power chain with each node's load, and the cooling loop">
+
+**Design** (left) edits the estate file as a draft: halls, rows and racks dragged from the packs'
+formats, parameters and slots, fabrics and networks, feeds, the UPS and panel chain, cooling
+loops, fidelity, cabling and stacks. The twin checks every change by compiling it, and shows the
+impact (power and cooling against capacity, switches and cables per fabric, VM cost on this host),
+the diff in the file's own layout, and suggested fixes; **Apply** restarts the estate on it and
+**Export** downloads it. **Facility** (right) shows feeds, the power chain and the cooling loops
+live: here feed A is lost and UPS-A carries its side on battery. More in the
+[console's README](console/README.md).
 
 ## What it is for
 
@@ -67,6 +86,50 @@ make compat-libredfish                       # NICo's libredfish integration sui
   twin says so wherever a result depends on them ([fidelity](docs/spec/07-fidelity.md)).
 - **Not a replacement for hardware.** Whatever the twin cannot model is listed, and its
   hardware-in-the-loop mode exists to keep the emulators honest.
+
+## Repository layout
+
+| Path | What is there |
+|---|---|
+| [`cmd/dctwin`](cmd/dctwin) | The CLI: `validate`, `up`, `fault`, `scenario run`, `ui` and the rest |
+| [`internal/compile`](internal/compile) | The compiler: an estate file and the packs become the model, with every validation rule |
+| [`internal/engine`](internal/engine) | The single-writer engine: power, sensors, faults, the event log, the clocks |
+| [`internal/adapter`](internal/adapter) | One package per protocol: Redfish, DHCP, BMS, SNMP, IPMI, UFM, NVUE, NMX-C, RMS, VMs, … |
+| [`internal/control`](internal/control) | The control API the CLI and the console use, and the estate drafts |
+| [`packs`](packs) | Device profiles, rack formats, fabric templates and fault catalogues, per vendor |
+| [`stacks`](stacks) | Stack definitions (NVIDIA DSX OS, a reference stack) |
+| [`console`](console) | The web console ([README](console/README.md)); no build step. [`prototype`](prototype/README.md) is the first one |
+| [`examples`](examples) | Estates and scenarios to start from |
+| [`compat`](compat) | Harnesses that drive the twin with real, unmodified clients ([README](compat/README.md)) |
+| [`test`](test) | End-to-end suites |
+| [`docs/spec`](docs/spec/README.md) | The specification, with its decisions in [11-decisions](docs/spec/11-decisions.md) |
+| [`docs/implementation.md`](docs/implementation.md) | What is built, what is not, and every result |
+
+## Contributing
+
+Contributions are welcome: new hardware, protocols, stacks, scenarios, console work and fixes.
+Open an [issue](https://github.com/BudEcosystem/dc-twin/issues) to discuss a larger change before
+you start, or send a [pull request](https://github.com/BudEcosystem/dc-twin/pulls).
+
+```bash
+make build        # bin/dctwin
+make test-short   # unit and adapter tests, quick
+make test         # everything, with the end-to-end suites (about four minutes)
+make help         # every target, the compat harnesses among them
+```
+
+Where to start:
+
+- **New hardware** is a pack, not engine code: device profiles, rack formats, fabric templates
+  and fault catalogues under [`packs/`](packs) ([packs and stacks](docs/spec/06-packs-and-stacks.md)).
+- **A new protocol** is an adapter under [`internal/adapter`](internal/adapter), checked against a
+  real client of that protocol ([testing](docs/spec/16-testing.md)).
+- **A new stack** is a definition under [`stacks/`](stacks) and a harness under [`compat/`](compat).
+- **The console** is plain JavaScript under [`console/`](console): edit and reload.
+
+The design lives in [docs/spec](docs/spec/README.md). A change that alters behaviour, a schema or
+an interface updates the spec with it, and a result goes into
+[docs/implementation.md](docs/implementation.md) with the client it was checked against.
 
 ## Prior art
 

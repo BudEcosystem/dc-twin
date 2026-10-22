@@ -136,3 +136,113 @@ func (e *Engine) Domains() []map[string]any {
 	sort.Slice(out, func(i, j int) bool { return out[i]["path"].(string) < out[j]["path"].(string) })
 	return out
 }
+
+// Links lists the cabling, each link with both ends and whether it is up (a pulled cable is
+// down), in id order. sel, when set, keeps the links with an end on a device it names.
+func (e *Engine) Links(sel string) ([]map[string]any, error) {
+	var s *selector.Selector
+	if sel != "" {
+		var err error
+		if s, err = selector.Parse(sel); err != nil {
+			return nil, err
+		}
+	}
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	end := func(p *model.Port) map[string]any {
+		if p == nil {
+			return nil
+		}
+		out := map[string]any{"ref": p.Ref, "port": p.Name, "kind": p.Kind, "role": p.Role, "speed": p.Speed, "network": p.Network}
+		if p.Device != nil {
+			out["device"] = p.Device.Path
+			if r := p.Device.RackOf(); r != nil {
+				out["rack"] = r.Name
+			}
+			out["class"] = p.Device.Class
+		}
+		return out
+	}
+	on := func(p *model.Port) bool { return p != nil && p.Device != nil && s.MatchPath(p.Device.Path) }
+	out := []map[string]any{}
+	for _, l := range e.M.Links {
+		if s != nil && !on(l.A) && !on(l.B) {
+			continue
+		}
+		out = append(out, map[string]any{"id": l.ID, "kind": l.Kind, "fabric": l.Fabric, "up": l.Up, "a": end(l.A), "b": end(l.B)})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i]["id"].(string) < out[j]["id"].(string) })
+	return out, nil
+}
+
+// Facility is the facility as the console draws it: feeds with the load each carries, cooling
+// loops with their CDU's readings, and every rack's inputs, feeds and loop.
+func (e *Engine) Facility() map[string]any {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	feedW := map[string]float64{}
+	racks := []any{}
+	for _, r := range e.M.Racks {
+		capW, byFeed := 0.0, map[string]float64{}
+		inputs := []any{}
+		for _, in := range r.Inputs {
+			capW += in.CapacityW
+			for _, s := range in.Sources {
+				if fn, ok := in.SourceFeed[s.Path]; ok {
+					w := e.sourceOutput(s)
+					feedW[fn] += w
+					byFeed[fn] += w
+				}
+			}
+			inputs = append(inputs, map[string]any{"name": in.Name, "kind": in.Kind, "capacityW": in.CapacityW, "redundancy": in.Redundancy,
+				"minSources": in.MinSources, "sources": len(in.Sources), "delivering": e.deliveringSources(in), "loadW": round(e.inputLoad(in))})
+		}
+		// a rack without feeds of its own draws from the estate's, as the compiler assigned them
+		feeds := append([]string{}, r.Feeds...)
+		for k, v := range byFeed {
+			byFeed[k] = round(v)
+			if len(r.Feeds) == 0 {
+				feeds = append(feeds, k)
+			}
+		}
+		sort.Strings(feeds)
+		loop, row := "", ""
+		if r.Loop != nil {
+			loop = r.Loop.Name
+		}
+		if r.Row != nil {
+			row = r.Row.Name
+		}
+		racks = append(racks, map[string]any{"name": r.Name, "path": r.Path, "row": row, "position": r.Position, "format": r.FormatName,
+			"powerW": round(e.rackPower(r)), "capacityW": capW, "feeds": feeds, "feedW": byFeed, "loop": loop, "inputs": inputs, "isolated": r.Isolated})
+	}
+	feeds := []any{}
+	for _, f := range e.M.Feeds {
+		feeds = append(feeds, map[string]any{"name": f.Name, "path": f.Path, "capacityW": f.CapacityW, "up": f.Up, "loadW": round(feedW[f.Name])})
+	}
+	sort.Slice(feeds, func(i, j int) bool {
+		return feeds[i].(map[string]any)["name"].(string) < feeds[j].(map[string]any)["name"].(string)
+	})
+	loops := []any{}
+	for _, lp := range e.M.Loops {
+		names, kw := []string{}, 0.0
+		for _, r := range lp.Racks {
+			names = append(names, r.Name)
+			kw += e.rackPower(r) / 1000
+		}
+		v := map[string]any{"name": lp.Name, "profile": lp.Profile, "racks": names, "capacityKW": lp.CapacityKW, "flow": lp.Flow,
+			"supplyC": round(lp.SupplyC), "loadKW": round(kw)}
+		if len(e.M.Halls) > 0 {
+			if cdu := e.M.DeviceBy[e.M.Halls[0].Path+"/facility/"+lp.Name]; cdu != nil {
+				v["device"] = cdu.Path
+				v["health"] = e.deviceHealth(cdu)
+				v["sensors"] = e.sensorsLocked(cdu)
+			}
+		}
+		loops = append(loops, v)
+	}
+	sort.Slice(loops, func(i, j int) bool {
+		return loops[i].(map[string]any)["name"].(string) < loops[j].(map[string]any)["name"].(string)
+	})
+	return map[string]any{"feeds": feeds, "power": e.powerChainView(), "loops": loops, "racks": racks}
+}

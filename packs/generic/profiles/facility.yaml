@@ -79,3 +79,67 @@ spec:
   provides: [{ capability: "facility/bms:nvidia/dsx-exchange", at: [model] }]
   isNot: ["A rope or drip-pan point: on or off, no position along the rope."]
   sources: [{ what: "point types the NICo consumer reads", url: "https://github.com/dsx-ai-factory/infra-controller/tree/main/crates/dsx-exchange-consumer", date: 2026-10-18 }]
+---
+apiVersion: dc-twin/v1alpha1
+kind: DeviceProfile
+metadata: { name: generic/ups, version: 0.1.0 }
+spec:
+  class: ups
+  form: { mounting: none }
+  identity: { serialFormat: "UPS{digits:8}", manufacturer: "dc-twin", model: "Double-conversion UPS" }
+  ports: []
+  power: { standbyW: 0, idleW: 0, maxW: 0 }
+  cooling: { kind: none }
+  sensors:
+    - { name: output-power, quantity: power, unit: W, source: node-load }
+    - { name: battery, quantity: charge, unit: "%", source: ups-charge }
+    - { name: runtime, quantity: duration, unit: s, source: ups-runtime }
+  faults: [generic/power]
+  fidelity: { model: {} }
+  provides: []
+  isNot:
+    - "The battery drains linearly with load (ride-through at rated load is runtimeS): no Peukert effect, no ageing, no temperature."
+    - "No static bypass and no generator: when the battery is empty the UPS's output is lost until its input returns."
+    - "It recharges linearly, to full in ten times its ride-through."
+    - "The DSX exchange AsyncAPI defines no electrical point types, so the UPS publishes no BMS points."
+  sources: []
+---
+apiVersion: dc-twin/v1alpha1
+kind: DeviceProfile
+metadata: { name: generic/busway, version: 0.1.0 }
+spec:
+  class: busway
+  form: { mounting: none }
+  identity: { serialFormat: "BW{digits:8}", manufacturer: "dc-twin", model: "Overhead busway with tap-off boxes" }
+  ports: []
+  power: { standbyW: 0, idleW: 0, maxW: 0 }
+  cooling: { kind: none }
+  sensors:
+    - { name: power, quantity: power, unit: W, source: node-load }
+  faults: [generic/power]
+  fidelity: { model: {} }
+  provides: []
+  isNot:
+    - "One feeder breaker for the whole run: tap-off boxes have no breakers of their own."
+    - "No metering error and no harmonics: the load is the sum of the modelled draws."
+  sources: []
+---
+apiVersion: dc-twin/v1alpha1
+kind: DeviceProfile
+metadata: { name: generic/pdu-panel, version: 0.1.0 }
+spec:
+  class: pdu-panel
+  form: { mounting: none }
+  identity: { serialFormat: "RPP{digits:8}", manufacturer: "dc-twin", model: "Remote power panel" }
+  ports: []
+  power: { standbyW: 0, idleW: 0, maxW: 0 }
+  cooling: { kind: none }
+  sensors:
+    - { name: power, quantity: power, unit: W, source: node-load }
+  faults: [generic/power]
+  fidelity: { model: {} }
+  provides: []
+  isNot:
+    - "One main breaker: a trip drops every rack the panel serves, and branch circuits are not modelled."
+    - "No metering error and no harmonics: the load is the sum of the modelled draws."
+  sources: []

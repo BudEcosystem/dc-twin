@@ -13,7 +13,10 @@ import (
 
 // rackOrdinal is a pure function of a rack's place in the hall (row and position), so adding
 // or removing a rack never moves another rack's links (03 — Changing a running estate).
-func rackOrdinal(r *model.Rack) int { return r.Row.Index*16 + r.Position - 1 }
+func rackOrdinal(r *model.Rack) int { return r.Row.Index*maxPositions + r.Position - 1 }
+
+// maxPositions is the widest a row may be: rackOrdinal gives each row this many positions.
+const maxPositions = 16
 
 func (c *compiler) fabrics() {
 	// fixed links of rack formats first: they are inside racks and need no switches
@@ -58,13 +61,8 @@ func (c *compiler) fabrics() {
 		if tech == "" {
 			tech = "ethernet"
 		}
-		f := &model.Fabric{Name: fs.Name, Template: tname, NOS: fs.NOS, Technology: tech, Manager: fs.Manager, Params: map[string]any{}}
-		for k, decl := range t.Spec.Params {
-			f.Params[k] = decl.Default
-		}
-		for k, v := range fs.Params {
-			f.Params[k] = v
-		}
+		f := &model.Fabric{Name: fs.Name, Template: tname, NOS: fs.NOS, Technology: tech, Manager: fs.Manager,
+			Params: c.checkParams("fabric "+fs.Name, tname, t.Spec.Params, fs.Params, false, false)}
 		level := "none"
 		if fs.NOS != "none" {
 			level = "vm"

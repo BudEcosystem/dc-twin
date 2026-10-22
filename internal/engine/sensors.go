@@ -135,6 +135,21 @@ func (e *Engine) target(d *model.Device, s schema.SensorSpec) float64 {
 		return 0
 	case "tray-leak-detector", "leak-point", "sensor-fault":
 		return 0
+	case "node-load":
+		if n := e.M.PowerBy[d.Path]; n != nil {
+			return e.nodeLoad(n)
+		}
+		return 0
+	case "ups-charge":
+		if n := e.M.PowerBy[d.Path]; n != nil {
+			return 100 * e.chargeNow(n)
+		}
+		return 0
+	case "ups-runtime":
+		if n := e.M.PowerBy[d.Path]; n != nil {
+			return e.upsRuntimeLeft(n)
+		}
+		return 0
 	}
 	return 0
 }
@@ -303,6 +318,9 @@ func (e *Engine) deviceHealthExcept(d *model.Device, kind string) string {
 		if st, ok := e.sensorSt[d.Path+"#"+s.Name]; ok {
 			h = model.WorstHealth(h, st)
 		}
+	}
+	if n := e.M.PowerBy[d.Path]; n != nil {
+		h = model.WorstHealth(h, chainHealth(n.Mode))
 	}
 	return h
 }
