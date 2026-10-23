@@ -255,14 +255,43 @@ TC.Live = (() => {
       for (const e of evs || []) this.add(e, false);
       this.changed();
     }
+    // The event stream (server-sent events) is read with fetch, so the token goes in a header and
+    // never in a URL a proxy in front would log. It reconnects when it drops, a second later and
+    // then twice as long each time it fails, up to 15 s, so a twin that is down is not hammered.
     openStream() {
-      if (this.es) this.es.close();
-      const q = new URLSearchParams({ token: this.token }); if (!this.reads) q.set('reads', 'false');
-      const es = new EventSource('/v1/events/stream?' + q); this.es = es; this.stream = 'connecting';
-      es.onopen = () => { this.stream = 'open'; this.backfill(this.lastSeq); };
-      es.onerror = () => { this.stream = es.readyState === 2 ? 'closed' : 'reconnecting'; this.changed(); };
-      es.onmessage = (m) => { let e; try { e = JSON.parse(m.data); } catch (x) { return; } if (this.add(e, true)) this.changed(); };
+      this.closeStream();
+      const ctl = new AbortController(); this.es = ctl; this.stream = 'connecting';
+      const q = new URLSearchParams(); if (!this.reads) q.set('reads', 'false');
+      let wait = 1000;
+      const run = async () => {
+        try {
+          const r = await fetch('/v1/events/stream?' + q, { headers: { Authorization: 'Bearer ' + this.token }, cache: 'no-store', signal: ctl.signal });
+          if (!r.ok || !r.body) throw new Error(`${r.status}`);
+          this.stream = 'open'; wait = 1000; this.backfill(this.lastSeq);
+          const rd = r.body.pipeThrough(new TextDecoderStream()).getReader();
+          let buf = '';
+          for (;;) {
+            const { value, done } = await rd.read();
+            if (done) break;
+            buf += value;
+            let i;
+            while ((i = buf.indexOf('\n\n')) >= 0) {
+              const data = buf.slice(0, i).split('\n').filter((l) => l.startsWith('data:')).map((l) => l.slice(5).trimStart()).join('\n');
+              buf = buf.slice(i + 2);
+              if (!data) continue; // a keep-alive
+              let e; try { e = JSON.parse(data); } catch (x) { continue; }
+              if (this.add(e, true)) this.changed();
+            }
+          }
+        } catch (x) { /* dropped or refused: reconnect below */ }
+        if (ctl.signal.aborted) return;
+        this.stream = 'reconnecting'; this.changed();
+        setTimeout(() => { if (!ctl.signal.aborted) run(); }, wait);
+        wait = Math.min(wait * 2, 15000);
+      };
+      run();
     }
+    closeStream() { if (this.es) this.es.abort(); this.es = null; }
     onKinds(k) { const want = !!k.read; if (want !== this.reads) { this.reads = want; this.openStream(); if (want) this.backfill(0); } }
 
     // ---------------------------------------------------------------- what the views read
@@ -583,7 +612,7 @@ TC.Live = (() => {
       for (const n of r.notes || []) log(n);
       log(`estate file written · ${r.file} (etag ${r.etag})`);
       log('… estate going down to restart');
-      if (this.es) this.es.close();
+      this.closeStream();
       this.stream = 'restarting'; this.changed();
       const t0 = Date.now();
       let st = null;

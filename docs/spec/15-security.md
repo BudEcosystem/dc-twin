@@ -24,7 +24,7 @@ adversary with root on the twin's host.
 
 | Rule | Mechanism |
 |---|---|
-| The control zone is on no twin network | The engine, control API, console, scenario runner and secret store listen only on a unix socket and a loopback address inside the **control network namespace**. Twin bridges are created with no host IP address and `forwarding` off |
+| The control zone is on no twin network | The engine, control API, console, scenario runner and secret store listen only on a unix socket and a loopback address inside the **control network namespace**. Twin bridges are created with no host IP address and `forwarding` off. In a Kubernetes cluster the operator may serve the API on the pod's address for an Ingress (`--allow-remote-control`, [D54](11-decisions.md)); the chart's NetworkPolicy then admits only the Ingress controller to it |
 | Adapters are dual-homed but cannot forward | Each adapter runs in its own namespace with one interface per twin network it serves and one unix socket (or vsock) to the engine; it has no route between them, and nftables in the host namespace drops any packet from a twin bridge to the host's addresses or to the control namespace |
 | Observers originate traffic; the stack cannot answer back | Observers ([02](02-architecture.md#observers)), accessor reads and the console's inspector reach the service zone and NOS through a **stateful one-way filter**: connections may be initiated from the control side only, and return traffic is allowed only for those connections |
 | The install path blackholes the control address | The service zone pulls images and charts from the twin's **artifact mirror**, a registry and HTTP cache on the `service` network whose only upstream is the operator's configured mirror; it never forwards to the control namespace ([The install path](#the-install-path)) |
@@ -47,6 +47,7 @@ A stack's `install` steps run in the service zone against the **artifact mirror*
 | Mode | Authentication | Who |
 |---|---|---|
 | Local (default) | The unix socket's file mode, plus a per-estate bearer token in `~/.dctwin/<estate>/token` for the loopback listener | The one user who started the engine |
+| Remote ([D54](11-decisions.md)) | The estate token, which the operator keeps (`--token-file`), on an API served beyond loopback; the console sends it only in a header | A team on one twin in a cluster, until OIDC |
 | Shared | OIDC; the console and CLI obtain tokens from the configured issuer | A team on one twin |
 
 Roles and the operations each allows:

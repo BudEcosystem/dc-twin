@@ -30,6 +30,7 @@ const usage = `dctwin — a datacenter twin
   dctwin validate <estate.yaml>                 compile and validate; print the model's shape
   dctwin check --stack <name> <estate.yaml>     capability verdicts for a stack (06)
   dctwin up <estate.yaml> [--state DIR] [--listen ADDR] [--adapters a,b] [--console DIR]
+            [--token-file FILE] [--allow-remote-control]
   dctwin status | down | report [--json] | endpoints | domains | ui
   dctwin get <selector> [--json]
   dctwin events [--since N] [--select S] [--kind K] [--follow] [--no-reads]
@@ -146,6 +147,8 @@ func up(args []string) error {
 	consoleDir := fs.String("console", "", "serve a console bundle from this directory")
 	allowTCG := fs.Bool("allow-tcg", false, "accept vm guests of another architecture under TCG")
 	gateway := fs.String("gateway", "", "site gateway address (default: an ephemeral loopback port)")
+	tokenFile := fs.String("token-file", "", "read the estate token from this file (default: a new one each start)")
+	remote := fs.Bool("allow-remote-control", false, "let --listen be an address beyond loopback, the token its only authentication (D54)")
 	var file string
 	var rest []string
 	for i := 0; i < len(args); i++ {
@@ -158,6 +161,14 @@ func up(args []string) error {
 	fs.Parse(rest)
 	if file == "" {
 		return fmt.Errorf("up <estate.yaml>")
+	}
+	var token string
+	if *tokenFile != "" {
+		b, err := os.ReadFile(*tokenFile)
+		if err != nil {
+			return err
+		}
+		token = strings.TrimSpace(string(b))
 	}
 	est, _, err := compile.LoadEstate(file)
 	if err != nil {
@@ -181,7 +192,7 @@ func up(args []string) error {
 	if *consoleDir != "" {
 		static = http.FileServer(http.Dir(*consoleDir))
 	}
-	srv, err := control.Serve(t, *listen, static)
+	srv, err := control.ServeWith(t, *listen, static, control.ServeOptions{Token: token, Remote: *remote})
 	if err != nil {
 		t.Down()
 		return err

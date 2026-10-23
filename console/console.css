@@ -52,6 +52,16 @@ textarea.tc-input { width: 100%; resize: vertical; line-height: 1.5; padding: 8p
   background: rgba(12, 12, 14, .92); border: 1px solid #2a2a2a; box-shadow: 0 12px 40px rgba(0, 0, 0, .55); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px); }
 .tc-toast.crit { border-color: #ec757566; }
 
+/* the sign-in a twin's page shows without a valid token */
+.tc-signin { width: 340px; max-width: calc(100vw - 32px); margin: 18vh auto 0; display: flex; flex-direction: column; gap: 12px; padding: 24px;
+  background: var(--bg1); border: 1px solid var(--line2); border-radius: 10px; }
+.tc-signin p { margin: 0; color: var(--muted); }
+.tc-signin-logo { height: 18px; width: auto; align-self: flex-start; }
+.tc-signin-title { font-size: 16px; font-weight: 600; color: var(--text-hi); }
+.tc-signin-in { height: 32px; padding: 0 10px; border-radius: 6px; border: 1px solid var(--line2); background: var(--bg); color: var(--text); font: 13px var(--mono); outline: none; }
+.tc-signin .ds-btn { height: 32px; }
+.tc-signin-hint { font-size: 11px; color: var(--dim) !important; }
+
 /* while the camera moves, animations hold still so each frame is only a re-composite */
 .tc-moving * { animation-play-state: paused !important; }
 

@@ -1,6 +1,6 @@
-// app.js — the console's state, its source (the live twin when the page carries ?token= and the
-// control API answers on this origin, the in-memory demo otherwise) and the render loop.
-// Query parameters: ?token= (live), ?view=2d|iso, ?speed=1|2|4 and ?stack=off (demo only).
+// app.js — the console's state, its source (the live twin when the page has the estate token and
+// the control API answers on this origin, the in-memory demo otherwise) and the render loop.
+// Parameters: #token= or ?token= (live), ?view=2d|iso, ?speed=1|2|4 and ?stack=off (demo only).
 window.TC = window.TC || {};
 (async () => {
   const { patch } = TC.h;
@@ -8,11 +8,30 @@ window.TC = window.TC || {};
   const q = new URLSearchParams(location.search);
   const root = document.getElementById('app');
 
+  // The estate token: from the address (#token= never reaches the server, so no proxy logs it),
+  // else this tab's session. Once read it is taken out of the address bar and kept for the tab.
+  const session = (k, v) => { try { if (v === undefined) return sessionStorage.getItem(k); sessionStorage.setItem(k, v); } catch (e) { return null; } };
+  const hash = new URLSearchParams(location.hash.slice(1));
+  const given = hash.get('token') || q.get('token');
+  const token = given || session('dctwin-token');
+  if (given) {
+    session('dctwin-token', given); hash.delete('token'); q.delete('token');
+    const qs = String(q), hs = String(hash);
+    history.replaceState(null, '', location.pathname + (qs ? '?' + qs : '') + (hs ? '#' + hs : ''));
+  }
+  // a #token= link opened in a tab already on this page changes only the fragment: start again on it
+  window.addEventListener('hashchange', () => { if (new URLSearchParams(location.hash.slice(1)).get('token')) location.reload(); });
+
   let src = null;
-  if (q.get('token')) {
-    const live = new TC.Live(q.get('token'));
+  if (token) {
+    const live = new TC.Live(token);
     if (await live.connect()) src = live;
-    else console.warn('live mode: the control API did not answer; running the in-memory demo');
+    else console.warn('live mode: the control API did not answer with this token');
+  }
+  // a twin serves this page (its API answers, and wants a token): ask for the token, not the demo
+  if (!src && await fetch('/v1/status', { cache: 'no-store' }).then((r) => r.status === 401, () => false)) {
+    askToken(root, !!token, (t) => { session('dctwin-token', t); location.reload(); });
+    return;
   }
   if (!src) src = new TC.Demo({ speed: Number(q.get('speed') || 1), stackResponds: q.get('stack') !== 'off' });
 
@@ -230,4 +249,19 @@ window.TC = window.TC || {};
   src.start();
   A.render();
   window.TC.app = A; // for debugging from the console
+
+  // The sign-in form a twin's page shows without a valid token.
+  function askToken(root, refused, done) {
+    const el = (tag, props, ...kids) => { const n = Object.assign(document.createElement(tag), props); n.append(...kids); return n; };
+    const input = el('input', { type: 'password', className: 'dz-in tc-signin-in', placeholder: 'estate token', autocomplete: 'off', required: true, autofocus: true });
+    const form = el('form', { className: 'tc-signin' },
+      el('img', { src: 'img/bud-gpu-foundry-white.png', alt: 'Bud GPU Foundry', className: 'tc-signin-logo' }),
+      el('div', { className: 'tc-signin-title' }, 'dc-twin'),
+      el('p', {}, refused ? 'That token was refused. Enter the estate token.' : 'This twin needs its estate token.'),
+      input, el('button', { type: 'submit', className: 'ds-btn ds-primary' }, 'Connect'),
+      el('p', { className: 'tc-signin-hint' }, 'dctwin ui, where the twin runs, prints the console address with it. In Kubernetes, the chart keeps it in a Secret.'));
+    form.onsubmit = (e) => { e.preventDefault(); if (input.value.trim()) done(input.value.trim()); };
+    root.replaceChildren(form);
+    input.focus();
+  }
 })();
