@@ -1,0 +1,30 @@
+{{- if .Values.networkPolicy.enabled }}
+{{- $exposed := include "dc-twin.controlExposed" . }}
+{{- if and $exposed (not .Values.networkPolicy.controlFrom) }}
+{{- fail "networkPolicy.controlFrom: name the peers that may reach the control port (the Ingress controller's pods); with none, the policy would close it to the Ingress too" }}
+{{- end }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "dc-twin.fullname" . }}
+  labels:
+    {{- include "dc-twin.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "dc-twin.selectorLabels" . | nindent 6 }}
+  policyTypes: [Ingress]
+  ingress:
+    # the site gateway, for the software under test
+    - ports:
+        - port: gateway
+          protocol: TCP
+    {{- if $exposed }}
+    # the control API and the console, only from these
+    - from:
+        {{- toYaml .Values.networkPolicy.controlFrom | nindent 8 }}
+      ports:
+        - port: control
+          protocol: TCP
+    {{- end }}
+{{- end }}

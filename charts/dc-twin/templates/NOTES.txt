@@ -1,0 +1,48 @@
+{{- $ns := .Release.Namespace }}
+{{- $deploy := printf "deploy/%s" (include "dc-twin.fullname" .) }}
+{{- $token := printf "kubectl -n %s get secret %s -o jsonpath='{.data.%s}' | base64 -d" $ns (include "dc-twin.tokenSecret" .) (include "dc-twin.tokenKey" .) }}
+dc-twin is starting the estate in {{ include "dc-twin.estatePath" . }}.
+{{- if .Values.assets.fetch }}
+The first start fetches the packs' assets (about 360 MB) before the twin comes up.
+{{- end }}
+
+Wait for it:
+
+  kubectl -n {{ $ns }} rollout status {{ $deploy }}
+
+The estate token (it stays the same across restarts and upgrades):
+
+  export DCTWIN_TOKEN=$({{ $token }})
+{{- if .Values.ingress.enabled }}
+{{- $h := first .Values.ingress.hosts }}
+
+Open the console at its URL, with the token after the # (a fragment never reaches the server, so
+no proxy logs it), or open the URL and paste the token:
+
+  {{ if .Values.ingress.tls }}https{{ else }}http{{ end }}://{{ $h.host }}/#token=$DCTWIN_TOKEN
+
+The token is the only authentication: whoever has it can inject faults, power devices off and
+apply a changed estate.
+{{- if not .Values.ingress.tls }} This Ingress has no TLS, so the token crosses the network in the clear.{{ end }}
+{{- if not .Values.networkPolicy.enabled }} Any pod in the cluster can reach the control port; networkPolicy.enabled keeps it to the Ingress controller.{{ end }}
+{{- else }}
+
+The control API{{ if .Values.console }} and the console{{ end }} listen on the pod's loopback{{ if .Values.control.service.enabled }} and on the Service
+{{ include "dc-twin.fullname" . }}.{{ $ns }}.svc:{{ .Values.control.service.port }}{{ else }} only{{ end }}. From your machine, port-forward and open:
+
+  kubectl -n {{ $ns }} port-forward {{ $deploy }} {{ .Values.control.port }}
+  http://127.0.0.1:{{ .Values.control.port }}/#token=$DCTWIN_TOKEN
+{{- end }}
+
+Every dctwin verb runs in the pod (status, fault inject, events, report, ...):
+
+  kubectl -n {{ $ns }} exec {{ $deploy }} -- dctwin status
+
+Software under test in the cluster reaches the estate's devices through the site gateway, an HTTP
+CONNECT proxy, at their site addresses or host names:
+
+  proxy:   http://{{ include "dc-twin.fullname" . }}-gateway.{{ $ns }}.svc:{{ .Values.gateway.service.port }}
+  devices: kubectl -n {{ $ns }} exec {{ $deploy }} -- dctwin credentials
+
+A new pod is a new twin, started from the chart's estate: an Apply from the console lasts until the
+pod restarts, so export a design you want to keep and install it with --set-file estate.file=<file>.

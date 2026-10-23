@@ -1,0 +1,15 @@
+apiVersion: v2
+name: dc-twin
+description: A standalone emulated datacenter (one estate per release) with its console and site gateway
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+home: https://github.com/BudEcosystem/dc-twin
+sources:
+  - https://github.com/BudEcosystem/dc-twin
+keywords:
+  - datacenter
+  - digital-twin
+  - redfish
+  - bmc
+  - emulator

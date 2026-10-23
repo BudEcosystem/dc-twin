@@ -1,0 +1,170 @@
+{{- $cm := include "dc-twin.estateConfigMap" . }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "dc-twin.fullname" . }}
+  labels:
+    {{- include "dc-twin.labels" . | nindent 4 }}
+spec:
+  # one engine per estate (09): never two pods of one twin, not even during an upgrade
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "dc-twin.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "dc-twin.labels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        # kubectl exec deploy/<name> -- dctwin <verb> runs in the twin's container
+        kubectl.kubernetes.io/default-container: dctwin
+        # a changed estate starts a new twin on it
+        checksum/estate: {{ printf "%s|%s|%s" .Values.estate.file .Values.estate.existingConfigMap .Values.estate.example | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "dc-twin.serviceAccountName" . }}
+      automountServiceAccountToken: false
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      {{- if .Values.assets.fetch }}
+      initContainers:
+        - name: assets
+          image: {{ include "dc-twin.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: ["assets", "fetch"]
+          env:
+            - name: DCTWIN_ASSETS
+              value: /var/lib/dctwin/assets
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          volumeMounts:
+            - name: assets
+              mountPath: /var/lib/dctwin/assets
+            - name: tmp
+              mountPath: /tmp
+      {{- end }}
+      containers:
+        - name: dctwin
+          image: {{ include "dc-twin.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - up
+            - {{ include "dc-twin.estatePath" . }}
+            - --state=/var/lib/dctwin/state
+            - --token-file=/etc/dctwin/token/token
+            {{- if include "dc-twin.controlExposed" . }}
+            - --listen=:{{ .Values.control.port }}
+            - --allow-remote-control
+            {{- else }}
+            - --listen=127.0.0.1:{{ .Values.control.port }}
+            {{- end }}
+            - --gateway=:{{ .Values.gateway.port }}
+            {{- if .Values.console }}
+            - --console=/opt/dctwin/console
+            {{- end }}
+            {{- with .Values.adapters }}
+            - --adapters={{ join "," . }}
+            {{- end }}
+            {{- if .Values.allowTCG }}
+            - --allow-tcg
+            {{- end }}
+            {{- range .Values.extraArgs }}
+            - {{ . | quote }}
+            {{- end }}
+          env:
+            # `kubectl exec ... -- dctwin <verb>` finds the running estate here
+            - name: DCTWIN_STATE
+              value: /var/lib/dctwin/state
+            - name: DCTWIN_ASSETS
+              value: /var/lib/dctwin/assets
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          ports:
+            - name: gateway
+              containerPort: {{ .Values.gateway.port }}
+              protocol: TCP
+            {{- if include "dc-twin.controlExposed" . }}
+            - name: control
+              containerPort: {{ .Values.control.port }}
+              protocol: TCP
+            {{- end }}
+          startupProbe:
+            exec:
+              command: ["/usr/local/bin/dctwin", "status"]
+            {{- toYaml .Values.startupProbe | nindent 12 }}
+          readinessProbe:
+            exec:
+              command: ["/usr/local/bin/dctwin", "status"]
+            {{- toYaml .Values.readinessProbe | nindent 12 }}
+          livenessProbe:
+            exec:
+              command: ["/usr/local/bin/dctwin", "status"]
+            {{- toYaml .Values.livenessProbe | nindent 12 }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          volumeMounts:
+            - name: state
+              mountPath: /var/lib/dctwin/state
+            - name: assets
+              mountPath: /var/lib/dctwin/assets
+            - name: tmp
+              mountPath: /tmp
+            - name: token
+              mountPath: /etc/dctwin/token
+              readOnly: true
+            {{- if $cm }}
+            - name: estate
+              mountPath: /etc/dctwin/estate
+              readOnly: true
+            {{- end }}
+      volumes:
+        - name: state
+          emptyDir:
+            sizeLimit: {{ .Values.state.sizeLimit }}
+        - name: assets
+          {{- if .Values.assets.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ default (printf "%s-assets" (include "dc-twin.fullname" .)) .Values.assets.persistence.existingClaim }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+        - name: tmp
+          emptyDir: {}
+        - name: token
+          secret:
+            secretName: {{ include "dc-twin.tokenSecret" . }}
+            defaultMode: 0440
+            items:
+              - key: {{ include "dc-twin.tokenKey" . }}
+                path: token
+        {{- if $cm }}
+        - name: estate
+          configMap:
+            name: {{ $cm }}
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
