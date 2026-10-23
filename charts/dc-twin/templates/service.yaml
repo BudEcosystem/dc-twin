@@ -1,0 +1,22 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "dc-twin.fullname" . }}-gateway
+  labels:
+    {{- include "dc-twin.labels" . | nindent 4 }}
+  {{- with .Values.gateway.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.gateway.service.type }}
+  selector:
+    {{- include "dc-twin.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: gateway
+      port: {{ .Values.gateway.service.port }}
+      targetPort: gateway
+      protocol: TCP
+      {{- if and (eq .Values.gateway.service.type "NodePort") .Values.gateway.service.nodePort }}
+      nodePort: {{ .Values.gateway.service.nodePort }}
+      {{- end }}

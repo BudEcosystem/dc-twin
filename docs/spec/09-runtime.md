@@ -15,6 +15,16 @@ report prints any TCG guest.
 
 Spreading one estate across several hosts is later work ([Q6](11-decisions.md)).
 
+**In a Kubernetes cluster** ([`charts/dc-twin`](../../charts/dc-twin/README.md)), one release is
+one estate in one unprivileged pod, on the loopback substrate ([D34](11-decisions.md)). It runs
+`model` fidelity only, because `vm` devices, the TAP substrate and real NOSes need `/dev/kvm`,
+root and a container engine. The pod's loopback is the control namespace: the control API and
+the console stay on it ([15](15-security.md)) and are reached with `kubectl port-forward`, unless
+the operator serves them at a URL through an Ingress ([D54](11-decisions.md)), with the estate token
+from a Secret and a NetworkPolicy that admits only the Ingress controller. The site gateway is a
+Service that software under test in the cluster uses as its proxy. The packs' assets are obtained where the pod runs, not carried in
+the image ([D13](11-decisions.md)). A new pod is a new twin.
+
 ## Processes
 
 | Process | Runs as | Notes |
@@ -119,7 +129,8 @@ dctwin down                                          # M0
 - gRPC, with a REST mapping and an OpenAPI description, plus a server-sent event stream of the
   committed log. Versioned independently of the file formats ([13 — Compatibility](13-schemas.md#compatibility)).
 - Bound to the control namespace: a unix socket and a loopback listener with a per-estate token;
-  OIDC for shared twins; three roles ([15](15-security.md#users-and-the-control-api)).
+  beyond loopback only when the operator says so, for a twin behind a Kubernetes Ingress
+  ([D54](11-decisions.md)); OIDC for shared twins; three roles ([15](15-security.md#users-and-the-control-api)).
 - The same operations as the CLI, plus model queries by selector and snapshot export.
 - **The web console** ([12](12-ui.md)) is served by the engine on the same address and is a client
   of this API and nothing else. What it needs, the API publishes first ([D16](11-decisions.md)):

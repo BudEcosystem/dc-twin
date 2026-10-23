@@ -25,8 +25,11 @@ bin/dctwin up examples/estates/mixed-hall.yaml --adapters redfish,bms --console 
 bin/dctwin ui            # prints http://127.0.0.1:<port>/?token=<token>
 ```
 
-Live mode is chosen when the page carries `?token=` and `GET /v1/status` answers on the same
-origin. Everything comes from the control API: `/v1/layout`, `/devices`, `/facility`, `/links`,
+Live mode is chosen when the page has the estate token and `GET /v1/status` answers on the same
+origin. The token comes from `#token=` (a fragment, which never reaches the server or a proxy in
+front of it) or `?token=`; the console takes it out of the address bar, keeps it for the tab, and
+sends it only in the `Authorization` header, the event stream's too (read with `fetch`). A twin's
+page without a valid token asks for one; any other server runs the demo. Everything comes from the control API: `/v1/layout`, `/devices`, `/facility`, `/links`,
 `/domains`, `/faults`, `/catalogue`, `/report` and `/events/stream`, and every act is a call
 (`/faults`, `/faults/clear`, `/power`, `/reseat`, `/bmc/reset`, `/feeds`, `/cable`, `/chaos`,
 `/clock/advance`, `/scenarios/run`, `/estate/plan`, `/estate/apply`). On a virtual clock the top bar offers **+10s / +1m**.
@@ -86,7 +89,7 @@ file, the compiled layout and the impact. There is no compiler in the browser.
   kept in this browser per estate and file version; if the file changes under it, the twin refuses
   the draft (`409`) and it is made again.
 
-**Demo.** Opened any other way (a plain file server, or without a token), the page runs an
+**Demo.** Opened any other way (a plain file server, or with no twin answering), the page runs an
 illustrative hall in memory, `hall-a-demo`: a fault engine, a simulated stack labelled `(sim)`,
 UPS and switchgear, scenarios and design apply. Durations are shortened and every number is
 illustrative. `?speed=2|4` speeds it up and `?stack=off` turns the simulated stack's responses off;

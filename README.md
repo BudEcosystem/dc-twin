@@ -33,6 +33,18 @@ make test                                    # unit, adapter and end-to-end suit
 make compat-libredfish                       # NICo's libredfish integration suite against the twin
 ```
 
+**In Kubernetes**, the [chart](charts/dc-twin/README.md) runs one estate per release in an
+unprivileged pod. The console is reached by a port-forward, or at a URL through an Ingress
+(`ingress.enabled`), and software in the cluster reaches the devices through the site gateway
+Service:
+
+```bash
+make image                                   # the image the chart runs; push it where your cluster pulls from
+helm install dc-twin charts/dc-twin -n dc-twin --create-namespace
+kubectl -n dc-twin port-forward deploy/dc-twin 8765
+kubectl -n dc-twin exec deploy/dc-twin -- dctwin ui
+```
+
 ## The console
 
 The console watches, breaks and designs a running twin from the browser. Start a twin with it and
@@ -100,6 +112,7 @@ live: here feed A is lost and UPS-A carries its side on battery. More in the
 | [`stacks`](stacks) | Stack definitions (NVIDIA DSX OS, a reference stack) |
 | [`console`](console) | The web console ([README](console/README.md)); no build step. [`prototype`](prototype/README.md) is the first one |
 | [`examples`](examples) | Estates and scenarios to start from |
+| [`charts/dc-twin`](charts/dc-twin/README.md) | The Helm chart, over the image the [`Dockerfile`](Dockerfile) builds |
 | [`compat`](compat) | Harnesses that drive the twin with real, unmodified clients ([README](compat/README.md)) |
 | [`test`](test) | End-to-end suites |
 | [`docs/spec`](docs/spec/README.md) | The specification, with its decisions in [11-decisions](docs/spec/11-decisions.md) |

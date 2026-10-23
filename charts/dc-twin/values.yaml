@@ -1,0 +1,156 @@
+# dc-twin: one release runs one estate, in one pod, on the loopback substrate (D34): every device
+# endpoint is a port on the pod's loopback, and software under test reaches the devices through
+# the site gateway.
+
+image:
+  repository: ghcr.io/budecosystem/dc-twin
+  tag: ""  # defaults to the chart's appVersion
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+# The estate the twin runs: the first of these that is set.
+estate:
+  # a ConfigMap of yours that holds the estate file under `key`
+  existingConfigMap: ""
+  key: estate.yaml
+  # the estate file itself, e.g. --set-file estate.file=my-hall.yaml
+  file: ""
+  # an estate shipped in the image: examples/estates/<example>.yaml
+  example: mixed-hall
+
+# The adapters to run (dctwin up --adapters), e.g. [redfish, bms]. Empty runs every adapter.
+adapters: []
+# Serve the console beside the control API.
+console: true
+
+# The control API and the console.
+control:
+  port: 8765
+  # The estate token. The chart makes one at install and keeps it across upgrades, in the Secret
+  # <fullname>-token, unless you name a Secret of yours that holds it under `key` (do, with a tool
+  # that renders the chart offline, such as Argo CD: it cannot look up the one already made).
+  token:
+    existingSecret: ""
+    key: token
+  # With neither this Service nor the Ingress below, the control API and the console listen on the
+  # pod's loopback only (spec 15): reach them with kubectl port-forward. Either one makes the twin
+  # listen on the pod's address too (--allow-remote-control, D54), with the token as the only
+  # authentication: whoever has it can inject faults, power devices off and apply a changed estate.
+  service:
+    enabled: false
+    type: ClusterIP
+    port: 8765
+    annotations: {}
+
+# The console and the control API at a URL. The token is its only authentication, so serve it over
+# TLS, and put a login or an allow-list in front where more than a trusted team can reach it.
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+    # ingress-nginx, a login in front through oauth2-proxy:
+    # nginx.ingress.kubernetes.io/auth-url: https://oauth2.example.com/oauth2/auth
+    # nginx.ingress.kubernetes.io/auth-signin: https://oauth2.example.com/oauth2/start?rd=$escaped_request_uri
+    # or an allow-list:
+    # nginx.ingress.kubernetes.io/whitelist-source-range: 10.0.0.0/8
+    # Traefik, HTTPS only (plain HTTP unrouted):
+    # traefik.ingress.kubernetes.io/router.entrypoints: websecure
+  hosts:
+    - host: dc-twin.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+    # - secretName: dc-twin-tls
+    #   hosts: [dc-twin.example.com]
+
+# A NetworkPolicy for the pod: the site gateway open to the cluster, the control port (when the
+# Service or the Ingress serves it) only from the peers named here, such as the Ingress
+# controller's pods, so the software under test cannot reach it.
+networkPolicy:
+  enabled: false
+  controlFrom: []
+    # - namespaceSelector:
+    #     matchLabels: { kubernetes.io/metadata.name: ingress-nginx }
+
+# Accept vm guests of another architecture under TCG (dctwin up --allow-tcg).
+allowTCG: false
+# More arguments for dctwin up.
+extraArgs: []
+extraEnv: []
+
+# The site gateway: an HTTP CONNECT proxy through which software under test reaches each device at
+# its site address (https://10.30.0.11) or host name, and nothing else.
+gateway:
+  port: 3128
+  service:
+    type: ClusterIP
+    port: 3128
+    nodePort: null  # with type NodePort
+    annotations: {}
+
+# The captured device trees, NVIDIA's NMX-C interface definition and the os: twin guest image
+# (about 360 MB). They are not in the image (D13), so an init container runs `dctwin assets
+# fetch`, which needs egress to github.com, codeload.github.com, raw.githubusercontent.com and
+# dl-cdn.alpinelinux.org. It skips what is already present, so a persistent volume fetches once.
+assets:
+  fetch: true
+  persistence:
+    enabled: true
+    existingClaim: ""
+    storageClass: ""  # "" uses the cluster's default
+    accessModes: [ReadWriteOnce]
+    size: 1Gi
+    annotations: {}
+
+# The state directory (the event log, control.json, an apply's <estate>.applied.yaml) is an
+# emptyDir: a new pod is a new twin, started from the chart's estate. Export a design you want to
+# keep and put it in estate.file.
+state:
+  sizeLimit: 2Gi
+
+# About 140 MiB for the 354 devices of mixed-hall at idle; it grows with the estate.
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+
+# Each probe runs `dctwin status` in the container.
+startupProbe:
+  periodSeconds: 2
+  timeoutSeconds: 5
+  failureThreshold: 150
+readinessProbe:
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 3
+livenessProbe:
+  periodSeconds: 20
+  timeoutSeconds: 10
+  failureThreshold: 6
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: [ALL]
+
+podAnnotations: {}
+podLabels: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}

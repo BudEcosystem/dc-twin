@@ -1,0 +1,12 @@
+# the image needs the Go sources, the packs, the console and the examples; nothing else
+*
+!go.mod
+!go.sum
+!cmd
+!internal
+!packs
+!stacks
+!console
+!examples
+!LICENSE
+**/.DS_Store

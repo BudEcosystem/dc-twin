@@ -909,3 +909,27 @@ surface in `libredfish` (the generic AMI path, DGX H100 "Viking", or Dell's XE96
 queue), so that M0 and M1 implement one dialect completely rather than three partially? *Decides
 M0's scope and whether `oem-dell` ships at M1.* *Closed by D35: every capture libredfish ships is
 bound at once, and libredfish's own integration suite is the completeness test.*
+
+### D54 — A twin in a cluster may serve its control API beyond loopback, by the operator's choice
+`dctwin up --allow-remote-control` lets `--listen` be an address beyond loopback, so a twin in a
+Kubernetes cluster can be reached at a URL through an Ingress; without the flag the API still
+refuses any address but loopback. There the estate token is the only authentication: whoever
+holds it is a designer (15). So the operator keeps the token (`--token-file`, from a Secret the
+chart makes once and keeps across upgrades), the server compares it in constant time, and the
+console never puts it in a URL it requests: it reads `#token=` (a fragment, which no proxy sees)
+or `?token=` from the address, takes it out of the address bar, keeps it for the tab, sends it in
+the `Authorization` header (the event stream too, read with `fetch` instead of `EventSource`), and
+asks for it on a twin's page rather than falling back to the demo. The event stream sends a
+comment every 20 s and `X-Accel-Buffering: no`, so a proxy neither buffers it nor closes it when
+quiet, and the console reconnects it with a backoff (1 s, doubling to 15 s). Every other response
+is gzip-compressed for a client that accepts it: the device list the console polls every 5 s is
+1.2 MB for a 354-device hall and 46 KB compressed, which decides whether the console is usable
+over a wide-area link. The chart enables the flag only with its control Service or Ingress, and its NetworkPolicy
+lets only the named peers (the Ingress controller) reach the control port, so the software under
+test, on the same cluster network, cannot reach it; the site gateway still routes only to estate
+endpoints. **Why:** a team running the twin in a cluster wants it at a URL, and a port-forward per
+person is the only way otherwise; a shared token behind TLS, a NetworkPolicy and whatever login
+the Ingress puts in front is enough for a twin that drives no real hardware. **Amends:** 15 (the
+control zone on no twin network: in a cluster it is on the cluster network, closed by the
+NetworkPolicy). **Reversed if:** OIDC (15's shared mode) is built; then a remote API takes users
+and roles, not one token.

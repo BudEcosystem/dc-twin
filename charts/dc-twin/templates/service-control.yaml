@@ -1,0 +1,21 @@
+{{- if include "dc-twin.controlExposed" . }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "dc-twin.fullname" . }}
+  labels:
+    {{- include "dc-twin.labels" . | nindent 4 }}
+  {{- with .Values.control.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.control.service.type }}
+  selector:
+    {{- include "dc-twin.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: control
+      port: {{ .Values.control.service.port }}
+      targetPort: control
+      protocol: TCP
+{{- end }}

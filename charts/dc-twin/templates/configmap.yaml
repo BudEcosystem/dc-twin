@@ -1,0 +1,11 @@
+{{- if and .Values.estate.file (not .Values.estate.existingConfigMap) }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "dc-twin.fullname" . }}-estate
+  labels:
+    {{- include "dc-twin.labels" . | nindent 4 }}
+data:
+  estate.yaml: |
+    {{- .Values.estate.file | nindent 4 }}
+{{- end }}

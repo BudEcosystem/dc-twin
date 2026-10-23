@@ -1,11 +1,13 @@
 // Package control is the control API (docs/spec/09-runtime.md — Control API): the only way into
 // the engine for the CLI, the console and scripts. It binds to loopback, requires the estate's
-// token, and is on no network the software under test can reach (15).
+// token, and is on no network the software under test can reach (15); `up --allow-remote-control`
+// serves it beyond loopback, for a twin behind a Kubernetes Ingress (D54).
 package control
 
 import (
 	"context"
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -66,20 +68,47 @@ func (s *Server) Twin() *twin.Twin {
 
 // Serve starts the API on addr (loopback) and writes control.json to the state directory.
 func Serve(t *twin.Twin, addr string, static http.Handler) (*Server, error) {
+	return ServeWith(t, addr, static, ServeOptions{})
+}
+
+// ServeOptions change how the control API is served.
+type ServeOptions struct {
+	// Token is the estate token, for a token the operator keeps (a Kubernetes Secret); empty
+	// makes a new one.
+	Token string
+	// Remote lets the API listen on an address other than loopback (D54): a twin in a cluster,
+	// reached through an Ingress, where the token is the only authentication.
+	Remote bool
+}
+
+func ServeWith(t *twin.Twin, addr string, static http.Handler, o ServeOptions) (*Server, error) {
 	if addr == "" {
 		addr = "127.0.0.1:0"
 	}
 	host, _, _ := net.SplitHostPort(addr)
-	if ip := net.ParseIP(host); ip == nil || !ip.IsLoopback() {
-		return nil, fmt.Errorf("the control API binds to loopback only (15); %s is not", addr)
+	ip := net.ParseIP(host)
+	if !o.Remote && (ip == nil || !ip.IsLoopback()) {
+		return nil, fmt.Errorf("the control API binds to loopback only (15); %s is not (--allow-remote-control serves it there, D54)", addr)
+	}
+	token := o.Token
+	if token == "" {
+		tok := make([]byte, 16)
+		_, _ = rand.Read(tok)
+		token = hex.EncodeToString(tok)
+	} else if len(token) < 16 || strings.ContainsAny(token, " \t\r\n") {
+		return nil, fmt.Errorf("the estate token must be at least 16 characters, without spaces")
 	}
 	l, err := net.Listen("tcp", addr)
 	if err != nil {
 		return nil, err
 	}
-	tok := make([]byte, 16)
-	_, _ = rand.Read(tok)
-	s := &Server{T: t, Static: static, Info: Info{Addr: l.Addr().String(), Token: hex.EncodeToString(tok), Estate: t.Estate.Metadata.Name,
+	// clients on this host (the CLI, a probe) reach an API on every address at its loopback
+	at := l.Addr().String()
+	if host == "" || (ip != nil && ip.IsUnspecified()) {
+		_, port, _ := net.SplitHostPort(at)
+		at = net.JoinHostPort("127.0.0.1", port)
+	}
+	s := &Server{T: t, Static: static, Info: Info{Addr: at, Token: token, Estate: t.Estate.Metadata.Name,
 		StateDir: t.Runtime.StateDir, PID: os.Getpid(), Gateway: t.Net.Gateway}, Down: make(chan struct{}), gen: make(chan struct{})}
 	b, _ := json.MarshalIndent(s.Info, "", "  ")
 	if err := os.WriteFile(filepath.Join(t.Runtime.StateDir, "control.json"), b, 0o600); err != nil {
@@ -97,6 +126,12 @@ func (s *Server) Close() {
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// compressed for a client that accepts it, but the event stream, which flushes event by event
+	if r.URL.Path != "/v1/events/stream" && r.Header.Get("Range") == "" && acceptsGzip(r) {
+		gw := &gzipResponse{ResponseWriter: w}
+		defer gw.Close()
+		w = gw
+	}
 	if !strings.HasPrefix(r.URL.Path, "/v1/") {
 		if s.Static != nil {
 			// revalidate on every load (a 304 when nothing changed), so an edited console is
@@ -112,7 +147,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if tok == "" {
 		tok = r.URL.Query().Get("token")
 	}
-	if tok != s.Info.Token {
+	if subtle.ConstantTimeCompare([]byte(tok), []byte(s.Info.Token)) != 1 {
 		jsonErr(w, http.StatusUnauthorized, "a valid estate token is required")
 		return
 	}
@@ -450,6 +485,9 @@ func eventFilter(q map[string][]string) func(schema.Event) bool {
 	}
 }
 
+// streamKeepAlive is how often a quiet event stream sends a comment line.
+var streamKeepAlive = 20 * time.Second
+
 // stream sends the twin's events as server-sent events until the client goes, or until an apply
 // restarts the estate (the client reconnects to the new one).
 func (s *Server) stream(w http.ResponseWriter, r *http.Request, t *twin.Twin, gen chan struct{}, filter func(schema.Event) bool) {
@@ -460,15 +498,22 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request, t *twin.Twin, ge
 	}
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("X-Accel-Buffering", "no") // a proxy in front (an Ingress) passes each event on as it comes
 	id, ch := t.Engine.Subscribe(4096)
 	defer t.Engine.Unsubscribe(id)
 	fl.Flush()
+	// a comment line now and then keeps a quiet stream open through a proxy's idle timeout
+	keep := time.NewTicker(streamKeepAlive)
+	defer keep.Stop()
 	for {
 		select {
 		case <-r.Context().Done():
 			return
 		case <-gen:
 			return
+		case <-keep.C:
+			fmt.Fprint(w, ": keep-alive\n\n")
+			fl.Flush()
 		case ev, ok := <-ch:
 			if !ok {
 				return

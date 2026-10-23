@@ -1,7 +1,9 @@
 # dc-twin — build, test and the compatibility harnesses.
 BIN ?= bin
+# the image the chart runs, tagged with the chart's appVersion
+IMAGE ?= ghcr.io/budecosystem/dc-twin:$(shell sed -n 's/^appVersion: *"\(.*\)"/\1/p' charts/dc-twin/Chart.yaml)
 
-.PHONY: build test test-short e2e assets compat-libredfish compat-sushy compat-dmtf compat-nico-fabric compat-tinkerbell compat-ironic compat-kai compat-aicr compat-prometheus compat-kueue compat-volcano compat-medik8s e2e-refstack e2e-linux-substrate help
+.PHONY: build test test-short e2e assets image compat-libredfish compat-sushy compat-dmtf compat-nico-fabric compat-tinkerbell compat-ironic compat-kai compat-aicr compat-prometheus compat-kueue compat-volcano compat-medik8s e2e-refstack e2e-linux-substrate help
 
 build: ## build dctwin and the reference stack into $(BIN)/
 	go build -o $(BIN)/dctwin ./cmd/dctwin
@@ -18,6 +20,9 @@ e2e: ## the scenario suites only
 
 assets: build ## obtain the captured mockups the vendor dialects bind (MIT, libredfish at a pinned commit)
 	$(BIN)/dctwin assets fetch
+
+image: ## the container image the Helm chart runs (charts/dc-twin); IMAGE=<registry>/dc-twin:<tag> names another
+	docker build -t $(IMAGE) .
 
 compat-libredfish: build ## NICo's libredfish integration suite, unmodified, against the twin (needs cargo)
 	DCTWIN=$(abspath $(BIN))/dctwin compat/libredfish/run.sh
