@@ -899,6 +899,10 @@ func (a *Adapter) Machines() []Machine {
 	return out
 }
 
+// SiteUplink is the router's interface on the stack's routed site network (nil without one), for
+// another adapter whose guests are routed there too: the namespace has one link (D48).
+func (a *Adapter) SiteUplink() *netsim.Uplink { return a.uplink }
+
 // Report is the adapter's contribution to the fidelity report (07).
 func (a *Adapter) Report() adapter.Report {
 	r := adapter.Report{Adapter: Name, Served: len(a.order)}

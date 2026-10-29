@@ -513,6 +513,47 @@ minutes); NICo's mock switch and shelf backends, and no rack manager (`[rms] api
 H100 rack has none, and with one configured NICo's site explorer requires a rack profile of the
 host's rack to look up its slot and tray, and creates no host without it.
 
+## The trays path: a GB300 NVL72 rack to Ready, with NICo's machine software impersonated
+
+`run.sh trays` (x86_64 Linux; estate `nvl72-nico-impersonated`) runs NICo as the Ready path does,
+its PXE service and API in a Linux network namespace the twin routes the machines into at L3, on
+the GB300 NVL72 rack with NICo's software on the `model` machines impersonated by the twin's
+`nicoagent` adapter (D55): NICo's DPU image and forge-dpu-agent on each BlueField
+(`nico-dpu-agent`), scout on each tray and server (`nico-scout`). The run is labelled
+impersonated: it tests NICo's state machines, rack controller and NVLink manager against the
+twin, not NICo's machine software. Each machine boots on its own network path (a DPU on its OOB
+port behind its BMC's switch port, a tray through its DPU, a server on its provisioning port), so
+NICo's DHCP server, carbide-pxe and nico-api see each machine's own MAC and address.
+
+### Result (2026-10-29, x86_64 Linux, NICo at 02b92f18)
+
+```
+trays-dpu-init      PASS   18 DPUs discovered by NICo; no managed host left in DPUInitializing
+trays-ready         PASS   18 of 18 GB300 trays Ready in 12 min
+trays-rack          PASS   rack a03 through Maintenance(ConfigureNmxCluster(...)) and validation to Ready
+trays-nvlink        PASS   nvlink-manager: 18 machines scanned, NMX-C reachable, 18 partitions,
+                           72 GPUs; every tray's nvlink_info domain_uuid backfilled from NMX-C as
+                           2341b8dc-…c855, the twin's NMX-C domain, with the rack's chassis serial
+```
+
+NICo took each tray from `DPUDiscovering` through `DPUInitializing` (Init, platform power cycle,
+platform configuration, BIOS polling, `WaitingForNetworkConfig`) and `HostInitializing`
+(`EnableIpmiOverLan`, BIOS setup, `SetBootOrder` DPU first, `WaitingForDiscovery`, cleanup,
+UEFI setup, lockdown) and BOM validation to `Ready`; then the rack controller ran rack
+maintenance (`ConfigureNmxCluster`: switch certificates, the scale-up fabric manager, the primary
+switch's certificate, on the twin's RMS; NVOS update skipped, no firmware source configured) and
+validation, and the rack became `Ready`. (The first form of the `trays-nvlink` row counted NMX-C
+requests in the twin's events, which the NMX-C adapter does not record, and read FAIL; it now reads
+nvlink-manager's metrics and NICo's machines' domain UUID. The rack and NVLink rows above were read
+by hand from the same sources on that run, before the row was changed.)
+
+What a site configures that this path configures too: the estate CA as a TPM vendor CA (`tpm-ca
+add`, scout's EK certificates), and NICo's `dpu_models` catalog naming the BlueField firmware the
+estate's BlueFields run, since the impersonated DPU image installs no bundle (NICo's
+`docs/operations/firmware-updates/configuration.md`: the catalog follows the bundle). The OEM
+servers lease from NICo and are answered `exit` (NICo creates no machine for them on this estate);
+only the aarch64 iPXE is served, so an x86 server's scout is not reached here.
+
 ## Twin bugs and missing features
 
 1. **BMC clocks are frozen.** Every Manager's `DateTime` is served from the captured tree
@@ -668,6 +709,39 @@ Smaller observations:
   `dhcp: twin` and its hosts are at `model` fidelity, so NICo never sees a host NIC DHCP. The Ready
   path ([below](#the-ready-path-a-zero-dpu-host-that-boots-nicos-scout)) has a host that does.
 
+Found on the trays path ([above](#the-trays-path-a-gb300-nvl72-rack-to-ready-with-nicos-machine-software-impersonated)):
+
+14. **Option 60 for UEFI HTTP boot had four fields.** The boot walker and the stand-in sent
+    `HTTPClient:Arch:00019`; EDK2 sends `HTTPClient:Arch:00019:UNDI:003000`, and NICo's DHCP
+    server reads any shape but five fields as an unknown client and offers it no boot URI.
+    **Fixed** in both (`vendorClassFor`, the stand-in's firmware and iPXE).
+15. **A GB tray's boot options did not name its DPU.** The tray and its BlueField are separate
+    captures, so the tray's UEFI network boot options for its riser BlueField carried a MAC of
+    the tray's own derivation, and NICo's `set_boot_order_dpu_first` found no option for the
+    DPU's host PF; and a boot option's `DisplayName` kept the captured `(MAC:…)` while its device
+    path's was re-identified. **Fixed:** the dialect's `dpuHostMACs` binds the capture's DPU NIC to
+    the model's DPU, whose BMC's `BaseMAC` the tray then names, and display-name MACs are scrubbed
+    as device-path MACs are (`TestTrayBootsFromItsDPUByTheDPUsMAC`).
+16. **The stand-in read the host's address from deprecated fields.** NICo writes a host
+    interface's address in `addresses` (an IPv4 entry with the gateway as a CIDR); the flat `ip`
+    and `gateway` are deprecated and empty, so the DPU's DHCP server had nothing to offer its host.
+    **Fixed** (`ifaceV4`), and the fake NICo of the tests writes NICo's shape.
+17. **`sanboot` was not interpreted.** NICo answers a DPU past discovery with
+    `sanboot --no-describe --drive 0x80`, a boot from the local disk; the interpreter refused it,
+    and the DPU retried the network instead of starting its agent, so its host's DHCP went
+    unanswered. **Fixed:** a local `sanboot` is the firmware's next option, as `exit` is.
+18. **The routed site network did not reach estate endpoints.** nvlink-manager, in the
+    namespace, dials NMX-C at a switch tray's NVOS lease on 9370; the twin's router forwarded only
+    to machines' leases and dropped the rest (`ClientCreateFailed`). **Fixed:** the router
+    terminates the namespace's TCP to an address the substrate's site routes serve and connects to
+    the twin's listener (`Uplink.SetSiteRoutes`, `TestSiteNetworkReachesEstateEndpoints`).
+19. **A stand-in firmware gave up after its first failed network boot**, where UEFI cycles its
+    boot options; a DHCP server or boot service that answers late left the machine with no OS.
+    **Fixed:** a boot with no answer is tried again after 30 s.
+
+Not fixed: the BlueField BMC serves the capture's firmware versions (`BF-24.10-10`, NIC
+`32.43.1008`) where the profile's baselines are `BF-24.10-16` and `32.43.1014`.
+
 ## NICo-side findings
 
 These are about NICo, not the twin; they are recorded because the twin made them visible.
@@ -765,8 +839,9 @@ Found on the Ready path ([below](#the-ready-path-a-zero-dpu-host-that-boots-nico
 
 ## What this does not show
 
-- A host with DPUs reaching `Ready`. The GB300 trays stop in DPU discovery: NICo next boots the
-  BlueField from its own image over UEFI HTTP, and the DPU OS is not modelled (Q1). The OEM hosts
+- A host with DPUs reaching `Ready` with NICo's own machine software: on the trays path the
+  GB300 trays reach `Ready` with that software impersonated (D55); without the impersonators
+  they stop in DPU discovery, the DPU OS not being modelled (Q1). The OEM hosts
   of `nvl72-nico` are explored, preingested and powered by NICo but not ingested there (they are at
   `model` fidelity). The zero-DPU DGX of the Ready path reaches `Ready` with: a scout image
   assembled from NICo's pieces rather than NICo's own (which NICo does not publish; without

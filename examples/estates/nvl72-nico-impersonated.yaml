@@ -1,0 +1,58 @@
+# The estate compat/nico's trays path runs NICo against (run.sh trays): nvl72-nico's GB300 NVL72
+# rack and OEM racks, with NICo's software on the model machines impersonated (D55): its DPU image
+# and forge-dpu-agent on every BlueField (nico-dpu-agent), and scout on every tray and server
+# (nico-scout). The run is labelled impersonated (D24). Every machine boots on its own network
+# path: a DPU on its out-of-band port behind its BMC's switch port, a tray through its DPU, a
+# server on its provisioning port. NICo's DHCP server serves the BMC and provisioning networks
+# through the twin relay; NICo's PXE service and API run in a Linux network namespace the twin
+# routes the machines into at L3 (the routed site network, D48), so they see each machine's own
+# address, as they identify it by. run.sh sets the DHCP port and the link's port.
+apiVersion: dc-twin/v1alpha1
+kind: Estate
+metadata: { name: nvl72-nico-impersonated }
+spec:
+  seed: 1729
+  clock: wall
+  timeScale: 0.05
+  packs: [generic@0.1.0, nvidia@0.1.0, liteon@0.1.0, oem-dell@0.1.0, oem-hpe@0.1.0, oem-lenovo@0.1.0, oem-supermicro@0.1.0]
+  sites:
+    - name: site-1
+      halls:
+        - name: hall-a
+          rows:
+            - name: a
+              positions: 10
+              racks:
+                - { name: a03, position: 3, format: nvidia/gb300-nvl72, feeds: [A, B] }
+                - { name: a10, position: 10, format: generic/network-rack, params: { ufm: nvidia/ufm-appliance } }
+            - name: b
+              positions: 4
+              racks:
+                - { name: b01, position: 1, format: generic/hgx-8gpu, params: { server: oem-dell/xe9680-h100, servers: 1 } }
+                - { name: b02, position: 2, format: generic/hgx-8gpu, params: { server: oem-supermicro/sys-821ge-tnhr, servers: 1 } }
+                - { name: b03, position: 3, format: generic/hgx-8gpu, params: { server: oem-lenovo/sr670-v2, servers: 1 } }
+                - { name: b04, position: 4, format: generic/cpu-rack, params: { server: oem-dell/r760, servers: 2 }, slots: { server-02: { profile: oem-hpe/dl385-gen10p } } }
+  networks:
+    # dhcp: stack — relayed to NICo's dhcp-server. run.sh sets the port from DHCP_PORT.
+    oob:          { role: management,   dhcp: stack, cidr: 10.30.0.0/16, fabric: oob, server: "127.0.0.1:26767" }
+    provisioning: { role: provisioning, dhcp: stack, cidr: 10.40.0.0/16, fabric: frontend, server: "127.0.0.1:26767" }
+    frontend:     { role: frontend,     fabric: frontend }
+    backend:      { role: scale-out,    fabric: backend }
+    service:      { role: service,      cidr: 10.90.0.0/24, dhcp: none }
+  fabrics:
+    - { name: oob,      template: oob-flat,   nos: none }
+    - { name: frontend, template: clos-2tier, nos: none, params: { leafsPerRack: 2, spines: 2 }, placeIn: a10 }
+    - { name: backend,  template: rail-optimised, nos: none, technology: infiniband, manager: nvidia/ufm, params: { rails: 4 }, select: "a03 b01 b02 b03", placeIn: a10 }
+  facility:
+    power: { feeds: [{ name: A, capacityW: 400000 }, { name: B, capacityW: 400000 }] }
+    cooling: { loops: [{ name: cdu-1, profile: generic/cdu-inrow, racks: [a03], capacityKW: 200 }] }
+    # No broker named: the twin hosts one (dctwin endpoints prints it) and NICo's consumer reads it.
+    bms: { dialect: nvidia/dsx-exchange }
+  stacks:
+    - name: nvidia-dsx-os@0.1.0
+      # NICo's consumer parses the pre-1.0 BMS shape (docs/stacks/nvidia-dsx-os.md, D40).
+      impersonators: [nico-dpu-agent, nico-scout]
+      outputs:
+        bmsConsumerMirror: "nico-legacy,nico-api"
+        # the routed site network: a Linux network namespace holding NICo's PXE service and API
+        siteNetwork: "prefix=10.90.0.0/24 gateway=10.90.0.1 link=127.0.0.1:17800"

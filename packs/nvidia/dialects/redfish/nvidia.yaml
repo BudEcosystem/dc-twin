@@ -20,6 +20,9 @@ spec:
     - { component: cpu, resources: ["/redfish/v1/Systems/System_0/Processors/CPU_{i}"] }
   # the riser BlueField-3s are the tray's DPUs: two on the captured GB200, one on a GB300 tray
   dpus: ["/redfish/v1/Chassis/Riser_Slot{n}_BlueField_3_DPU"]
+  # the capture's one PCIe NIC with UEFI network boot options (Pci(0x6,0x0)) is its first
+  # BlueField's host PF: a tray boots from its DPU by that MAC, which is the DPU's BaseMAC
+  dpuHostMACs: ["D0F405439504"]
   sensors:
     - { sensor: power, resources: ["/redfish/v1/Chassis/Chassis_0/Sensors/Chassis_0_TotalHSC_Power_0"] }
     - { sensor: coolant-in, resources: ["/redfish/v1/Chassis/Chassis_0/Sensors/Chassis_0_Front_IO_Temp_0"] }

@@ -704,6 +704,12 @@ type DialectSpec struct {
 	// every SerialNumber there becomes that DPU's own (a stack pairs a host with its DPUs by
 	// serial), and a DPU the model does not have is absent, from its collections too.
 	DPUs []string `json:"dpus,omitempty"`
+	// DPUHostMACs are the MACs the capture holds for the host-side PFs of the host's DPUs (in
+	// any spelling), in the order of DPUs: wherever the host's tree names one (its NICs, its
+	// boot options), the engine names that DPU's host PF instead, the BaseMAC the DPU's own BMC
+	// serves, so the host's boot option for its DPU and the DPU agree (a stack sets a host to
+	// boot from its DPU by that MAC).
+	DPUHostMACs []string `json:"dpuHostMACs,omitempty"`
 	// SettingsJobs is the Location of the job a PATCH of a settings object schedules when the
 	// capture has no answer for that request, with {n} for a twelve-digit job number: iDRAC
 	// answers every Bios/Settings PATCH 202 with a JID_ job. Empty: 204, as most BMCs answer.

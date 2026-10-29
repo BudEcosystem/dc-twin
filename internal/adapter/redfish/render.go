@@ -254,6 +254,12 @@ func (r *renderer) scrub(v any, path string) {
 					})
 					x[k] = s
 				}
+				if strings.Contains(s, "MAC:") { // and a boot option's name ("UEFI HTTPv4 (MAC:…)")
+					s = displayMAC.ReplaceAllStringFunc(s, func(m string) string {
+						return "MAC:" + b.scrubCompactMAC(m[4:])
+					})
+					x[k] = s
+				}
 				for from, to := range b.dialect.Spec.Replace {
 					if strings.Contains(s, from) {
 						x[k] = strings.ReplaceAll(s, from, b.expand(to, r.snap))
@@ -297,6 +303,14 @@ func (b *bmc) scrubValue(kind, s string) string {
 			return b.dev.Identity.Serial
 		case "uuid":
 			return b.dev.Identity.UUID
+		}
+	}
+	if kind == "mac" {
+		if mac, ok := b.dpuHostMAC(s); ok {
+			if s == strings.ToUpper(s) {
+				return strings.ToUpper(mac)
+			}
+			return mac
 		}
 	}
 	if kind == "mac" && strings.EqualFold(b.orig["bmcMAC"], s) {
@@ -806,7 +820,34 @@ func setSerials(v any, serial string) {
 var (
 	compactMAC    = regexp.MustCompile(`^[0-9A-Fa-f]{12}$`)
 	devicePathMAC = regexp.MustCompile(`MAC\([0-9A-Fa-f]{12}`)
+	displayMAC    = regexp.MustCompile(`MAC:[0-9A-Fa-f]{12}\b`)
 )
+
+// dpuHostMAC is, when s is one of the captured MACs the dialect names as its DPUs' host PFs, the
+// host PF MAC of the model's DPU in that place (the BaseMAC its BMC serves, with colons). A DPU
+// the model does not have, or one whose BMC serves no BaseMAC, leaves s to the usual scrub.
+func (b *bmc) dpuHostMAC(s string) (string, bool) {
+	norm := func(m string) string {
+		return strings.ToLower(strings.NewReplacer(":", "", "-", "").Replace(m))
+	}
+	for i, m := range b.dialect.Spec.DPUHostMACs {
+		if norm(m) != norm(s) || i >= len(b.dpus) {
+			continue
+		}
+		db := b.a.bmcs[b.dpus[i].Path]
+		if db == nil || db.dialect.Spec.System == "" {
+			return "", false
+		}
+		doc, ok := b.a.Get(db.dev.Path, db.dialect.Spec.System+"/Oem/Nvidia")
+		base, _ := doc["BaseMAC"].(string)
+		if !ok || !compactMAC.MatchString(base) {
+			return "", false
+		}
+		l := strings.ToLower(base)
+		return l[0:2] + ":" + l[2:4] + ":" + l[4:6] + ":" + l[6:8] + ":" + l[8:10] + ":" + l[10:12], true
+	}
+	return "", false
+}
 
 // scrubCompactMAC scrubs a MAC written without separators ("5c257308f352", "5C257308F362" in a
 // UEFI device path) as the same MAC written with colons in lower case is scrubbed elsewhere in
