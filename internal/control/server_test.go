@@ -12,6 +12,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/BudEcosystem/dc-twin/internal/engine"
+	"github.com/BudEcosystem/dc-twin/internal/model"
+	"github.com/BudEcosystem/dc-twin/internal/schema"
 	"github.com/BudEcosystem/dc-twin/internal/twin"
 )
 
@@ -195,5 +198,57 @@ func TestResponsesAreCompressedForAClientThatAcceptsIt(t *testing.T) {
 	r.Body.Close()
 	if r.Header.Get("Content-Encoding") != "" {
 		t.Error("the event stream was compressed")
+	}
+}
+
+// /credentials reports the BMC account that logs in now: after a stack changes the factory
+// account's password through AccountService (NICo rotates every BMC's), the new password, with the
+// factory one alongside; an unchanged BMC's account as before.
+func TestCredentialsFollowAPasswordChange(t *testing.T) {
+	tw := upMixedHall(t)
+	srv, err := Serve(tw, "127.0.0.1:0", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Close()
+	var changed, unchanged *model.Device
+	for _, d := range tw.Engine.M.Devices {
+		if d.HasBMC() && len(d.State.Accounts) > 0 {
+			if changed == nil {
+				changed = d
+			} else if unchanged == nil {
+				unchanged = d
+				break
+			}
+		}
+	}
+	if changed == nil || unchanged == nil {
+		t.Fatal("no two BMCs with accounts")
+	}
+	factory := changed.Identity.BMCPassword
+	acct := changed.State.Accounts[0]
+	if err := tw.Engine.UpdateAccount(engine.Request{Path: changed.Path, Canonical: "account.password", Protocol: "test",
+		Source: schema.EventSource{Class: "stack", Principal: "test"}}, acct.ID, map[string]any{"Password": "rotated-by-the-stack"}); err != nil {
+		t.Fatal(err)
+	}
+	creds := func(path string) map[string]string {
+		r := get(t, "http://"+srv.Info.Addr+"/v1/credentials?select="+path, srv.Info.Token)
+		defer r.Body.Close()
+		var out []map[string]string
+		if err := json.NewDecoder(r.Body).Decode(&out); err != nil || len(out) != 1 {
+			t.Fatalf("%s: %v %v", path, out, err)
+		}
+		return out[0]
+	}
+	c := creds(changed.Path)
+	if c["user"] != acct.User || c["password"] != "rotated-by-the-stack" || c["factoryPassword"] != factory {
+		t.Errorf("after a password change: %v", c)
+	}
+	if _, ok := tw.Engine.Authenticate(changed, c["user"], c["password"]); !ok {
+		t.Errorf("the reported account does not log in")
+	}
+	u := creds(unchanged.Path)
+	if u["password"] != unchanged.Identity.BMCPassword || u["factoryPassword"] != "" {
+		t.Errorf("an unchanged BMC: %v", u)
 	}
 }
