@@ -8,6 +8,10 @@ spec:
   impersonators:
     - { name: machine-a-tron, replaces: scout and dpu-agent, obtain: { source: "https://github.com/dsx-ai-factory/infra-controller", path: crates/machine-a-tron }, appliesTo: model }
     - { name: kwok, replaces: kubelet, appliesTo: model, projection: kwok }
+    # the twin's stand-ins for NICo's software on model machines (D55): its DPU image and
+    # forge-dpu-agent on BlueFields, and scout on hosts
+    - { name: nico-dpu-agent, replaces: dpu-agent, appliesTo: model, projection: nicoagent }
+    - { name: nico-scout, replaces: scout, appliesTo: model, projection: nicoagent }
   components:
     nico:
       obtain: { source: "https://github.com/dsx-ai-factory/infra-controller", ref: "<pinned>", licence: Apache-2.0 }

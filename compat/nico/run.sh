@@ -9,6 +9,12 @@
 #                                     load dhcp host report down, on examples/estates/dgx-nico-ready.yaml,
 #                                     where a DGX H100 is a real x86_64 VM that network-boots NICo's
 #                                     iPXE and scout and is driven by NICo to Ready
+#   compat/nico/run.sh trays          the trays path (README), Linux only: fetch boot build up pxe nico
+#                                     load dhcp trays report down, on
+#                                     examples/estates/nvl72-nico-impersonated.yaml, where NICo's DPU
+#                                     software and scout are impersonated on the model machines (D55)
+#                                     and NICo takes the GB300 trays through DPU init and host
+#                                     discovery towards Ready, and the rack through its maintenance
 #
 # What runs, natively on this host (macOS or Linux):
 #   NICo at NICO_SHA built from source: nico-api (carbide-api, --no-default-features as NICo's
@@ -47,6 +53,15 @@
 #   SVC_NS [dctwin-nico-svc]            the network namespace NICo's PXE service and API run in (sudo)
 #   READY_WAIT [5400]                   seconds to wait for the host to reach Ready
 #   READY_STALL [1800]                  give up once one state has held this long
+# The trays path also reads:
+#   TRAYS_ESTATE [examples/estates/nvl72-nico-impersonated.yaml]
+#   TRAYS_WAIT [7200]                   seconds to wait for every tray to reach Ready
+#   TRAYS_STALL [1800]                  give up once no tray has changed state for this long
+#   IPXE_AARCH64                        NICo's aarch64 iPXE, on a host of another architecture
+# On the trays path the twin runs redfish, dhcp, bms, nvue, rms, nmxc and nicoagent; NICo's PXE
+# service and API run in the namespace as on the Ready path, with the BMC and admin networks
+# routed into it, NICo's RMS backend is the twin's RMS (forwarded in), and NVLink partitioning is
+# on, against the twin's NMX-C at each switch tray's NVOS address.
 # On the Ready path the twin also runs ipmi and vm (and no rms: a DGX H100 rack has no rack
 # manager); Vault issues machine certificates under the harness CA; the estate CA is loaded as a
 # TPM CA; and a second svcnet relays the DGX BMC's IPMI at its lease into the namespace.
@@ -75,6 +90,8 @@ COMPONENT_BACKEND=${COMPONENT_BACKEND:-rms}
 BMS_MIRRORS=${BMS_MIRRORS:-nico-legacy,nico-api}
 ESTATE=${ESTATE:-$repo/examples/estates/nvl72-nico.yaml}
 READY_ESTATE=${READY_ESTATE:-$repo/examples/estates/dgx-nico-ready.yaml}
+TRAYS_ESTATE=${TRAYS_ESTATE:-$repo/examples/estates/nvl72-nico-impersonated.yaml}
+TRAYS_WAIT=${TRAYS_WAIT:-7200}
 READY_HOST=${READY_HOST:-b01/server-01}
 SVC_NS=${SVC_NS:-dctwin-nico-svc}
 READY_WAIT=${READY_WAIT:-5400}
@@ -160,7 +177,7 @@ step_fetch() {
     tar xzf "$WORK/src/nico.tgz" -C "$SRC" --strip-components 1
     echo "  extracted $(ls "$SRC/crates" | wc -l | tr -d ' ') crates"
   fi
-  if ready; then :  # the Ready path runs no Flow, so no Temporal
+  if netns; then :  # the Ready and trays paths run no Flow, so no Temporal
   elif [ -n "${TEMPORAL_BIN:-}" ]; then cp "$TEMPORAL_BIN" "$BIN/temporal"
   elif [ ! -x "$BIN/temporal" ]; then
     local f="temporal_cli_${TEMPORAL_VERSION}_${os}_${goarch}.tar.gz" u="https://github.com/temporalio/cli/releases/download/v$TEMPORAL_VERSION"
@@ -183,8 +200,8 @@ cargo_env() {
 }
 built() { local b; for b in "$@"; do [ -x "$BIN/$b" ] || return 1; done; }
 step_build() {
-  if ready; then
-    # the Ready path's NICo programs were built for Linux by boot-artifacts.sh (step boot)
+  if netns; then
+    # the Ready and trays paths' NICo programs were built for Linux by boot-artifacts.sh (step boot)
     say "NICo's programs from $BOOT, and the twin"
     local b
     for b in carbide-api forge-dhcp-server nico-admin-cli; do
@@ -193,7 +210,7 @@ step_build() {
     done
     if [ "$DCTWIN" = "$WORK/bin/dctwin" ] || [ ! -x "$DCTWIN" ]; then (cd "$repo" && go build -o "$DCTWIN" ./cmd/dctwin) || die "go build dctwin"; fi
     (cd "$repo" && go build -o "$BIN/nicoinputs" ./compat/nico/nicoinputs) || die "go build nicoinputs"
-    result build PASS "nico-api, forge-dhcp-server, admin-cli, carbide-pxe and forge-scout for linux/$goarch at $NICO_SHA (boot-artifacts.sh)"
+    result build PASS "nico-api, forge-dhcp-server, admin-cli and carbide-pxe for linux/$goarch at $NICO_SHA (boot-artifacts.sh)"
     return
   fi
   say "build NICo (the first build takes a long time)"
@@ -315,7 +332,7 @@ step_up() {
   # host waited in cleanup; as a site's Vault issues under the site's CA, the Ready path's issues
   # under the harness CA.
   local pki_root='vault write certs/root/generate/internal common_name=myvault.com ttl=87600h'
-  if ready; then
+  if netns; then
     cat "$CERTS/ca.crt" "$CERTS/ca.key" >"$WORK/vault-ca-bundle.pem"
     docker cp "$WORK/vault-ca-bundle.pem" "$VAULT:/tmp/ca-bundle.pem" >/dev/null
     pki_root='vault write certs/config/ca pem_bundle=@/tmp/ca-bundle.pem'
@@ -335,13 +352,14 @@ step_up() {
   # the twin: its BMC network is relayed to NICo's dhcp-server on DHCP_PORT, and its BMS mirrors
   # the shapes NICo's consumer and nico-api parse (quoted: a bare comma ends a flow-mapping entry)
   # the Ready path's estate also names nico-api's port, and the routed site network's link
-  local est=$ESTATE; ready && est=$READY_ESTATE
+  local est=$ESTATE; ready && est=$READY_ESTATE; trays && est=$TRAYS_ESTATE
   sed -E -e "s|server: \"127.0.0.1:26767\"|server: \"127.0.0.1:$DHCP_PORT\"|" \
       -e "s#bmsConsumerMirror: (\"[^\"]*\"|[^,} ]*)#bmsConsumerMirror: \"$BMS_MIRRORS\"#" \
       -e "s|nico-api@10.90.0.20:11079=127.0.0.1:11079|nico-api@10.90.0.20:$API_PORT=127.0.0.1:$API_PORT|" \
       -e "s|link=127.0.0.1:17800|link=127.0.0.1:$PXE_LINK_PORT|" "$est" >"$WORK/estate.yaml"
   local adapters=redfish,dhcp,bms,nvue
   ready && adapters=redfish,dhcp,bms,vm,ipmi
+  trays && adapters=redfish,dhcp,bms,nvue,nmxc,nicoagent
   [ "$COMPONENT_BACKEND" = rms ] && ! ready && adapters=$adapters,rms
   twin_up twin "$WORK/estate.yaml" "$STATE" "$adapters" "$GATEWAY" || die "twin"
   if [ "$COMPONENT_BACKEND" = rms ] && ! ready; then
@@ -380,6 +398,7 @@ step_nico() {
   render "$here/nico-api-config.toml.in" "$WORK/nico-api-config.toml"
   cat "$WORK/inputs/nico-site.toml" >>"$WORK/nico-api-config.toml"
   ready && ready_config "$WORK/nico-api-config.toml"
+  trays && trays_config "$WORK/nico-api-config.toml"
   local db="postgresql://postgres:admin@127.0.0.1:$PG_PORT"
   DATABASE_URL=$db "$BIN/carbide-api" migrate >"$LOGS/migrate.log" 2>&1 || { tail "$LOGS/migrate.log"; die "migrations"; }
   # HTTPS_PROXY: every BMC address NICo leases is reached through the twin's site gateway (an HTTP
@@ -388,16 +407,16 @@ step_nico() {
   # on the Ready path nico-api runs in the site network's namespace (step pxe), as the user, where
   # its database, Vault and the site gateway are forwarded in at their loopback addresses
   local inns=""
-  ready && inns="sudo -n ip netns exec $SVC_NS sudo -n -u $(id -un)"
+  netns && inns="sudo -n ip netns exec $SVC_NS sudo -n -u $(id -un)"
   start_bg nico-api $inns env RUST_BACKTRACE=1 RUST_LOG="${NICO_RUST_LOG:-info}" $(proxy_env) $(vault_env) \
     CARBIDE_WEB_AUTH_TYPE=none NICO_WEB_AUTH_TYPE=none DATABASE_URL="$db" \
     "$BIN/carbide-api" run --config-path "$WORK/nico-api-config.toml"
   local at="127.0.0.1:$API_PORT"
-  ready && at="10.90.0.20:$API_PORT in $SVC_NS (and 127.0.0.1:$API_PORT through svcnet)"
+  netns && at="10.90.0.20:$API_PORT in $SVC_NS (and 127.0.0.1:$API_PORT through svcnet)"
   if wait_for 180 nico-api admin version; then
     result nico-api PASS "listening on $at; $(admin network-segment show | grep -cE '\| (oob|provisioning)-') segments, one per twin rack and network"
   else tail -20 "$LOGS/nico-api.log"; result nico-api FAIL "did not answer (logs/nico-api.log)"; return 1; fi
-  ready && return 0  # the Ready path needs no Flow
+  netns && return 0  # the Ready and trays paths need no Flow
   # NICo Flow: the policy engine that powers off leaking trays (Temporal runs its tasks)
   docker exec "$PG" psql -U postgres -qc 'create database flow' >/dev/null 2>&1
   start_bg temporal "$BIN/temporal" server start-dev --namespace flow --ip 127.0.0.1 --port "$TEMPORAL_PORT" \
@@ -438,8 +457,9 @@ step_load() {
   if [ "$n" -gt 0 ]; then result load PASS "$n expected machines, $racks expected NVL rack, $shelves shelves, $switches switches (with NVOS MACs)"
   else result load FAIL "expected machines not loaded (logs/load.log)"; fi
   # the Ready path's TPM: the vm host's EK certificates are signed by the estate CA, its TPM
-  # vendor's CA as far as NICo is concerned, which an operator loads as NICo loads a vendor's
-  if ready; then
+  # vendor's CA as far as NICo is concerned, which an operator loads as NICo loads a vendor's (the
+  # trays path's impersonated scout reports EK certificates the estate CA signs too)
+  if netns; then
     openssl x509 -in "$STATE/estate-ca.pem" -outform der -out "$WORK/estate-ca.der" &&
       admin tpm-ca add --filename "$WORK/estate-ca.der" >>"$LOGS/load.log" &&
       admin tpm-ca show >"$OUT/tpm-ca.txt" && grep -q 'dc-twin' "$OUT/tpm-ca.txt" &&
@@ -664,6 +684,48 @@ step_consumer() {
 # link; nothing is added to the host's interfaces, routes or firewall. Linux only (sudo for the
 # namespace).
 ready() { [ "${READY:-}" = 1 ]; }
+trays() { [ "${TRAYS:-}" = 1 ]; }
+netns() { ready || trays; }  # NICo's PXE service and API run in the site network's namespace
+
+# trays_config <config>: the trays path's changes to nico-api's configuration. As on the Ready
+# path, nico-api listens at its site address in the namespace with its site certificate, and a
+# failed boot is retried after 15 minutes. Unlike it, the switches and shelves stay on the twin's
+# RMS (forwarded into the namespace, step pxe), and NVLink partitioning is on: nvlink-manager
+# reaches the twin's NMX-C at each switch tray's NVOS address on 9370, verified against the
+# estate CA, which signs NMX-C's certificates.
+trays_config() {
+  local f=$1
+  sed -i.bak -e "s|^listen = \"127.0.0.1:$API_PORT\"|listen = \"10.90.0.20:$API_PORT\"|" \
+    -e "s|certs/localhost.crt|certs/nico-api-site.crt|" -e "s|certs/localhost.key|certs/nico-api-site.key|" "$f" && rm -f "$f.bak"
+  awk '{print} /^\[machine_state_controller\]$/ {print "failure_retry_time = \"15m\""}' "$f" >"$f.tmp" && mv "$f.tmp" "$f"
+  printf '\n[nvlink_config]\nenabled = true\nallow_insecure = false\nnmx_c_tls_ca_cert_path = "%s"\n' "$STATE/estate-ca.pem" >>"$f"
+  # The BlueField bundle NICo's DPU image installs carries the DPUs' BMC, ERoT and NIC firmware,
+  # and an operator keeps nico-api's dpu_models catalog in step with it (NICo's
+  # docs/operations/firmware-updates/configuration.md). On this path the image is impersonated
+  # and installs nothing, so the bundle's firmware is what the estate's BlueFields run: the
+  # catalog names the versions the twin's BlueField BMCs serve (read from the first one), and
+  # NICo's DPU firmware check (DPUInitializing/WaitingForPlatformConfiguration) finds them in place.
+  local dpu v_bmc v_cec v_nic v_uefi
+  dpu=$(jq -r '[.[] | select(.path | test("/bf3-[0-9]+$")) | .path][0] // empty' "$WORK/credentials.json" 2>/dev/null)
+  [ -n "$dpu" ] || dpu=$(twin get '?class=dpu' --json 2>/dev/null | jq -r '.[0].path // empty')
+  fwv() { twin inspect "$dpu" "/redfish/v1/UpdateService/FirmwareInventory/$1" 2>/dev/null | jq -r '.Version // empty'; }
+  v_bmc=$(fwv BMC_Firmware) v_cec=$(fwv Bluefield_FW_ERoT) v_nic=$(fwv DPU_NIC) v_uefi=$(fwv DPU_UEFI)
+  if [ -n "$v_bmc" ] && [ -n "$v_nic" ]; then
+    {
+      printf '\n[dpu_config]\ndpu_nic_firmware_update_versions = ["%s"]\n' "$v_nic"
+      printf '\n[dpu_config.dpu_models.bluefield3]\nvendor = "Nvidia"\nmodel = "Bluefield 3 SmartNIC Main Card"\nordering = ["bmc", "cec"]\n'
+      local c id v
+      for c in bmc:BMC_Firmware:$v_bmc cec:Bluefield_FW_ERoT:$v_cec nic:DPU_NIC:$v_nic uefi:DPU_UEFI:$v_uefi; do
+        IFS=: read -r c id v <<<"$c"
+        [ -n "$v" ] || continue
+        printf '\n[dpu_config.dpu_models.bluefield3.components.%s]\ncurrent_version_reported_as = "%s"\n\n[[dpu_config.dpu_models.bluefield3.components.%s.known_firmware]]\nversion = "%s"\ndefault = true\n' "$c" "$id" "$c" "$v"
+      done
+    } >>"$f"
+    echo "  dpu_models.bluefield3: the twin's BlueField firmware (bmc $v_bmc, cec $v_cec, nic $v_nic, uefi $v_uefi) as the bundle's"
+  else
+    echo "  dpu_models: could not read the twin's BlueField firmware from $dpu; NICo keeps its own baseline"
+  fi
+}
 
 # ready_config <config>: the Ready path's changes to nico-api's configuration
 ready_config() {
@@ -707,17 +769,26 @@ ready_ipmi() {
 
 step_boot() {
   say "NICo's boot artifacts and Linux programs (boot-artifacts.sh)"
-  [ "$uname_s" = Linux ] || die "the Ready path runs on Linux (README: on macOS no native process sees a guest's own address)"
+  [ "$uname_s" = Linux ] || die "the Ready and trays paths run on Linux (README: on macOS no native process sees a guest's own address)"
   local b missing=""
-  for b in ipxe.efi scout.efi carbide forge-scout carbide-api forge-dhcp-server nico-admin-cli; do [ -s "$BOOT/$b" ] || missing="$missing $b"; done
+  # the trays path's machines run impersonated software (D55): no scout image, no forge-scout
+  local want="ipxe.efi scout.efi carbide forge-scout carbide-api forge-dhcp-server nico-admin-cli"
+  local pkgs="carbide-api carbide-dhcp-server nico-admin-cli carbide-pxe carbide-scout" bins="carbide-api forge-dhcp-server nico-admin-cli carbide forge-scout" steps="up ipxe rust image down"
+  if trays; then
+    want="ipxe.efi carbide carbide-api forge-dhcp-server nico-admin-cli"
+    pkgs="carbide-api carbide-dhcp-server nico-admin-cli carbide-pxe" bins="carbide-api forge-dhcp-server nico-admin-cli carbide" steps="up ipxe rust down"
+  fi
+  for b in $want; do [ -s "$BOOT/$b" ] || missing="$missing $b"; done
   if [ -n "$missing" ]; then
     echo "  building:$missing"
-    NICO_SRC=$SRC OUT=$BOOT WORK=$WORK JOBS=${JOBS:-4} \
-      RUST_PACKAGES="carbide-api carbide-dhcp-server nico-admin-cli carbide-pxe carbide-scout" \
-      RUST_BINS="carbide-api forge-dhcp-server nico-admin-cli carbide forge-scout" \
-      "$here/boot-artifacts.sh" up ipxe rust image down || { result boot FAIL "boot-artifacts.sh"; return 1; }
+    NICO_SRC=$SRC OUT=$BOOT WORK=$WORK JOBS=${JOBS:-4} RUST_PACKAGES="$pkgs" RUST_BINS="$bins" \
+      "$here/boot-artifacts.sh" $steps || { result boot FAIL "boot-artifacts.sh"; return 1; }
   else echo "  present in $BOOT"; fi
   (cd "$repo" && GOOS=linux GOARCH=$goarch CGO_ENABLED=0 go build -o "$BOOT/svcnet" ./compat/nico/svcnet) || die "go build svcnet"
+  if trays; then
+    result boot PASS "NICo's iPXE ($(wc -c <"$BOOT/ipxe.efi" | tr -d ' ') B, its embedded script), carbide-pxe, nico-api, dhcp-server, admin CLI for linux/$goarch at ${NICO_SHA:0:8}"
+    return
+  fi
   result boot PASS "NICo's iPXE ($(wc -c <"$BOOT/ipxe.efi" | tr -d ' ') B), scout.efi ($(($(wc -c <"$BOOT/scout.efi") / 1048576)) MiB: forge-scout and NICo's scout units, Ubuntu noble, $(cat "$BOOT/kernel" 2>/dev/null || echo "a 4K-page kernel")), carbide-pxe, nico-api, dhcp-server, admin CLI for linux/$goarch at ${NICO_SHA:0:8}"
 }
 
@@ -725,7 +796,7 @@ step_boot() {
 # deployment exposes it: its embedded iPXE script fetches from port 80, its DHCP hands out 8080)
 step_pxe() {
   say "the site network's namespace $SVC_NS: svcnet, NICo's PXE service at 10.90.0.17 (nico-api comes at 10.90.0.20)"
-  [ "$uname_s" = Linux ] || die "the Ready path runs on Linux"
+  [ "$uname_s" = Linux ] || die "the Ready and trays paths run on Linux"
   stop_bg pxe-80; stop_bg pxe-8080; stop_bg svcnet
   sudo -n ip netns del "$SVC_NS" 2>/dev/null || true
   sudo -n ip netns add "$SVC_NS" || die "ip netns add $SVC_NS (needs sudo)"
@@ -734,12 +805,38 @@ step_pxe() {
   local broker; broker=$(cat "$WORK/broker" 2>/dev/null)
   local fw="-forward 127.0.0.1:$PG_PORT=127.0.0.1:$PG_PORT -forward 127.0.0.1:$VAULT_PORT=127.0.0.1:$VAULT_PORT -forward $GATEWAY=$GATEWAY"
   [ -n "$broker" ] && fw="$fw -forward $broker=$broker"
+  # the trays path: the DPUs' out-of-band addresses (the BMC network) and the trays' admin
+  # addresses are routed in too, and NICo's RMS backend is the twin's RMS on this host
+  local routes="-route 10.40.0.0/16"
+  if trays; then
+    routes="$routes -route 10.30.0.0/16 -route 192.168.252.0/24"
+    local rms; rms=$(sed -E 's|^https?://||; s|/.*$||' "$WORK/rms-url" 2>/dev/null)
+    [ -n "$rms" ] && fw="$fw -forward $rms=$rms"
+  fi
   start_bg svcnet sudo -n "$BOOT/svcnet" -netns "$SVC_NS" -tap svc0 -addr 10.90.0.17/24 -addr 10.90.0.20/24 -gateway 10.90.0.1 \
-    -route 10.40.0.0/16 -listen "127.0.0.1:$PXE_LINK_PORT" $fw -expose "127.0.0.1:$API_PORT=10.90.0.20:$API_PORT"
+    $routes -listen "127.0.0.1:$PXE_LINK_PORT" $fw -expose "127.0.0.1:$API_PORT=10.90.0.20:$API_PORT"
   wait_for 60 "svcnet" grep -q 'svcnet: uplink from' "$LOGS/svcnet.log" || { tail "$LOGS/svcnet.log"; result pxe FAIL "the twin's routed site network did not link (logs/svcnet.log)"; return 1; }
   local static=$WORK/forge-boot-artifacts
   rm -rf "$static" && mkdir -p "$static/blobs/internal/$arch"
-  cp "$BOOT/ipxe.efi" "$BOOT/scout.efi" "$static/blobs/internal/$arch/"
+  if trays; then
+    # NICo's iPXE, which the impersonated firmware fetches and whose embedded script it runs; the
+    # images NICo's boot scripts name (its DPU image and scout) run nowhere on this path, so a
+    # labelled stand-in file is served where each would be, for the impersonator to fetch (D55)
+    # (the GB300 trays and their DPUs are aarch64: IPXE_AARCH64 names NICo's aarch64 iPXE when
+    # this host is not, boot-artifacts.sh building it on an aarch64 Docker host)
+    cp "$BOOT/ipxe.efi" "$static/blobs/internal/$arch/"
+    if [ "$arch" != aarch64 ] && [ -n "${IPXE_AARCH64:-}" ]; then
+      mkdir -p "$static/blobs/internal/aarch64" && cp "$IPXE_AARCH64" "$static/blobs/internal/aarch64/ipxe.efi"
+    fi
+    local f d
+    for d in "$static"/blobs/internal/*; do
+      for f in carbide.efi carbide.root scout.efi; do
+        echo "dc-twin: NICo's $f is impersonated on this path (D55); this file stands where it would be served" >"$d/$f"
+      done
+    done
+  else
+    cp "$BOOT/ipxe.efi" "$BOOT/scout.efi" "$static/blobs/internal/$arch/"
+  fi
   local p
   for p in 80 8080; do
     start_bg "pxe-$p" sudo -n ip netns exec "$SVC_NS" sudo -n -u "$(id -un)" env PXE_BIND_PORT=$p RUST_LOG="${NICO_RUST_LOG:-info}" \
@@ -879,6 +976,67 @@ ready_evidence() {
   done <"$OUT/host-evidence.tsv"
 }
 
+# step_trays: NICo's machines on the trays path, followed until every GB300 tray is Ready (or no
+# machine has changed state for TRAYS_STALL), then the rack's state and what NVLink partitioning
+# did. The machines' software is the twin's impersonators (D55): the fidelity report says how far
+# each machine's got, and the run is labelled impersonated.
+tray_hosts() { jq '[.expected_machines[] | select((.metadata.labels // []) | any(.key == "dc-twin.path" and (.value | test("compute-tray"))))] | length' "$WORK/inputs/expected-machines.json" 2>/dev/null || echo 18; }
+step_trays() {
+  say "the GB300 trays: DPU init with impersonated DPU software, host discovery with impersonated scout, towards Ready"
+  local start=$SECONDS end=$((SECONDS + TRAYS_WAIT)) since=$SECONDS last="" now j want
+  want=$(tray_hosts)
+  : >"$OUT/trays-states.txt"
+  while [ $SECONDS -lt $end ]; do
+    j=$(admin -f json machine show 2>/dev/null)
+    now=$(python3 -I "$here/trays.py" summary <<<"$j" | paste -sd';' -)
+    if [ -n "$now" ] && [ "$now" != "$last" ]; then
+      printf '%s +%ds %s\n' "$(date -u +%H:%M:%S)" $((SECONDS - start)) "$now" | tee -a "$OUT/trays-states.txt" | sed 's/^/  /'
+      last=$now since=$SECONDS
+    fi
+    [ "$(python3 -I "$here/trays.py" states <<<"$j" | awk '$2=="host" && $3 ~ /^Ready/' | wc -l | tr -d ' ')" -ge "$want" ] && break
+    if [ $((SECONDS - since)) -gt "${TRAYS_STALL:-1800}" ]; then
+      echo "  no machine changed state for $(((SECONDS - since) / 60)) min; stopping"
+      break
+    fi
+    sleep 30
+  done
+  admin -f json machine show >"$OUT/machines.json" 2>/dev/null
+  python3 -I "$here/trays.py" states <"$OUT/machines.json" >"$OUT/machine-states.txt"
+  host_state_history >"$OUT/machine-state-history.txt"
+  local dpus dinit hosts ready
+  dpus=$(awk '$2=="dpu"' "$OUT/machine-states.txt" | wc -l | tr -d ' ')
+  hosts=$(awk '$2=="host"' "$OUT/machine-states.txt" | wc -l | tr -d ' ')
+  dinit=$(awk '$2=="host" || $2=="predicted"' "$OUT/machine-states.txt" | grep -ci 'DPUInit' || true)
+  ready=$(awk '$2=="host" && $3 ~ /^Ready/' "$OUT/machine-states.txt" | wc -l | tr -d ' ')
+  if [ "$dpus" -gt 0 ] && [ "$dinit" -eq 0 ]; then result trays-dpu-init PASS "$dpus DPUs discovered by NICo; no managed host left in DPUInitializing (impersonated DPU software, D55)"
+  else result trays-dpu-init FAIL "$dinit managed hosts still in DPUInitializing, $dpus DPUs (out/machine-states.txt)"; fi
+  if [ "$ready" -ge "$want" ]; then result trays-ready PASS "$ready of $want GB300 trays Ready in $(((SECONDS - start) / 60)) min (impersonated scout, D55)"
+  else result trays-ready FAIL "$ready of $want GB300 trays Ready; $hosts hosts: $(awk '$2=="host"{print $3}' "$OUT/machine-states.txt" | sort | uniq -c | awk '{printf "%s %s, ", $1, $2}') (out/machine-states.txt, out/trays-states.txt)"; fi
+  # the rack: once its trays are Ready NICo runs its maintenance (ConfigureNmxCluster on the
+  # twin's RMS) and validation; nvlink-manager then reads the NVLink domain from NMX-C at the
+  # configured switch's NVOS address. Both are waited for (TRAYS_RACK_WAIT [1800]).
+  local rack nvl rend=$((SECONDS + ${TRAYS_RACK_WAIT:-1800}))
+  while :; do
+    admin -f json rack show >"$OUT/racks.json" 2>/dev/null
+    rack=$(python3 -I "$here/trays.py" racks <"$OUT/racks.json" 2>/dev/null | grep -i a03 | head -1)
+    nvl=$(grep -a nvl_partition_monitor "$LOGS/nico-api.log" | tail -1 | grep -aoE "machines_scanned: [0-9]+|nmx_c_unreachable_chassis: \{[^}]*\}|nmxc_num_partitions: [0-9]+|nmxc_num_gpus: [0-9]+" | paste -sd' ' -)
+    grep -qiE ' Ready' <<<"$rack" && grep -qE 'nmxc_num_gpus: [1-9]' <<<"$nvl" && break
+    [ $SECONDS -lt $rend ] || break
+    sleep 30
+  done
+  if grep -qiE ' Ready' <<<"$rack"; then result trays-rack PASS "rack $rack, after its maintenance (ConfigureNmxCluster on the twin's RMS) and validation (out/racks.json)"
+  else result trays-rack FAIL "rack ${rack:-a03 not listed} (out/racks.json)"; fi
+  # NICo's own record of the domain: each tray's nvlink_info, its domain UUID from NMX-C
+  local dom want_dom
+  dom=$(docker exec "$PG" psql -U postgres -d postgres -Atc "select distinct nvlink_info->>'domain_uuid' from machines where nvlink_info is not null" 2>/dev/null | paste -sd, -)
+  want_dom=$(jq -r '.[0].domainUuid // empty' "$STATE/nmxc-endpoints.json" 2>/dev/null)
+  if grep -qE 'nmxc_num_gpus: [1-9]' <<<"$nvl" && [ -n "$want_dom" ] && [ "$dom" = "$want_dom" ]; then
+    result trays-nvlink PASS "nvlink-manager read the NVLink domain from the twin's NMX-C ($nvl); every tray's domain_uuid is the twin's, $want_dom"
+  else result trays-nvlink FAIL "nvlink-manager: ${nvl:-no partition monitor pass}; trays' domain_uuid ${dom:-none}, the twin's ${want_dom:-unknown} (logs/nico-api.log)"; fi
+  twin report >"$OUT/twin-report.txt" 2>/dev/null
+  grep -A3 'nicoagent' "$OUT/twin-report.txt" | grep -m1 'reached:' | sed 's/^ *//' | while read -r l; do result trays-impersonated KNOWN "$l (out/twin-report.txt)"; done
+}
+
 step_report() {
   say "results"
   if command -v column >/dev/null; then column -t -s $'\t' "$RESULTS" | sed 's/^/  /'; else sed 's/^/  /' "$RESULTS"; fi
@@ -890,7 +1048,7 @@ step_down() {
   local p
   for p in "$WORK"/*.pid; do [ -f "$p" ] && stop_bg "$(basename "$p" .pid)"; done
   docker rm -f "$PG" "$VAULT" >/dev/null 2>&1 || true
-  if [ -f "$WORK/ready-mode" ] && [ "$uname_s" = Linux ]; then sudo -n ip netns del "$SVC_NS" 2>/dev/null || true; fi
+  if { [ -f "$WORK/ready-mode" ] || [ -f "$WORK/trays-mode" ]; } && [ "$uname_s" = Linux ]; then sudo -n ip netns del "$SVC_NS" 2>/dev/null || true; fi
   echo "  stopped processes; removed containers $PG $VAULT${READY:+ and the namespace $SVC_NS}"
 }
 
@@ -904,12 +1062,21 @@ if [ "${steps[0]}" = ready ]; then
   touch "$WORK/ready-mode"   # a WORK the Ready path used stays on it, step by step
   steps=(fetch boot build up pxe nico load dhcp host report down)
 fi
+# (a pipeline name alone runs the whole path; among other steps, `trays` is the one step)
+if [ "${steps[0]}" = trays ] && [ ${#steps[@]} -eq 1 ]; then
+  TRAYS=1
+  touch "$WORK/trays-mode"
+  steps=(fetch boot build up pxe nico load dhcp trays report down)
+fi
 [ -f "$WORK/ready-mode" ] && READY=1
+[ -f "$WORK/trays-mode" ] && TRAYS=1
 for s in "${steps[@]}"; do
   case $s in
     help) sed -n '2,/^set -uo pipefail/p' "$0" | sed '$d'; exit 0;;
     fetch|build|classify|up|nico|load|dhcp|discover|health|faults|consumer|report|down) "step_$s";;
-    boot|pxe|host) READY=1; touch "$WORK/ready-mode"; "step_$s";;
+    trays) TRAYS=1; touch "$WORK/trays-mode"; step_trays;;
+    boot|pxe) trays || { READY=1; touch "$WORK/ready-mode"; }; "step_$s";;
+    host) READY=1; touch "$WORK/ready-mode"; "step_$s";;
     *) die "unknown step $s";;
   esac
 done

@@ -10,7 +10,7 @@ import (
 )
 
 // The iPXE subset the stacks emit (05 — The boot walk): set, clear, isset, iseq, goto and
-// :labels, chain, kernel, initrd, imgfetch (and module, imgselect, imgexec), boot; echo, sleep
+// :labels, chain, kernel, initrd, imgfetch (and module, imgselect, imgexec), boot, time, sanboot of the local disk; echo, sleep
 // and the network commands are accepted and do nothing, because the walker has already done
 // what they would. Semantics follow iPXE's shell: `a || b` runs b when a fails, `a && b` when
 // it succeeds, a line whose last command fails ends the script (so the iPXE idiom
@@ -35,6 +35,9 @@ type ipxeResult struct {
 	Reason    string
 	Artifacts []artifact
 	Scripts   []string
+	// Cmdline is the arguments the last `kernel` command gave its image (iPXE passes them to it
+	// as its command line).
+	Cmdline string
 }
 
 type ipxeRun struct {
@@ -51,6 +54,20 @@ const maxIPXEOps = 100000
 func isIPXEScript(b []byte) bool {
 	return bytes.HasPrefix(bytes.TrimLeft(b, " \t\r\n\ufeff"), []byte("#!ipxe"))
 }
+
+// IPXEResult, IPXEFetch, RunIPXE and IsIPXEScript are the interpreter for a stand-in that boots
+// what a script names on its own network path (the nicoagent impersonators, D55), rather than the
+// walker's.
+type (
+	IPXEResult = ipxeResult
+	IPXEFetch  = ipxeFetch
+)
+
+func RunIPXE(ctx context.Context, script []byte, base *url.URL, vars map[string]string, fetch IPXEFetch) IPXEResult {
+	return runIPXE(ctx, script, base, vars, fetch)
+}
+
+func IsIPXEScript(b []byte) bool { return isIPXEScript(b) }
 
 // runIPXE interprets a script fetched from base.
 func runIPXE(ctx context.Context, script []byte, base *url.URL, vars map[string]string, fetch ipxeFetch) ipxeResult {
@@ -267,6 +284,12 @@ func (r *ipxeRun) command(ctx context.Context, c []string, base *url.URL) (ok bo
 	}
 	cmd, rest := args[0], args[1:]
 	switch cmd {
+	case "time":
+		// `time <command>` runs the command and prints how long it took
+		if len(c) < 2 {
+			return false, "", false, nil
+		}
+		return r.command(ctx, c[1:], base)
 	case "set":
 		if len(rest) == 0 {
 			return false, "", false, nil
@@ -317,6 +340,7 @@ func (r *ipxeRun) command(ctx context.Context, c []string, base *url.URL) (ok bo
 		switch cmd {
 		case "kernel":
 			r.image = u.String()
+			r.res.Cmdline = strings.Join(pos[1:], " ")
 		case "chain", "imgexec":
 			if isIPXEScript(body) {
 				r.script(ctx, string(body), u)
@@ -361,6 +385,15 @@ func (r *ipxeRun) command(ctx context.Context, c []string, base *url.URL) (ok bo
 		return true, "", false, nil
 	case "exit":
 		return false, "", false, &stopErr{"script", "exit: iPXE returns to the firmware"}
+	case "sanboot":
+		// with no root path (or --drive), iPXE boots a local disk: the firmware's next option, as
+		// exit does (NICo's script for a DPU past discovery, `sanboot --no-describe --drive 0x80`)
+		for _, a := range rest {
+			if strings.Contains(a, "://") {
+				return false, "", false, &stopErr{"script", "sanboot of a SAN target (" + a + ") is not implemented"}
+			}
+		}
+		return false, "", false, &stopErr{"script", "exit (sanboot): iPXE boots the local disk"}
 	case "reboot", "poweroff":
 		return false, "", false, &stopErr{"script", cmd + " requested by the script"}
 	case "shell", "login", "config":

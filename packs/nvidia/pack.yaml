@@ -14,4 +14,10 @@ spec:
     - name: nico-nmxc-proto
       licence: "NVIDIA proprietary (LicenseRef-NvidiaProprietary); obtained, not redistributed"
       obtain: { source: "https://github.com/dsx-ai-factory/infra-controller", ref: 02b92f18fed776c8ef0056803338707c5e6bcb6b, path: crates/rpc/proto, files: [nmx_c.proto] }
+    # NICo's Forge API (forge.proto and what it imports), which the nicoagent impersonators
+    # compile at run time to speak as NICo's DPU image, DPU agent and scout do (D55). Obtained at the
+    # commit the twin is run against, like NMX-C's; nothing generated from it is committed.
+    - name: nico-forge-proto
+      licence: Apache-2.0
+      obtain: { source: "https://github.com/dsx-ai-factory/infra-controller", ref: 02b92f18fed776c8ef0056803338707c5e6bcb6b, path: crates/rpc/proto, files: [forge.proto, common.proto, console_log.proto, dns.proto, health.proto, machine_discovery.proto, measured_boot.proto, mlx_device.proto, scout_firmware_upgrade.proto, site_explorer.proto, codegen/v1/derive.proto, codegen/v1/extern_path.proto, codegen/v1/rust_type.proto] }
   isNot: ["Profiles are written from public documentation and NICo's captured mockups; none is checked against hardware yet (ledger: documentation)."]

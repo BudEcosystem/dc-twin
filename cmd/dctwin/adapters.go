@@ -10,6 +10,7 @@ import (
 	_ "github.com/BudEcosystem/dc-twin/internal/adapter/kwok"
 	_ "github.com/BudEcosystem/dc-twin/internal/adapter/metrics"
 	_ "github.com/BudEcosystem/dc-twin/internal/adapter/netsim/tap" // the TAP substrate (Linux; D20)
+	_ "github.com/BudEcosystem/dc-twin/internal/adapter/nicoagent"  // NICo's DPU software and scout, impersonated, for model devices (D55)
 	_ "github.com/BudEcosystem/dc-twin/internal/adapter/nmxc"
 	_ "github.com/BudEcosystem/dc-twin/internal/adapter/nvue"
 	_ "github.com/BudEcosystem/dc-twin/internal/adapter/redfish"

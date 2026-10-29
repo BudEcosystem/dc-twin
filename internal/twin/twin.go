@@ -255,6 +255,13 @@ func UpEstate(est *schema.Estate, file string, reg *pack.Registry, opt Options) 
 	}
 	rt := &adapter.Runtime{Engine: eng, Reg: reg, Net: n, StateDir: opt.StateDir, Assets: AssetsDir(), Log: opt.Log, Outputs: outputs, AllowTCG: opt.AllowTCG, Claims: claims}
 	t := &Twin{Estate: est, File: file, Engine: eng, Reg: reg, Net: n, Lock: res.Lock, Warnings: warnings, Runtime: rt}
+	// Peer is read from adapters' goroutines while later adapters are still starting.
+	var peersMu sync.Mutex
+	rt.Peer = func(name string) adapter.Adapter {
+		peersMu.Lock()
+		defer peersMu.Unlock()
+		return t.Adapter(name)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	t.cancel = cancel
 	if substrate != "" {
@@ -278,7 +285,9 @@ func UpEstate(est *schema.Estate, file string, reg *pack.Registry, opt Options) 
 			t.Down()
 			return nil, fmt.Errorf("adapter %s: %w", name, err)
 		}
+		peersMu.Lock()
 		t.Adapters = append(t.Adapters, a)
+		peersMu.Unlock()
 	}
 	eng.Start()
 	_ = n.Write()

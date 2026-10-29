@@ -11,6 +11,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -212,7 +213,6 @@ func (a *Adapter) seed(b *bmc) {
 	}
 	if spec.System != "" {
 		if sys, ok := b.tree.get(spec.System); ok {
-			seededFW := map[string]bool{}
 			a.eng.Seed(b.dev.Path, "boot, secure boot and firmware seeded from the captured tree", func(d *model.Device) {
 				if boot, ok := sys["Boot"].(map[string]any); ok {
 					if order, ok := boot["BootOrder"].([]any); ok {
@@ -232,14 +232,15 @@ func (a *Adapter) seed(b *bmc) {
 					}
 				}
 				// the captured firmware versions are this device's baseline, so every resource that
-				// repeats a version (inventory, component integrity) agrees until an update lands
-				for id, comp := range spec.Firmware {
-					if fwDoc, ok := b.tree.get("/redfish/v1/UpdateService/FirmwareInventory/" + id); ok {
-						if v, ok := fwDoc["Version"].(string); ok && v != "" {
-							if fw := d.State.Firmware[comp]; fw != nil && !seededFW[comp] {
-								fw.Version, fw.Baseline = v, v
-								seededFW[comp] = true
-							}
+				// repeats a version (inventory, component integrity) agrees until an update lands;
+				// a dialect presenting another product's capture keeps the profile's (D35). A
+				// component the capture holds at more than one level (one GB200 GPU's firmware is at
+				// another level than its siblings') keeps the profile's too: the model holds one
+				// level for it, and which member came first would otherwise decide it.
+				if !spec.FirmwareFromProfile {
+					for comp, v := range capturedFirmware(spec.Firmware, b.tree) {
+						if fw := d.State.Firmware[comp]; fw != nil {
+							fw.Version, fw.Baseline = v, v
 						}
 					}
 				}
@@ -493,4 +494,35 @@ func (a *Adapter) Get(devicePath, resourcePath string) (map[string]any, bool) {
 	}
 	rd := &renderer{b: b, snap: b.snapshot()}
 	return b.backend.render(rd, normalise(resourcePath))
+}
+
+// capturedFirmware is each firmware component's captured level, by the inventory members the
+// dialect binds to it, for the components whose members all report one level.
+func capturedFirmware(bind map[string]string, t *tree) map[string]string {
+	ids := make([]string, 0, len(bind))
+	for id := range bind {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	levels := map[string]string{}
+	mixed := map[string]bool{}
+	for _, id := range ids {
+		comp := bind[id]
+		doc, ok := t.get("/redfish/v1/UpdateService/FirmwareInventory/" + id)
+		if !ok {
+			continue
+		}
+		v, _ := doc["Version"].(string)
+		if v == "" {
+			continue
+		}
+		if prev, seen := levels[comp]; seen && prev != v {
+			mixed[comp] = true
+		}
+		levels[comp] = v
+	}
+	for comp := range mixed {
+		delete(levels, comp)
+	}
+	return levels
 }

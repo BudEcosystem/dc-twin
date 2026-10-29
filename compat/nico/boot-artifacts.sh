@@ -28,7 +28,7 @@
 #
 # Environment: NICO_SRC (required: the extracted infra-controller tree at the pin), OUT (default
 # $WORK/boot), WORK (default ${TMPDIR:-/tmp}/dctwin-nico), JOBS [4], BUILD_MEMORY (a memory limit
-# for the build container; none by default), RUST_PACKAGES, RUST_BINS, RUST_FEATURES_ARGS.
+# for the build container; none by default), BUILD_CPUS (a CPU limit for it), RUST_PACKAGES, RUST_BINS, RUST_FEATURES_ARGS.
 set -uo pipefail
 
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -37,6 +37,7 @@ WORK=${WORK%/}
 OUT=${OUT:-$WORK/boot}
 JOBS=${JOBS:-4}
 BUILD_MEMORY=${BUILD_MEMORY:-}
+BUILD_CPUS=${BUILD_CPUS:-}   # a CPU limit for the build container (docker --cpus); none by default
 C=dctwin-nico-build
 IMG=dctwin-nico-image
 VOL=dctwin-nico-build
@@ -74,11 +75,12 @@ step_up() {
   say "build container $C (ubuntu:24.04 $DEB${BUILD_MEMORY:+, memory limit $BUILD_MEMORY}), volume $VOL"
   docker container inspect "$C" >/dev/null 2>&1 && { echo "  $C is running"; return; }
   docker volume create "$VOL" >/dev/null
-  docker run -d --name "$C" --platform "linux/$DEB" ${BUILD_MEMORY:+--memory "$BUILD_MEMORY" --memory-swap "$BUILD_MEMORY"} \
+  docker run -d --name "$C" --platform "linux/$DEB" ${BUILD_MEMORY:+--memory "$BUILD_MEMORY" --memory-swap "$BUILD_MEMORY"} ${BUILD_CPUS:+--cpus "$BUILD_CPUS"} \
     -v "$VOL:/work" "$BASE" sleep infinity >/dev/null || die "docker run"
   # NICo's source, without build output, read from /src in the container
   inside 'mkdir -p /src /work/out'
-  tar -C "$NICO_SRC" --exclude ./target --exclude ./.git -cf - . | docker exec -i "$C" tar -C /src -xf - || die "copy the source in"
+  # (COPYFILE_DISABLE: macOS's tar would add AppleDouble ._ files, which sqlx reads as migrations)
+  COPYFILE_DISABLE=1 tar -C "$NICO_SRC" --exclude ./target --exclude ./.git --exclude '._*' -cf - . | docker exec -i "$C" tar -C /src -xf - || die "copy the source in"
   inside 'export DEBIAN_FRONTEND=noninteractive; apt-get update -qq &&
     apt-get install -y -qq --no-install-recommends build-essential pkg-config cmake clang libclang-dev git curl ca-certificates \
       libudev-dev libtss2-dev protobuf-compiler libprotobuf-dev libssl-dev liblzma-dev perl systemd-ukify systemd-boot-efi \

@@ -78,6 +78,12 @@ type Uplink struct {
 	wmu    sync.Mutex
 
 	ToSite, FromSite, Unresolved, NoHost, Connects atomic.Int64
+	// EndpointFlows counts TCP connections from the site network to estate endpoints, and
+	// EndpointRefused those to a site address nothing serves.
+	EndpointFlows, EndpointRefused atomic.Int64
+
+	siteRoutes func() map[string]string
+	ep         *endpointRouter
 }
 
 // NewUplink starts the router's interface on a site network and dials its link.
@@ -177,9 +183,13 @@ func (u *Uplink) frame(b []byte) {
 		}
 		dst := netip.AddrFrom4([4]byte(ip[16:20]))
 		u.mu.Lock()
-		hp := u.hosts[dst]
+		hp, ep := u.hosts[dst], u.ep
 		u.mu.Unlock()
 		if hp == nil {
+			if ep != nil && ip[9] == 6 && ep.routes(dst) {
+				ep.inject(ip) // TCP to an estate endpoint at its site address
+				return
+			}
 			u.NoHost.Add(1)
 			return
 		}
@@ -309,6 +319,11 @@ func decTTL(ip []byte) bool {
 func (u *Uplink) Close() error {
 	u.once.Do(func() {
 		close(u.closed)
+		u.mu.Lock()
+		if u.ep != nil {
+			u.ep.close()
+		}
+		u.mu.Unlock()
 		u.mu.Lock()
 		if u.conn != nil {
 			u.conn.Close()

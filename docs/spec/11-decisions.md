@@ -278,7 +278,13 @@ bound serial, UUID and BMC MAC become the device's), overlays, component, sensor
 an action map, seeded accounts, boot order, Secure Boot state and firmware versions, and **the
 captured answers to writes** (`patch_response.json`: status, headers such as a job `Location`,
 body) replayed with the job recorded as a model task. A dialect's factory user is the capture's
-admin account. **Closes:** Q2 (the core's engine stands; `bmc-mock` is not wrapped) and Q19 (every
+admin account. *Clarified (2026-10-29), firmware:* a dialect over its own product's capture serves
+the capture's firmware levels, and every profile that uses it states those levels as its
+baselines; a dialect that presents another product's capture (`nvidia/gb300-bmc` over the GB200
+capture) sets `firmwareFromProfile`, and its devices serve their profile's baselines, the
+capture's levels being another product's. Either way a profile's firmware list is what its
+device's FirmwareInventory reports until an update lands (`TestDevicesServeTheirProfilesFirmware`);
+found when the GB tray, BlueField-3 and DL385 profiles stated levels their BMCs did not serve. **Closes:** Q2 (the core's engine stands; `bmc-mock` is not wrapped) and Q19 (every
 NVIDIA and OEM capture at once; libredfish's integration suite is the completeness test).
 **Reversed if:** a vendor's capture cannot be redistributed or obtained; that dialect falls back to
 the generated DMTF tree, labelled. *Amended after running NICo, Ironic and libredfish against the
@@ -933,3 +939,79 @@ the Ingress puts in front is enough for a twin that drives no real hardware. **A
 control zone on no twin network: in a cluster it is on the cluster network, closed by the
 NetworkPolicy). **Reversed if:** OIDC (15's shared mode) is built; then a remote API takes users
 and roles, not one token.
+
+### D55 — NICo's software on a model machine is impersonated on the machine's own network path
+At `model` fidelity a BlueField and a host run no OS, so NICo holds every managed host it ingests
+at `DPUInitializing/Init`, waiting for the DPU's discovery, and nothing after it (host discovery,
+Ready, the rack's maintenance, the NVLink domain) can be tested with NICo on a rack of `model`
+trays. The `nicoagent` adapter stands in for what NICo runs on its machines, when the estate
+enables the stack's impersonators (D24; the run is labelled impersonated): `nico-dpu-agent` for
+every BlueField at `model` (NICo's DPU image and the installed DPU OS's forge-dpu-agent), and
+`nico-scout` for every host at `model` (scout). Each machine follows its power: a power-on or a
+reset (the engine's events, so NICo's own restarts through the BMC drive it) starts a boot, a
+power-off ends what runs.
+
+**The boot** is the machine's UEFI HTTP boot: DHCP as an HTTP client of its architecture
+(option 60 in EDK2's five fields, `HTTPClient:Arch:<arch>:UNDI:003000`; NICo's DHCP server offers
+any other shape no boot URI), the iPXE the server names fetched and the script built into it run
+(NICo embeds its own; one the server names instead when the image has none) by the boot walker's
+interpreter, with the machine's SMBIOS as iPXE's settings. It ends at the kernel NICo's boot
+service names, at `exit`, or at `sanboot` of a local drive (NICo's answer to a DPU past discovery),
+the latter two booting the machine's disk; a boot that fails before any answer (no DHCP offer, a
+service down) is tried again after a pause, as UEFI cycles its boot options. The boot walker leaves
+a host the adapter boots alone (`Runtime.ClaimBoot`).
+
+**A DPU**, at `carbide.efi`, fetches the root CA from `pxe_uri` and calls `DiscoverMachine`
+(reporter DPU_AGENT, the `machine_id` interface from the command line, a BlueField-3's hardware
+with the identity the DPU's BMC serves: its system serial as the DMI product serial with the two
+placeholder serials a BlueField's DMI carries, from which NICo derives the machine id its site
+explorer derived from the BMC, and `BaseMAC` as the factory MAC, by which NICo pairs the DPU with
+its host), retried while NICo does not yet know the machine; then, as the installed OS's agent,
+over mutual TLS with the machine certificate it was issued, `ForgeAgentControl`
+(`DiscoveryCompleted` when told to finish discovery) and `GetManagedHostNetworkConfig` with
+`RecordDpuNetworkStatus` reporting the configuration's version applied and the DPU healthy. From
+its disk it runs the agent again, once NICo's image has run on it (what it installed is kept in the
+adapter's state directory). The agent also answers its host's DHCP, as the forge-dhcp-server it
+runs does: the interface NICo configured for the host (the admin interface, NICo's `addresses`
+entry: the address, the gateway CIDR, the segment), the boot URI for an HTTP client (the
+interface's, else NICo's iPXE on NICo's PXE service), as the `netsim.PortRelay` of the host's port.
+
+**A host** boots through its DPU when the DPU is impersonated (the host PF's MAC, its DPU's
+`BaseMAC`, out of the DPU's data port), else on its own provisioning port through the twin relay.
+At `scout.efi`, scout calls `DiscoverMachine` (reporter SCOUT) with the host's SMBIOS identity as
+the `vm` adapter gives a `vm` host's firmware (the profile's manufacturer and product, the device's
+serial and UUID), a TPM EK certificate kept for the host and signed by the estate CA (which the
+stack loads as its TPM vendors' CA; NICo derives the host's machine id from it), its boot NIC, and
+its GPUs with the NVLink placement NVML reports, from package `nvl` so that it is what the twin's
+NMX-C and RMS report for the same GPUs (the rack's chassis serial, the tray's slot and index, each
+GPU's fabric GUID); then `RebootCompleted`, and `ForgeAgentControl` until the host resets:
+`DiscoveryCompleted`, `CleanupMachineCompleted` (every step OK: nothing is wiped),
+`MachineValidationCompleted` (nothing runs).
+
+**The network path** is the machine's own: a userspace NIC (gVisor's netstack) cabled in memory
+to a `netsim.HostPort` at the machine's switch port (a DPU's BMC port, as a second client behind it
+by the MAC the BMC serves for `oob0`, D52's relay), so NICo's DHCP server sees the machine's MAC
+with the port's circuit id and its TCP is routed from its own address: at L3 on the stack's routed
+site network (D48; the vm adapter's uplink when it runs), else through the gateway's proxy from
+this host's loopback address, which a service that identifies its client by address (carbide-pxe,
+`DiscoverMachine`) does not know, as the report says. The routed site network also carries the
+namespace's TCP to estate endpoints at their site addresses (`Uplink.SetSiteRoutes`: the router
+terminates it and connects to where the twin serves the address), so NICo's nvlink-manager reaches
+a switch tray's NMX-C at its NVOS lease. The Forge API is compiled at start from NICo's protos,
+obtained at the pinned commit (`nico-forge-proto`; D13 as for NMX-C's). The only model state the
+adapter changes is the machines' boot progress, as an observer (`SetBooted`).
+
+**What a site configures around it.** NICo's DPU image installs the firmware its BlueField bundle
+carries, and an operator keeps NICo's `dpu_models` catalog in step with that bundle; the image is
+impersonated and installs nothing, so the trays path's NICo configuration names the firmware the
+estate's BlueFields run (read from the twin) as the bundle's.
+
+**Why:** NICo's state machine past DPU discovery, its rack maintenance and its NVLink partitioning,
+and everything Foundry and the console do with a rack NICo makes Ready, are the behaviour under
+test; the machines' own software is not, and `vm` machines cannot carry it at rack scale (4 GB a
+DPU, a 64K-page image Apple's hypervisor cannot run, a DPU agent that stops at the ConnectX QEMU
+does not have, and a tray of GPUs QEMU does not have). machine-a-tron run beside the twin would
+replace the twin's BMCs, switches and power shelves with its own mocks and discover from one
+address with `allow_insecure_discovery`; the stand-ins keep the estate's BMCs and each machine's
+own address. **Refines:** D24, D48, D52. **Reversed if:** `vm` machines run NICo's DPU image,
+agent and scout at the scale of a rack (Q1).

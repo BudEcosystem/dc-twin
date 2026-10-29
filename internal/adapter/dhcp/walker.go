@@ -54,8 +54,8 @@ type walkRecord struct {
 }
 
 func (a *Adapter) onBoot(d *model.Device, target string) {
-	if a.stopped.Load() {
-		return
+	if a.stopped.Load() || a.rt.BootClaim(d.Path) != "" {
+		return // an impersonator boots this host itself (D55)
 	}
 	ctx, cancel := context.WithCancel(a.ctx)
 	a.mu.Lock()
@@ -94,9 +94,12 @@ func pxeArch(archName string, httpBoot bool) iana.Arch {
 	return iana.EFI_X86_64
 }
 
+// vendorClassFor is option 60 as EDK2 (and iPXE) send it: "<PXEClient|HTTPClient>:Arch:<arch>:UNDI:
+// <major><minor>", five fields for HTTP boot as for PXE (EDK2's HttpBootDxe; NICo's DHCP server
+// reads any other shape as an unknown client and offers it no boot URI, found on the trays path).
 func vendorClassFor(archName string, httpBoot bool, undi string) string {
 	if httpBoot {
-		return fmt.Sprintf("HTTPClient:Arch:%05d", pxeArch(archName, true))
+		return fmt.Sprintf("HTTPClient:Arch:%05d:UNDI:%s", pxeArch(archName, true), undi)
 	}
 	return fmt.Sprintf("PXEClient:Arch:%05d:UNDI:%s", pxeArch(archName, false), undi)
 }

@@ -9,6 +9,7 @@ import (
 	"errors"
 	"log/slog"
 	"strings"
+	"sync"
 
 	"github.com/BudEcosystem/dc-twin/internal/adapter/netsim"
 	"github.com/BudEcosystem/dc-twin/internal/engine"
@@ -33,6 +34,30 @@ type Runtime struct {
 	// up decided (ClaimSubstrate). A substrate adapter plans only the devices claimed for it
 	// (Runs), so no device is planned by two. Nil when the Runtime was not made by up.
 	Claims map[string]string
+	// Peer returns another running adapter by name (nil when it is not enabled or has not
+	// started): a stand-in reads what its device's BMC serves from the redfish adapter.
+	Peer func(name string) Adapter
+
+	bootMu sync.Mutex
+	boots  map[string]string
+}
+
+// ClaimBoot records that adapter name boots the model host at path itself (an impersonator's
+// firmware, D55), so the boot walker leaves it alone.
+func (rt *Runtime) ClaimBoot(path, name string) {
+	rt.bootMu.Lock()
+	defer rt.bootMu.Unlock()
+	if rt.boots == nil {
+		rt.boots = map[string]string{}
+	}
+	rt.boots[path] = name
+}
+
+// BootClaim is the adapter that boots the model host at path itself, or "".
+func (rt *Runtime) BootClaim(path string) string {
+	rt.bootMu.Lock()
+	defer rt.bootMu.Unlock()
+	return rt.boots[path]
 }
 
 // Runs reports whether the substrate adapter name runs the device at path: whether up claimed the

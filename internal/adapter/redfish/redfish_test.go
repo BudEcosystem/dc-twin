@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -521,6 +522,38 @@ func TestDPUMACsAreTheirOwn(t *testing.T) {
 	}
 }
 
+// A GB tray boots from its DPU by the DPU's host PF MAC: the tray's UEFI network boot options
+// for its BlueField name the BaseMAC that DPU's own BMC serves, in the option's name and in its
+// device path alike (NICo's set_boot_order_dpu_first matches "UEFI HTTPv4 (MAC:<BaseMAC>)").
+func TestTrayBootsFromItsDPUByTheDPUsMAC(t *testing.T) {
+	tw, a := up(t)
+	for _, p := range []string{"site-1/hall-a/a01/compute-tray-01", "site-1/hall-a/a01/compute-tray-02"} {
+		var oem struct{ BaseMAC string }
+		getJSON(t, a, dev(tw, p+"/bf3-0"), "/redfish/v1/Systems/Bluefield/Oem/Nvidia", &oem)
+		want := strings.ToUpper(oem.BaseMAC)
+		d := dev(tw, p)
+		found := false
+		for _, id := range []string{"Boot000B", "Boot000C", "Boot000D", "Boot000E"} {
+			var bo struct{ DisplayName, UefiDevicePath string }
+			getJSON(t, a, d, "/redfish/v1/Systems/System_0/BootOptions/"+id, &bo)
+			if !strings.Contains(bo.DisplayName, "(MAC:"+want+")") || !strings.Contains(bo.UefiDevicePath, "MAC("+want+",") {
+				t.Errorf("%s %s: %q %q, want its DPU's host PF %s in both", p, id, bo.DisplayName, bo.UefiDevicePath, want)
+			}
+			found = found || strings.HasPrefix(bo.DisplayName, "UEFI HTTPv4")
+		}
+		if !found {
+			t.Errorf("%s: no UEFI HTTPv4 option for its DPU", p)
+		}
+		// the tray's other NICs keep one derived MAC in name and path
+		var usb struct{ DisplayName, UefiDevicePath string }
+		getJSON(t, a, d, "/redfish/v1/Systems/System_0/BootOptions/Boot0005", &usb)
+		i := strings.Index(usb.DisplayName, "(MAC:")
+		if i < 0 || !strings.Contains(usb.UefiDevicePath, "MAC("+usb.DisplayName[i+5:i+17]+",") || strings.Contains(usb.DisplayName, "EEA3AB6B5303") {
+			t.Errorf("%s Boot0005: %q %q, want the same derived MAC in both", p, usb.DisplayName, usb.UefiDevicePath)
+		}
+	}
+}
+
 // behaviourPost is a profile's boot.postSeconds (0 when it has none).
 func behaviourPost(d *model.Device) float64 {
 	if b, ok := d.Profile.Spec.Behaviours["boot"]; ok {
@@ -604,4 +637,76 @@ func TestFirmwareTaskAbortedByBMCReset(t *testing.T) {
 			}
 		}
 	})
+}
+
+// A device serves the firmware levels its profile states (D35): a dialect over its own product's
+// capture serves the capture's levels, which every profile on it states as its baselines, and a
+// dialect presenting another product's capture (the GB300 BMC over the GB200 capture) serves the
+// profile's. So a profile's firmware list is what a reader of the device's FirmwareInventory finds.
+func TestDevicesServeTheirProfilesFirmware(t *testing.T) {
+	reg, err := compile.Registry()
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := map[string]bool{}
+	for _, estate := range []string{"lab-model.yaml", "nvl72-nico.yaml", "mixed-hall.yaml", "oracle-libredfish.yaml"} {
+		est, _, err := compile.LoadEstate("../../../examples/estates/" + estate)
+		if err != nil {
+			t.Fatal(err)
+		}
+		tw, err := twin.UpEstate(est, "", reg, twin.Options{StateDir: t.TempDir(), Adapters: []string{"redfish"}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		a := tw.Adapter("redfish").(*rfa.Adapter)
+		checked := map[string]bool{} // one device per profile
+		for _, d := range tw.Engine.M.Devices {
+			if !d.HasBMC() || checked[d.ProfileName] {
+				continue
+			}
+			spec, _ := reg.Dialect(d.Dialect)
+			if spec == nil || spec.Spec.Backend != "mockup" {
+				continue
+			}
+			checked[d.ProfileName] = true
+			seen[d.ProfileName] = true
+			baseline := map[string]string{}
+			for _, fw := range d.Profile.Spec.Firmware {
+				baseline[fw.Component] = fw.Baseline
+			}
+			for id, comp := range spec.Spec.Firmware {
+				want, listed := baseline[comp]
+				doc, ok := a.Get(d.Path, "/redfish/v1/UpdateService/FirmwareInventory/"+id)
+				if !listed || !ok {
+					continue
+				}
+				if got, _ := doc["Version"].(string); got != want {
+					t.Errorf("%s (%s, dialect %s): %s serves %q, its profile's %s baseline is %q", estate, d.ProfileName, d.Dialect, id, got, comp, want)
+				}
+			}
+		}
+		tw.Down()
+	}
+	// the GB200 capture holds its GPUs' firmware at two levels (HGX_FW_GPU_1 differs), so the
+	// tray keeps its profile's level whichever member a map ranges over first
+	for _, p := range []string{"nvidia/gb200-compute-tray", "nvidia/gb300-compute-tray", "nvidia/bluefield-3"} {
+		if !seen[p] {
+			t.Errorf("no estate checked %s", p)
+		}
+	}
+}
+
+// A GB tray's GPU firmware inventory reports the model's GPUs (the capture has it Absent).
+func TestGBTrayGPUFirmwareFollowsItsGPUs(t *testing.T) {
+	tw, a := up(t)
+	d := dev(tw, "site-1/hall-a/a01/compute-tray-01")
+	for i := 0; i < 4; i++ {
+		for _, id := range []string{"HGX_FW_GPU_", "HGX_InfoROM_GPU_"} {
+			doc, ok := a.Get(d.Path, "/redfish/v1/UpdateService/FirmwareInventory/"+id+strconv.Itoa(i))
+			st, _ := doc["Status"].(map[string]any)
+			if !ok || st["State"] != "Enabled" || st["Health"] != "OK" {
+				t.Errorf("%s%d: status %v", id, i, st)
+			}
+		}
+	}
 }

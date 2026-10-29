@@ -391,6 +391,9 @@ func (r *Registry) Dialect(name string) (*schema.RedfishDialect, []string) {
 	if c.Factory.User != "" {
 		s.Factory = c.Factory
 	}
+	if c.FirmwareFromProfile {
+		s.FirmwareFromProfile = true
+	}
 	if len(c.Bind) > 0 {
 		s.Bind = c.Bind
 	}
