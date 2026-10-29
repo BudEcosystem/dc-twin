@@ -74,8 +74,8 @@ spec:
     - { name: gpu-max, quantity: temperature, unit: C, warn: 85, crit: 95, source: accelerator-max }
     - { name: power, quantity: power, unit: W, source: power }
   firmware:
-    - { component: bmc, baseline: "24.09.10", applyOn: reset }
-    - { component: bios, baseline: "1.06.02", applyOn: reset }
+    - { component: bmc, baseline: "23.11.21", applyOn: reset }
+    - { component: bios, baseline: "01.01.03", applyOn: reset }
     - { component: cpld, baseline: "0.2.1.8", applyOn: reset }   # CPLDMB_0, as the captured DGX has it
   behaviours: { power: { onSeconds: 60, offSeconds: 15 }, bmc: { bootSeconds: 90 } }
   faults: [generic/power, generic/bmc, generic/thermal, generic/link, generic/firmware, nvidia/xid]

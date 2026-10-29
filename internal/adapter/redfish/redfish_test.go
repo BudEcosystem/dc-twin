@@ -648,7 +648,8 @@ func TestDevicesServeTheirProfilesFirmware(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, estate := range []string{"lab-model.yaml", "nvl72-nico.yaml", "mixed-hall.yaml"} {
+	seen := map[string]bool{}
+	for _, estate := range []string{"lab-model.yaml", "nvl72-nico.yaml", "mixed-hall.yaml", "oracle-libredfish.yaml"} {
 		est, _, err := compile.LoadEstate("../../../examples/estates/" + estate)
 		if err != nil {
 			t.Fatal(err)
@@ -668,6 +669,7 @@ func TestDevicesServeTheirProfilesFirmware(t *testing.T) {
 				continue
 			}
 			checked[d.ProfileName] = true
+			seen[d.ProfileName] = true
 			baseline := map[string]string{}
 			for _, fw := range d.Profile.Spec.Firmware {
 				baseline[fw.Component] = fw.Baseline
@@ -684,6 +686,13 @@ func TestDevicesServeTheirProfilesFirmware(t *testing.T) {
 			}
 		}
 		tw.Down()
+	}
+	// the GB200 capture holds its GPUs' firmware at two levels (HGX_FW_GPU_1 differs), so the
+	// tray keeps its profile's level whichever member a map ranges over first
+	for _, p := range []string{"nvidia/gb200-compute-tray", "nvidia/gb300-compute-tray", "nvidia/bluefield-3"} {
+		if !seen[p] {
+			t.Errorf("no estate checked %s", p)
+		}
 	}
 }
 
