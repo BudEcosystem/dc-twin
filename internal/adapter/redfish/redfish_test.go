@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -636,4 +637,67 @@ func TestFirmwareTaskAbortedByBMCReset(t *testing.T) {
 			}
 		}
 	})
+}
+
+// A device serves the firmware levels its profile states (D35): a dialect over its own product's
+// capture serves the capture's levels, which every profile on it states as its baselines, and a
+// dialect presenting another product's capture (the GB300 BMC over the GB200 capture) serves the
+// profile's. So a profile's firmware list is what a reader of the device's FirmwareInventory finds.
+func TestDevicesServeTheirProfilesFirmware(t *testing.T) {
+	reg, err := compile.Registry()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, estate := range []string{"lab-model.yaml", "nvl72-nico.yaml", "mixed-hall.yaml"} {
+		est, _, err := compile.LoadEstate("../../../examples/estates/" + estate)
+		if err != nil {
+			t.Fatal(err)
+		}
+		tw, err := twin.UpEstate(est, "", reg, twin.Options{StateDir: t.TempDir(), Adapters: []string{"redfish"}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		a := tw.Adapter("redfish").(*rfa.Adapter)
+		checked := map[string]bool{} // one device per profile
+		for _, d := range tw.Engine.M.Devices {
+			if !d.HasBMC() || checked[d.ProfileName] {
+				continue
+			}
+			spec, _ := reg.Dialect(d.Dialect)
+			if spec == nil || spec.Spec.Backend != "mockup" {
+				continue
+			}
+			checked[d.ProfileName] = true
+			baseline := map[string]string{}
+			for _, fw := range d.Profile.Spec.Firmware {
+				baseline[fw.Component] = fw.Baseline
+			}
+			for id, comp := range spec.Spec.Firmware {
+				want, listed := baseline[comp]
+				doc, ok := a.Get(d.Path, "/redfish/v1/UpdateService/FirmwareInventory/"+id)
+				if !listed || !ok {
+					continue
+				}
+				if got, _ := doc["Version"].(string); got != want {
+					t.Errorf("%s (%s, dialect %s): %s serves %q, its profile's %s baseline is %q", estate, d.ProfileName, d.Dialect, id, got, comp, want)
+				}
+			}
+		}
+		tw.Down()
+	}
+}
+
+// A GB tray's GPU firmware inventory reports the model's GPUs (the capture has it Absent).
+func TestGBTrayGPUFirmwareFollowsItsGPUs(t *testing.T) {
+	tw, a := up(t)
+	d := dev(tw, "site-1/hall-a/a01/compute-tray-01")
+	for i := 0; i < 4; i++ {
+		for _, id := range []string{"HGX_FW_GPU_", "HGX_InfoROM_GPU_"} {
+			doc, ok := a.Get(d.Path, "/redfish/v1/UpdateService/FirmwareInventory/"+id+strconv.Itoa(i))
+			st, _ := doc["Status"].(map[string]any)
+			if !ok || st["State"] != "Enabled" || st["Health"] != "OK" {
+				t.Errorf("%s%d: status %v", id, i, st)
+			}
+		}
+	}
 }

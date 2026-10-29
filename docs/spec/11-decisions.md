@@ -278,7 +278,13 @@ bound serial, UUID and BMC MAC become the device's), overlays, component, sensor
 an action map, seeded accounts, boot order, Secure Boot state and firmware versions, and **the
 captured answers to writes** (`patch_response.json`: status, headers such as a job `Location`,
 body) replayed with the job recorded as a model task. A dialect's factory user is the capture's
-admin account. **Closes:** Q2 (the core's engine stands; `bmc-mock` is not wrapped) and Q19 (every
+admin account. *Clarified (2026-10-29), firmware:* a dialect over its own product's capture serves
+the capture's firmware levels, and every profile that uses it states those levels as its
+baselines; a dialect that presents another product's capture (`nvidia/gb300-bmc` over the GB200
+capture) sets `firmwareFromProfile`, and its devices serve their profile's baselines, the
+capture's levels being another product's. Either way a profile's firmware list is what its
+device's FirmwareInventory reports until an update lands (`TestDevicesServeTheirProfilesFirmware`);
+found when the GB tray, BlueField-3 and DL385 profiles stated levels their BMCs did not serve. **Closes:** Q2 (the core's engine stands; `bmc-mock` is not wrapped) and Q19 (every
 NVIDIA and OEM capture at once; libredfish's integration suite is the completeness test).
 **Reversed if:** a vendor's capture cannot be redistributed or obtained; that dialect falls back to
 the generated DMTF tree, labelled. *Amended after running NICo, Ironic and libredfish against the

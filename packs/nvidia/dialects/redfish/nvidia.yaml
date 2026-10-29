@@ -16,7 +16,9 @@ spec:
     - { path: "/redfish/v1/Chassis/Chassis_0", set: Status.HealthRollup, from: health }
     - { path: "/redfish/v1/Systems/System_0", set: Status.HealthRollup, from: health }
   components:
-    - { component: gpu, resources: ["/redfish/v1/Systems/HGX_Baseboard_0/Processors/GPU_{i}", "/redfish/v1/Chassis/HGX_GPU_{i}"] }
+    # a GPU's firmware and InfoROM inventory too: the capture has them Absent (Critical), its
+    # GPUs' firmware not reporting when it was taken; the model's GPUs report theirs
+    - { component: gpu, resources: ["/redfish/v1/Systems/HGX_Baseboard_0/Processors/GPU_{i}", "/redfish/v1/Chassis/HGX_GPU_{i}", "/redfish/v1/UpdateService/FirmwareInventory/HGX_FW_GPU_{i}", "/redfish/v1/UpdateService/FirmwareInventory/HGX_InfoROM_GPU_{i}"] }
     - { component: cpu, resources: ["/redfish/v1/Systems/System_0/Processors/CPU_{i}"] }
   # the riser BlueField-3s are the tray's DPUs: two on the captured GB200, one on a GB300 tray
   dpus: ["/redfish/v1/Chassis/Riser_Slot{n}_BlueField_3_DPU"]
@@ -53,7 +55,10 @@ spec:
   overlays:
     - { path: "/redfish/v1/Chassis/Chassis_0", set: Model, value: "NVIDIA GB300" }
     - { path: "/redfish/v1/Chassis/Chassis_0", set: Manufacturer, value: "NVIDIA" }
-  isNot: ["GB300 identity strings over the GB200 capture: Product 'GB BMC' and a Chassis_0 Model 'NVIDIA GB300', the values NICo matches on."]
+  # the capture's firmware levels are a GB200's (FW_BMC_0 GB200Nvl-24.12-8): a GB300 tray serves
+  # its profile's baselines instead (D35)
+  firmwareFromProfile: true
+  isNot: ["GB300 identity strings over the GB200 capture: Product 'GB BMC' and a Chassis_0 Model 'NVIDIA GB300', the values NICo matches on.", "Firmware levels are the GB300 profile's baselines, written from public documentation; the version strings' format is the GB200 capture's product's, not checked against a GB300 BMC."]
 ---
 apiVersion: dc-twin/v1alpha1
 kind: RedfishDialect

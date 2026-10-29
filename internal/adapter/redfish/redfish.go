@@ -232,8 +232,12 @@ func (a *Adapter) seed(b *bmc) {
 					}
 				}
 				// the captured firmware versions are this device's baseline, so every resource that
-				// repeats a version (inventory, component integrity) agrees until an update lands
+				// repeats a version (inventory, component integrity) agrees until an update lands;
+				// a dialect presenting another product's capture keeps the profile's (D35)
 				for id, comp := range spec.Firmware {
+					if spec.FirmwareFromProfile {
+						break
+					}
 					if fwDoc, ok := b.tree.get("/redfish/v1/UpdateService/FirmwareInventory/" + id); ok {
 						if v, ok := fwDoc["Version"].(string); ok && v != "" {
 							if fw := d.State.Firmware[comp]; fw != nil && !seededFW[comp] {

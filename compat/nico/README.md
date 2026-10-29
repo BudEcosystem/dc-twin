@@ -739,8 +739,10 @@ Found on the trays path ([above](#the-trays-path-a-gb300-nvl72-rack-to-ready-wit
     boot options; a DHCP server or boot service that answers late left the machine with no OS.
     **Fixed:** a boot with no answer is tried again after 30 s.
 
-Not fixed: the BlueField BMC serves the capture's firmware versions (`BF-24.10-10`, NIC
-`32.43.1008`) where the profile's baselines are `BF-24.10-16` and `32.43.1014`.
+Since fixed: the BlueField-3, GB200 tray and DL385 profiles stated firmware levels their BMCs did
+not serve (the capture seeds them); they now state the capture's, and a GB300 tray, whose BMC
+presents the GB200 capture, serves its profile's (D35, clarified). A GB tray's GPU firmware and
+InfoROM inventory reported the capture's `Absent`; it now follows the model's GPUs.
 
 ## NICo-side findings
 
