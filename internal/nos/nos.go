@@ -467,12 +467,16 @@ func (e Entry) nvueStartScript(sw Switch) string {
 	w("chown frr:frr /etc/frr/frr.conf /etc/frr/vtysh.conf")
 	w("/usr/lib/frr/frrinit.sh start")
 	w("# the DHCP relay NVUE configures: dhcrelay with the arguments its apply writes, restarted when")
-	w("# it ends (an apply that changes them ends it)")
+	w("# it ends (an apply that changes them ends it); one that ends at once is retried every 30 s,")
+	w("# its log kept to its last 200 lines")
 	w("(")
 	w("  while :; do")
 	w("    a=$(cat /run/dctwin-relay 2>/dev/null)")
-	w("    if [ -n \"$a\" ]; then dhcrelay $a </dev/null >>/var/log/dhcrelay.log 2>&1; fi")
-	w("    sleep 1")
+	w("    if [ -z \"$a\" ]; then sleep 1; continue; fi")
+	w("    t=$(date +%%s)")
+	w("    dhcrelay $a </dev/null >>/var/log/dhcrelay.log 2>&1")
+	w("    tail -n 200 /var/log/dhcrelay.log > /var/log/dhcrelay.log.1 && mv /var/log/dhcrelay.log.1 /var/log/dhcrelay.log")
+	w("    if [ $(($(date +%%s) - t)) -lt 5 ] && [ \"$a\" = \"$(cat /run/dctwin-relay 2>/dev/null)\" ]; then sleep 30; else sleep 1; fi")
 	w("  done")
 	w(") &")
 	w("log started")
@@ -510,12 +514,12 @@ func (e Entry) frrConf(sw Switch) string {
 // carries one, as SONiC runs it.
 func (e Entry) relayArgs(sw Switch) string {
 	servers := map[netip.Addr]bool{}
-	var args []string
+	var down, up []string
 	for _, v := range sw.Vlans {
 		if len(v.Relay) == 0 {
 			continue
 		}
-		args = append(args, "-id", v.Name)
+		down = append(down, v.Name)
 		for _, s := range v.Relay {
 			servers[s] = true
 		}
@@ -524,15 +528,29 @@ func (e Entry) relayArgs(sw Switch) string {
 		return ""
 	}
 	for _, r := range sw.Routed {
-		args = append(args, "-iu", r.Port)
+		up = append(up, r.Port)
 	}
 	for _, s := range sw.Service {
-		args = append(args, "-iu", s.Port)
+		up = append(up, s.Port)
 	}
 	var ss []string
 	for s := range servers {
 		ss = append(ss, s.String())
 	}
 	sort.Strings(ss)
-	return strings.Join(append(append([]string{"-4", "-d", "-a", "-m", "discard"}, args...), ss...), " ")
+	return strings.Join(DHCRelayArgs(down, up, ss), " ")
+}
+
+// DHCRelayArgs is ISC dhcrelay's command line for interfaces it relays from (downstream), to
+// (upstream) and the servers: `-a` appends option 82, `-m discard` drops a request that already
+// carries one, as SONiC and Cumulus run it.
+func DHCRelayArgs(down, up, servers []string) []string {
+	args := []string{"-4", "-d", "-a", "-m", "discard"}
+	for _, i := range down {
+		args = append(args, "-id", i)
+	}
+	for _, i := range up {
+		args = append(args, "-iu", i)
+	}
+	return append(args, servers...)
 }

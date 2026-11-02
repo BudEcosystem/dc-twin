@@ -301,8 +301,31 @@ func TestServer(t *testing.T) {
 	if out["state"] != "apply_fail" || !strings.Contains(fmt.Sprint(out["transition"]), "exit 1") {
 		t.Errorf("failed apply: %v", out)
 	}
-	if _, out := do("GET", "/nvue_v1/vrf", nil, true); out["tenant-a"] != nil {
-		t.Errorf("a failed apply became the applied configuration: %v", out)
+	// its files are what the switch has: the applied configuration, which later revisions build on
+	if _, out := do("GET", "/nvue_v1/vrf", nil, true); out["tenant-a"] == nil {
+		t.Errorf("a failed apply is not the applied configuration: %v", out)
+	}
+	fail = false
+
+	// two revisions open at once: each applies its own changes onto what is applied then, so the
+	// second does not undo the first
+	newRev := func() string {
+		_, out := do("POST", "/nvue_v1/revision", nil, true)
+		for id := range out {
+			return id
+		}
+		return ""
+	}
+	ra, rb := newRev(), newRev()
+	do("PATCH", "/nvue_v1/bridge/domain/br_default/vlan/2002?rev="+ra, map[string]any{"vni": map[string]any{"10002": map[string]any{}}}, true)
+	do("PATCH", "/nvue_v1/bridge/domain/br_default/vlan/2003?rev="+rb, map[string]any{"vni": map[string]any{"10003": map[string]any{}}}, true)
+	for _, id := range []string{ra, rb} {
+		if _, out := do("PATCH", "/nvue_v1/revision/"+id, map[string]any{"state": "apply"}, true); out["state"] != "applied" {
+			t.Fatalf("apply %s: %v", id, out)
+		}
+	}
+	if _, out := do("GET", "/nvue_v1/bridge/domain/br_default/vlan", nil, true); out["2002"] == nil || out["2003"] == nil {
+		t.Errorf("the second revision undid the first: %v", out)
 	}
 	if _, out := do("GET", "/nvue_v1/system?rev=startup", nil, true); out["hostname"] != "r01-mgmt-switch" {
 		t.Errorf("startup: %v", out)

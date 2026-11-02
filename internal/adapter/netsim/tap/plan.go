@@ -365,14 +365,16 @@ func BuildPlan(m *model.Model, est *schema.Estate, outputs map[string]string, ho
 	// every real switch's Loopback0, its router id, from the top of the underlay down: where its
 	// management interfaces answer in band (and a VTEP's source), reached across the fabric as a
 	// connected route its BGP redistributes
+	// in 64 bits: a /31 or /32 underlay has no host addresses to count down from
 	b4 := ul.Addr().As4()
-	first := uint32(b4[0])<<24 | uint32(b4[1])<<16 | uint32(b4[2])<<8 | uint32(b4[3])
-	top := first + uint32(1)<<(32-ul.Bits()) - 2 // the last host address
-	if n := uint32(len(p.Switches)); n > 0 && top+1-n < first+uint32(2*len(p.Links)) {
+	first := uint64(b4[0])<<24 | uint64(b4[1])<<16 | uint64(b4[2])<<8 | uint64(b4[3])
+	size := uint64(1) << (32 - ul.Bits())
+	if n := uint64(len(p.Switches)); n > 0 && (size < 4 || first+size-1-n < first+uint64(2*len(p.Links))) {
 		return nil, fmt.Errorf("the underlay %s holds too few addresses for %d fabric links and %d loopbacks", ul, len(p.Links), n)
 	}
+	top := first + size - 2 // the last host address
 	for i, sp := range p.Switches {
-		lo := v4(top - uint32(i))
+		lo := v4(uint32(top - uint64(i)))
 		sp.Config.Loopback, sp.Config.RouterID = lo, lo
 	}
 	for _, sp := range p.Switches {

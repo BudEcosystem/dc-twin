@@ -17,8 +17,8 @@ rc=0
 echo "== ifreload -a"
 ifreload -a 2>&1 || rc=1
 echo "== frr-reload.py --reload"
-/usr/lib/frr/frr-reload.py --reload --stdout /etc/frr/frr.conf 2>&1 | grep -vE '^$' | tail -n 20 || true
-vtysh -c 'show running-config' >/dev/null 2>&1 || rc=1
+out=$(/usr/lib/frr/frr-reload.py --reload --stdout /etc/frr/frr.conf 2>&1) || rc=1
+printf '%s\n' "$out" | grep -vE '^$' | tail -n 20
 echo "== dhcrelay"
 # the switch's start script keeps dhcrelay running with the arguments in /run/dctwin-relay (a
 # process started from here would end with this exec); a change is the file and a restart
@@ -29,6 +29,15 @@ if [ "$3" != "$old" ]; then
   if [ -n "$3" ]; then echo "dhcrelay $3"; else echo "no relay"; fi
 else
   echo "unchanged"
+fi
+# a relay that cannot run (an interface it cannot open) fails the apply, saying why
+if [ -n "$3" ]; then
+  n=0
+  until pgrep -x dhcrelay >/dev/null 2>&1; do
+    n=$((n+1))
+    if [ $n -gt 10 ]; then echo "dhcrelay is not running:"; tail -n 5 /var/log/dhcrelay.log; rc=1; break; fi
+    sleep 0.5
+  done
 fi
 exit $rc
 `

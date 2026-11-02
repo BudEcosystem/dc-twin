@@ -137,13 +137,10 @@ type svi struct {
 	vrf   string
 }
 
-// Render takes a configuration to the files Cumulus Linux renders from it. It refuses what the
-// switch cannot carry: an interface it has no port for, a VNI without an NVE source address, a
+// Render takes a configuration, valid against the schema (Validate: every PATCH and Startup check
+// it), to the files Cumulus Linux renders from it. It refuses what the switch cannot carry: an interface it has no port for, a VNI without an NVE source address, a
 // VRF that does not exist, two VNIs on one VLAN.
 func Render(t Tree, sw nos.Switch) (Files, error) {
-	if err := Validate(nil, t); err != nil {
-		return Files{}, err
-	}
 	cabled := map[string]bool{}
 	for _, p := range sw.Ports() {
 		cabled[Port(sw, p)] = true
@@ -268,6 +265,9 @@ func Render(t Tree, sw nos.Switch) (Files, error) {
 			v, _ := strconv.Atoi(n)
 			for bridgeVLANs[next] {
 				next++
+			}
+			if next > 4094 {
+				return Files{}, fmt.Errorf("vrf %s: L3 VNI %d: no VLAN left from %d to 4094 to carry it", name, v, l3VLANBase)
 			}
 			l3[name] = v
 			vnis = append(vnis, vni{v, next})
@@ -500,7 +500,6 @@ func renderRelay(t Tree, cabled map[string]bool, svis map[int]*svi) ([]string, e
 	if len(servers) == 0 {
 		return nil, nil
 	}
-	args := []string{"-4", "-d", "-a", "-m", "discard"}
 	var down, up []string
 	for _, i := range keys(sub(r, "interface")) {
 		switch {
@@ -509,9 +508,9 @@ func renderRelay(t Tree, cabled map[string]bool, svis map[int]*svi) ([]string, e
 			if svis[id] == nil {
 				return nil, fmt.Errorf("service dhcp-relay default interface %s: no such SVI", i)
 			}
-			down = append(down, "-id", i)
+			down = append(down, i)
 		case cabled[i]:
-			up = append(up, "-iu", i)
+			up = append(up, i)
 		default:
 			return nil, fmt.Errorf("service dhcp-relay default interface %s: no such interface", i)
 		}
@@ -519,5 +518,5 @@ func renderRelay(t Tree, cabled map[string]bool, svis map[int]*svi) ([]string, e
 	if len(down) == 0 {
 		return nil, fmt.Errorf("service dhcp-relay default: servers and no SVI to relay from")
 	}
-	return append(append(append(args, down...), up...), servers...), nil
+	return nos.DHCRelayArgs(down, up, servers), nil
 }

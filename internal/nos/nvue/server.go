@@ -29,17 +29,28 @@ type Applier func(ctx context.Context, f Files) (output string, err error)
 // revision states, as NVUE names them
 const (
 	statePending   = "pending"
+	stateApplying  = "applying"
 	stateApplied   = "applied"
 	stateApplyFail = "apply_fail"
 	stateInvalid   = "invalid"
 )
 
+// change is one PATCH (v, a JSON merge) or DELETE (del) made in a revision.
+type change struct {
+	path []string
+	v    any
+	del  bool
+}
+
+// revision is the applied configuration it was created from with its changes (tree, what a GET
+// at it reads) and the changes themselves, which applying replays onto the configuration applied
+// then, as NVUE applies a revision's changes and not the snapshot it started from.
 type revision struct {
-	tree   Tree
-	state  string
-	issue  string
-	output string
-	at     time.Time
+	tree    Tree
+	changes []change
+	state   string
+	issue   string
+	output  string
 }
 
 // Server is one switch's NVUE: its revisions and the applied configuration.
@@ -48,7 +59,8 @@ type Server struct {
 	password string
 	apply    Applier
 
-	mu      sync.Mutex // one apply at a time, as NVUE serialises them
+	applyMu sync.Mutex // one apply at a time, as NVUE serialises them
+	mu      sync.Mutex // the state below; never held while the switch applies
 	startup Tree
 	applied Tree
 	revs    map[string]*revision
@@ -68,12 +80,13 @@ func (s *Server) ApplyStartup(ctx context.Context) error {
 		return err
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.startup = Clone(t)
-	r := &revision{tree: t, state: statePending, at: time.Now()}
-	id := s.newID()
-	s.revs[id] = r
-	s.applyLocked(ctx, r)
+	r := &revision{tree: Clone(t), changes: []change{{v: t}}, state: statePending}
+	s.revs[s.newID()] = r
+	s.mu.Unlock()
+	s.applyRevision(ctx, r)
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if r.state != stateApplied {
 		return fmt.Errorf("the startup configuration: %s: %s", r.state, r.issue)
 	}
@@ -93,20 +106,46 @@ func (s *Server) Applied() Tree {
 	return Clone(s.applied)
 }
 
-func (s *Server) applyLocked(ctx context.Context, r *revision) {
-	files, err := Render(r.tree, s.sw)
-	if err != nil {
-		r.state, r.issue = stateInvalid, err.Error()
-		return
+// applyRevision replays a revision's changes onto the configuration applied now and takes the
+// switch there, one apply at a time, without holding the state lock while the switch works, so
+// reads (a client polling the revision's state) are answered meanwhile. A configuration that
+// cannot render is invalid and the switch is untouched; one the switch's tools fail on is
+// apply_fail, and since its files are then what the switch has, it is the applied configuration,
+// so later revisions build on what the switch runs.
+func (s *Server) applyRevision(ctx context.Context, r *revision) {
+	s.applyMu.Lock()
+	defer s.applyMu.Unlock()
+	s.mu.Lock()
+	t := Clone(s.applied)
+	for _, c := range r.changes {
+		if c.del {
+			Delete(t, c.path)
+		} else {
+			Patch(t, c.path, c.v)
+		}
 	}
-	out, err := s.apply(ctx, files)
-	r.output = out
-	if err != nil {
-		r.state, r.issue = stateApplyFail, err.Error()
-		return
+	r.state = stateApplying
+	s.mu.Unlock()
+
+	files, rerr := Render(t, s.sw)
+	var out string
+	var aerr error
+	if rerr == nil {
+		out, aerr = s.apply(ctx, files)
 	}
-	r.state, r.issue = stateApplied, ""
-	s.applied = Clone(r.tree)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	r.tree, r.output = t, out
+	switch {
+	case rerr != nil:
+		r.state, r.issue = stateInvalid, rerr.Error()
+	case aerr != nil:
+		r.state, r.issue = stateApplyFail, aerr.Error()
+		s.applied = Clone(t)
+	default:
+		r.state, r.issue = stateApplied, ""
+		s.applied = Clone(t)
+	}
 }
 
 // ServeHTTP serves NVUE's REST API under /nvue_v1: GET of any path at a revision (`?rev=`,
@@ -208,6 +247,7 @@ func (s *Server) change(w http.ResponseWriter, r *http.Request, path []string) {
 			return
 		}
 		Delete(rv.tree, path)
+		rv.changes = append(rv.changes, change{path: path, del: true})
 		writeJSON(w, http.StatusOK, map[string]any{})
 		return
 	}
@@ -232,11 +272,12 @@ func (s *Server) change(w http.ResponseWriter, r *http.Request, path []string) {
 		return
 	}
 	Patch(rv.tree, path, v)
+	rv.changes = append(rv.changes, change{path: path, v: v})
 	out, _ := Get(rv.tree, path)
 	writeJSON(w, http.StatusOK, out)
 }
 
-func (s *Server) status(id string, rv *revision) map[string]any {
+func status(rv *revision) map[string]any {
 	issue := map[string]any{}
 	if rv.issue != "" {
 		issue["0"] = map[string]any{"message": rv.issue, "severity": "error"}
@@ -253,14 +294,14 @@ func (s *Server) revision(w http.ResponseWriter, r *http.Request, rest []string)
 		case http.MethodGet:
 			out := map[string]any{}
 			for id, rv := range s.revs {
-				out[id] = s.status(id, rv)
+				out[id] = status(rv)
 			}
 			writeJSON(w, http.StatusOK, out)
 		case http.MethodPost:
 			id := s.newID()
-			rv := &revision{tree: Clone(s.applied), state: statePending, at: time.Now()}
+			rv := &revision{tree: Clone(s.applied), state: statePending}
 			s.revs[id] = rv
-			writeJSON(w, http.StatusOK, map[string]any{id: s.status(id, rv)})
+			writeJSON(w, http.StatusOK, map[string]any{id: status(rv)})
 		default:
 			w.Header().Set("Allow", "GET, POST")
 			problem(w, http.StatusMethodNotAllowed, "Method Not Allowed", r.Method)
@@ -275,7 +316,7 @@ func (s *Server) revision(w http.ResponseWriter, r *http.Request, rest []string)
 	}
 	switch r.Method {
 	case http.MethodGet:
-		writeJSON(w, http.StatusOK, s.status(id, rv))
+		writeJSON(w, http.StatusOK, status(rv))
 	case http.MethodDelete:
 		if rv.state != statePending {
 			problem(w, http.StatusConflict, "Conflict", "revision "+id+" is "+rv.state)
@@ -295,10 +336,14 @@ func (s *Server) revision(w http.ResponseWriter, r *http.Request, rest []string)
 			problem(w, http.StatusConflict, "Conflict", "revision "+id+" is "+rv.state)
 			return
 		}
+		// applying: no second apply of it, and the state lock is free while the switch works
+		rv.state = stateApplying
+		s.mu.Unlock()
 		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Minute)
-		defer cancel()
-		s.applyLocked(ctx, rv)
-		writeJSON(w, http.StatusOK, s.status(id, rv))
+		s.applyRevision(ctx, rv)
+		cancel()
+		s.mu.Lock()
+		writeJSON(w, http.StatusOK, status(rv))
 	default:
 		w.Header().Set("Allow", "GET, PATCH, DELETE")
 		problem(w, http.StatusMethodNotAllowed, "Method Not Allowed", r.Method)
