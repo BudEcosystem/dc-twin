@@ -10,13 +10,19 @@
 #       starts a container per switch and wires BMC TAPs and fabric cables into them; dhcrelay
 #       relays every BMC by giaddr to Kea in its own container; eBGP between the FRR instances
 #       carries the routes; the NOS observer reports ports and sessions; cable pulls show there.
+#   (e) TestNVUE: generic/nvue-frr on the OOB fabric (D56): FRR, ifupdown2 and ISC dhcrelay
+#       configured through the twin's NVUE, which applies each switch's startup configuration;
+#       every BMC leases through the relay it configured; from the probe, a client reaches each
+#       switch's NVUE at its loopback and builds an EVPN VNI across two racks, which each leaf's
+#       bridge carries with the other's VTEP learned from EVPN; a VRF applies where the kernel can.
 #   (d) TestSonicVS: SONiC-VS on the OOB fabric (D44), the image SONiC publishes (linux/amd64:
 #       native on an x86_64 host, emulated under binfmt_misc on an aarch64 one). The twin renders
-#       each switch's HWSKU, config_db.json and bgpd configuration and starts SONiC's own
-#       dhcp_relay container beside it; every BMC is relayed by SONiC's dhcrelay with its
-#       hostname:port circuit id; eBGP between the SONiC switches; the observer reads APPL_DB.
-#       Opt-in (RUN=TestSonicVS): it fetches ~1.3 GB of images, and each switch boots in a minute
-#       or two natively, several emulated.
+#       each switch's HWSKU and config_db.json and starts SONiC's own dhcp_relay, bgp and gnmi
+#       containers beside it (D55); every BMC is relayed by SONiC's dhcrelay with its
+#       hostname:port circuit id; eBGP between the SONiC switches, FRR configured from CONFIG_DB;
+#       gNMI at each switch's loopback reads CONFIG_DB and creates a VRF; an EVPN VNI becomes a
+#       VXLAN device; the observer reads APPL_DB. Opt-in (RUN=TestSonicVS): it fetches ~1.6 GB of
+#       images, and each switch boots in a minute or two natively, several emulated.
 #
 # The twin starts the NOS containers itself and opens their network namespaces
 # (/proc/<pid>/ns/net), so the test runs as root where it sees the engine's processes. Two ways:
@@ -35,12 +41,12 @@
 # Everything a run creates is named dctwin-* (containers, volumes, network namespaces) and removed
 # at the end; nothing else is touched: no firewall rule, route or bridge outside its namespaces.
 #
-#   scripts/linux-substrate-e2e.sh                         # (a), (b) and (c)
+#   scripts/linux-substrate-e2e.sh                         # (a), (b), (c) and (e)
 #   RUN=TestRealNOS scripts/linux-substrate-e2e.sh
 #   RUN=TestSonicVS MODE=native scripts/linux-substrate-e2e.sh
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
-run=${RUN:-'TestTapModelSwitches|TestRealNOS'}
+run=${RUN:-'TestTapModelSwitches|TestRealNOS|TestNVUE'}
 mode=${MODE:-container}
 work=$(mktemp -d "${TMPDIR:-/tmp}/dctwin-linuxnet.XXXXXX")
 log="$work/linux-substrate-e2e.log"
@@ -127,35 +133,47 @@ image() { # tag, Containerfile, context: build only what is missing
 }
 image dctwin-kea-e2e:2.6 "$root/internal/adapter/dhcp/testdata/kea/Containerfile" "$root/internal/adapter/dhcp/testdata/kea"
 
-# SONiC (internal/nos: SonicVSImage, SonicRelay*; a test there keeps these in step). Only when the
-# run asks for it. The switch image is pulled by digest, so no tag of the user's moves; the relay
-# image SONiC publishes only as a build artifact, so it is downloaded at a pinned build, checked
-# against its sha256, loaded and tagged dctwin-sonic-dhcp-relay:<build>.
+# SONiC (internal/nos: SonicVSImage, SonicRelay*, SonicBGP*, SonicGNMI*; a test there keeps these
+# in step). Only when the run asks for it. The switch image is pulled by digest, so no tag of the
+# user's moves; the relay, bgp and gnmi images SONiC publishes only as build artifacts, so each is
+# downloaded at a pinned build, checked against its sha256, loaded and tagged dctwin-sonic-*:<build>.
 sonic_vs=sonicdev-microsoft.azurecr.io/docker-sonic-vs@sha256:0de1c335c5ce02b1f1102068eeb44c8272147535647acd6a3153e0cb857b44ed
 sonic_relay=dctwin-sonic-dhcp-relay:master.1250767-408ffc98c
 sonic_relay_url='https://sonic-build.azurewebsites.net/api/sonic/artifacts?branchName=master&buildId=1250767&platform=vs&target=target/docker-dhcp-relay.gz'
 sonic_relay_sha256=939cbdb454b76849284d3e8f51e26da41f63a87a3e763047bf61ecad091fc980
+sonic_bgp=dctwin-sonic-fpm-frr:master.1250767-408ffc98c
+sonic_bgp_url='https://sonic-build.azurewebsites.net/api/sonic/artifacts?branchName=master&buildId=1250767&platform=vs&target=target/docker-fpm-frr.gz'
+sonic_bgp_sha256=c1daf6372d1eca20eeac6da7a7f52678a1964e2d215ff30edc6cb3a1b794116d
+sonic_gnmi=dctwin-sonic-gnmi:master.1250767-408ffc98c
+sonic_gnmi_url='https://sonic-build.azurewebsites.net/api/sonic/artifacts?branchName=master&buildId=1250767&platform=vs&target=target/docker-sonic-gnmi.gz'
+sonic_gnmi_sha256=864ed2431d7f6b963fff005dbb458d84e0b8ae12779b20fbd96ccd29027a9244
+# sonic_artifact <local tag> <url> <sha256> <the tarball's own repository>
+sonic_artifact() {
+  "${eng[@]}" image inspect "$1" >/dev/null 2>&1 && return
+  echo "fetching SONiC's $4 image ($2)"
+  curl -fsSL -o "$work/$4.gz" "$2"
+  got=$(sha256 "$work/$4.gz")
+  if [ "$got" != "$3" ]; then
+    echo "FAIL: $4.gz has sha256 $got, not the pinned $3" >&2; exit 1
+  fi
+  # the tarball is tagged <repository>:latest; a tag of that name already here is put back
+  prior=$("${eng[@]}" image inspect -f '{{.Id}}' "$4:latest" 2>/dev/null || true)
+  "${eng[@]}" load -q -i "$work/$4.gz" >/dev/null
+  "${eng[@]}" tag "$4:latest" "$1"
+  if [ -n "$prior" ]; then "${eng[@]}" tag "$prior" "$4:latest"; else "${eng[@]}" rmi "$4:latest" >/dev/null; fi
+  rm -f "$work/$4.gz"
+}
 case $run in *Sonic*)
   if ! "${eng[@]}" image inspect "$sonic_vs" >/dev/null 2>&1; then
     echo "pulling $sonic_vs (linux/amd64)"
     "${eng[@]}" pull -q --platform linux/amd64 "$sonic_vs" >/dev/null
   fi
-  if ! "${eng[@]}" image inspect "$sonic_relay" >/dev/null 2>&1; then
-    echo "fetching SONiC's dhcp_relay image ($sonic_relay_url)"
-    curl -fsSL -o "$work/docker-dhcp-relay.gz" "$sonic_relay_url"
-    got=$(sha256 "$work/docker-dhcp-relay.gz")
-    if [ "$got" != "$sonic_relay_sha256" ]; then
-      echo "FAIL: docker-dhcp-relay.gz has sha256 $got, not the pinned $sonic_relay_sha256" >&2; exit 1
-    fi
-    # the tarball is tagged docker-dhcp-relay:latest; a tag of that name already here is put back
-    prior=$("${eng[@]}" image inspect -f '{{.Id}}' docker-dhcp-relay:latest 2>/dev/null || true)
-    "${eng[@]}" load -q -i "$work/docker-dhcp-relay.gz" >/dev/null
-    "${eng[@]}" tag docker-dhcp-relay:latest "$sonic_relay"
-    if [ -n "$prior" ]; then "${eng[@]}" tag "$prior" docker-dhcp-relay:latest; else "${eng[@]}" rmi docker-dhcp-relay:latest >/dev/null; fi
-    rm -f "$work/docker-dhcp-relay.gz"
-  fi
+  sonic_artifact "$sonic_relay" "$sonic_relay_url" "$sonic_relay_sha256" docker-dhcp-relay
+  sonic_artifact "$sonic_bgp" "$sonic_bgp_url" "$sonic_bgp_sha256" docker-fpm-frr
+  sonic_artifact "$sonic_gnmi" "$sonic_gnmi_url" "$sonic_gnmi_sha256" docker-sonic-gnmi
 ;; esac
 case $run in TestSonicVS) ;; *) image dctwin-nos-frr-dhcrelay:bookworm "$root/test/linuxnet/nos/Containerfile" "$root/test/linuxnet/nos" ;; esac
+case $run in *TestNVUE*) image dctwin-nos-nvue-frr:bookworm "$root/test/linuxnet/nos-nvue/Containerfile" "$root/test/linuxnet/nos-nvue" ;; esac
 
 (cd "$root" && CGO_ENABLED=0 GOOS=linux GOARCH=$goarch go test -c -o "$work/linuxnet.test" ./test/linuxnet/)
 

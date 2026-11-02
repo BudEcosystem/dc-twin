@@ -12,7 +12,7 @@
 #   compat/nico/run.sh trays          the trays path (README), Linux only: fetch boot build up pxe nico
 #                                     load dhcp trays report down, on
 #                                     examples/estates/nvl72-nico-impersonated.yaml, where NICo's DPU
-#                                     software and scout are impersonated on the model machines (D55)
+#                                     software and scout are impersonated on the model machines (D57)
 #                                     and NICo takes the GB300 trays through DPU init and host
 #                                     discovery towards Ready, and the rack through its maintenance
 #
@@ -771,7 +771,7 @@ step_boot() {
   say "NICo's boot artifacts and Linux programs (boot-artifacts.sh)"
   [ "$uname_s" = Linux ] || die "the Ready and trays paths run on Linux (README: on macOS no native process sees a guest's own address)"
   local b missing=""
-  # the trays path's machines run impersonated software (D55): no scout image, no forge-scout
+  # the trays path's machines run impersonated software (D57): no scout image, no forge-scout
   local want="ipxe.efi scout.efi carbide forge-scout carbide-api forge-dhcp-server nico-admin-cli"
   local pkgs="carbide-api carbide-dhcp-server nico-admin-cli carbide-pxe carbide-scout" bins="carbide-api forge-dhcp-server nico-admin-cli carbide forge-scout" steps="up ipxe rust image down"
   if trays; then
@@ -821,7 +821,7 @@ step_pxe() {
   if trays; then
     # NICo's iPXE, which the impersonated firmware fetches and whose embedded script it runs; the
     # images NICo's boot scripts name (its DPU image and scout) run nowhere on this path, so a
-    # labelled stand-in file is served where each would be, for the impersonator to fetch (D55)
+    # labelled stand-in file is served where each would be, for the impersonator to fetch (D57)
     # (the GB300 trays and their DPUs are aarch64: IPXE_AARCH64 names NICo's aarch64 iPXE when
     # this host is not, boot-artifacts.sh building it on an aarch64 Docker host)
     cp "$BOOT/ipxe.efi" "$static/blobs/internal/$arch/"
@@ -831,7 +831,7 @@ step_pxe() {
     local f d
     for d in "$static"/blobs/internal/*; do
       for f in carbide.efi carbide.root scout.efi; do
-        echo "dc-twin: NICo's $f is impersonated on this path (D55); this file stands where it would be served" >"$d/$f"
+        echo "dc-twin: NICo's $f is impersonated on this path (D57); this file stands where it would be served" >"$d/$f"
       done
     done
   else
@@ -978,7 +978,7 @@ ready_evidence() {
 
 # step_trays: NICo's machines on the trays path, followed until every GB300 tray is Ready (or no
 # machine has changed state for TRAYS_STALL), then the rack's state and what NVLink partitioning
-# did. The machines' software is the twin's impersonators (D55): the fidelity report says how far
+# did. The machines' software is the twin's impersonators (D57): the fidelity report says how far
 # each machine's got, and the run is labelled impersonated.
 tray_hosts() { jq '[.expected_machines[] | select((.metadata.labels // []) | any(.key == "dc-twin.path" and (.value | test("compute-tray"))))] | length' "$WORK/inputs/expected-machines.json" 2>/dev/null || echo 18; }
 step_trays() {
@@ -1008,9 +1008,9 @@ step_trays() {
   hosts=$(awk '$2=="host"' "$OUT/machine-states.txt" | wc -l | tr -d ' ')
   dinit=$(awk '$2=="host" || $2=="predicted"' "$OUT/machine-states.txt" | grep -ci 'DPUInit' || true)
   ready=$(awk '$2=="host" && $3 ~ /^Ready/' "$OUT/machine-states.txt" | wc -l | tr -d ' ')
-  if [ "$dpus" -gt 0 ] && [ "$dinit" -eq 0 ]; then result trays-dpu-init PASS "$dpus DPUs discovered by NICo; no managed host left in DPUInitializing (impersonated DPU software, D55)"
+  if [ "$dpus" -gt 0 ] && [ "$dinit" -eq 0 ]; then result trays-dpu-init PASS "$dpus DPUs discovered by NICo; no managed host left in DPUInitializing (impersonated DPU software, D57)"
   else result trays-dpu-init FAIL "$dinit managed hosts still in DPUInitializing, $dpus DPUs (out/machine-states.txt)"; fi
-  if [ "$ready" -ge "$want" ]; then result trays-ready PASS "$ready of $want GB300 trays Ready in $(((SECONDS - start) / 60)) min (impersonated scout, D55)"
+  if [ "$ready" -ge "$want" ]; then result trays-ready PASS "$ready of $want GB300 trays Ready in $(((SECONDS - start) / 60)) min (impersonated scout, D57)"
   else result trays-ready FAIL "$ready of $want GB300 trays Ready; $hosts hosts: $(awk '$2=="host"{print $3}' "$OUT/machine-states.txt" | sort | uniq -c | awk '{printf "%s %s, ", $1, $2}') (out/machine-states.txt, out/trays-states.txt)"; fi
   # the rack: once its trays are Ready NICo runs its maintenance (ConfigureNmxCluster on the
   # twin's RMS) and validation; nvlink-manager then reads the NVLink domain from NMX-C at the

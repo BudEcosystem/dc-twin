@@ -1,0 +1,40 @@
+# The TAP substrate with generic/nvue-frr on the OOB fabric (D56): each rack's management switch
+# and the OOB aggregation switch run what Cumulus Linux is built from (FRR, ifupdown2, ISC
+# dhcrelay), configured through the twin's NVUE: the startup configuration from the model is
+# applied through it at up, and a client reaches its REST API at each switch's loopback across the
+# fabric. BMC ports are TAPs moved into the switches as swp<n>; the management switches relay DHCP
+# by giaddr to the stack's Kea at the aggregation switch's eth128 (swp128), reached over eBGP.
+# test/linuxnet substitutes the Kea container's and the probe namespace's names.
+apiVersion: dc-twin/v1alpha1
+kind: Estate
+metadata:
+  name: linuxnet-nvue
+spec:
+  seed: 2027
+  clock: wall
+  timeScale: 0.05
+  packs: [generic@0.1.0]
+  fidelity: { default: model }
+  sites:
+    - name: site-1
+      halls:
+        - name: hall-a
+          rows:
+            - name: a
+              positions: 4
+              racks:
+                - { name: r01, position: 1, format: generic/cpu-rack, params: { servers: 3 }, feeds: [A, B] }
+                - { name: r02, position: 2, format: generic/cpu-rack, params: { servers: 3 }, feeds: [A, B] }
+  networks:
+    oob: { role: management, dhcp: stack, cidr: 10.30.0.0/20, fabric: oob, server: 10.90.0.10 }
+  fabrics:
+    - { name: oob, template: oob-flat, nos: generic/nvue-frr }
+  facility:
+    power:
+      feeds: [{ name: A, capacityW: 200000 }, { name: B, capacityW: 200000 }]
+  adapters:
+    network:
+      substrate: tap
+      attach:
+        - { container: KEA_CONTAINER, port: "oob-agg-1:eth128", address: 10.90.0.10/24, gateway: 10.90.0.1 }
+        - { netns: PROBE_NETNS, port: "oob-agg-1:eth127", address: 10.90.1.10/24, gateway: 10.90.1.1, interface: probe0 }

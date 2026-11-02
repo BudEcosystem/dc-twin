@@ -1,5 +1,5 @@
 # The estate compat/nico's trays path runs NICo against (run.sh trays): nvl72-nico's GB300 NVL72
-# rack and OEM racks, with NICo's software on the model machines impersonated (D55): its DPU image
+# rack and OEM racks, with NICo's software on the model machines impersonated (D57): its DPU image
 # and forge-dpu-agent on every BlueField (nico-dpu-agent), and scout on every tray and server
 # (nico-scout). The run is labelled impersonated (D24). Every machine boots on its own network
 # path: a DPU on its out-of-band port behind its BMC's switch port, a tray through its DPU, a

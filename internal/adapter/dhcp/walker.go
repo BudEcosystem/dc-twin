@@ -55,7 +55,7 @@ type walkRecord struct {
 
 func (a *Adapter) onBoot(d *model.Device, target string) {
 	if a.stopped.Load() || a.rt.BootClaim(d.Path) != "" {
-		return // an impersonator boots this host itself (D55)
+		return // an impersonator boots this host itself (D57)
 	}
 	ctx, cancel := context.WithCancel(a.ctx)
 	a.mu.Lock()

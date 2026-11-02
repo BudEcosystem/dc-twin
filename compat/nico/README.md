@@ -518,7 +518,7 @@ host's rack to look up its slot and tray, and creates no host without it.
 `run.sh trays` (x86_64 Linux; estate `nvl72-nico-impersonated`) runs NICo as the Ready path does,
 its PXE service and API in a Linux network namespace the twin routes the machines into at L3, on
 the GB300 NVL72 rack with NICo's software on the `model` machines impersonated by the twin's
-`nicoagent` adapter (D55): NICo's DPU image and forge-dpu-agent on each BlueField
+`nicoagent` adapter (D57): NICo's DPU image and forge-dpu-agent on each BlueField
 (`nico-dpu-agent`), scout on each tray and server (`nico-scout`). The run is labelled
 impersonated: it tests NICo's state machines, rack controller and NVLink manager against the
 twin, not NICo's machine software. Each machine boots on its own network path (a DPU on its OOB
@@ -842,7 +842,7 @@ Found on the Ready path ([below](#the-ready-path-a-zero-dpu-host-that-boots-nico
 ## What this does not show
 
 - A host with DPUs reaching `Ready` with NICo's own machine software: on the trays path the
-  GB300 trays reach `Ready` with that software impersonated (D55); without the impersonators
+  GB300 trays reach `Ready` with that software impersonated (D57); without the impersonators
   they stop in DPU discovery, the DPU OS not being modelled (Q1). The OEM hosts
   of `nvl72-nico` are explored, preingested and powered by NICo but not ingested there (they are at
   `model` fidelity). The zero-DPU DGX of the Ready path reaches `Ready` with: a scout image

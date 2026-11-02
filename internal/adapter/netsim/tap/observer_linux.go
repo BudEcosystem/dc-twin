@@ -22,7 +22,8 @@ import (
 // the NOS reports it — SONiC's from APPL_DB's PORT_TABLE (orchagent's record of the SAI's port
 // state notifications, which `show interfaces status` prints), generic/frr-dhcrelay's from the
 // switch's own namespace (netlink, as `ip link` shows it) — and its BGP sessions from FRR (`vtysh
-// -c 'show bgp summary json'`, the same in both), and commits every change as a `state` event
+// -c 'show bgp summary json'`, in SONiC's bgp container or the FRR switch's own), and commits
+// every change as a `state` event
 // from source class `observer`, on the port named as the model names it. The model keeps no
 // observed field for ports yet: the events and this observer's snapshot are where the values
 // live.
@@ -105,7 +106,7 @@ func (o *observer) poll(ctx context.Context) {
 			continue
 		}
 		cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-		out, _, err := o.s.docker.Exec(cctx, sw.c.ID, "vtysh", "-c", "show bgp summary json")
+		out, _, err := o.s.docker.Exec(cctx, sw.routing().ID, "vtysh", "-c", "show bgp summary json")
 		cancel()
 		if err != nil {
 			continue

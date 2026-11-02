@@ -43,8 +43,11 @@ type NetworkSubstrate func(ctx context.Context, a NetworkArgs) (netsim.L2, error
 
 // NetworkArgs is what a network substrate is built from.
 type NetworkArgs struct {
-	Estate   *schema.Estate
-	Engine   *engine.Engine
+	Estate *schema.Estate
+	Engine *engine.Engine
+	// Net is the loopback substrate, whose estate CA issues what a real NOS's management
+	// interfaces present and accept.
+	Net      *netsim.Net
 	StateDir string
 	Outputs  map[string]string
 	Log      *slog.Logger
@@ -272,7 +275,7 @@ func UpEstate(est *schema.Estate, file string, reg *pack.Registry, opt Options) 
 			t.Down()
 			return nil, fmt.Errorf("spec.adapters.network.substrate %s: not available on %s (the TAP substrate is Linux only, D20, and is linked in by importing package tap); use the loopback substrate here", substrate, runtime.GOOS)
 		}
-		l2, err := build(ctx, NetworkArgs{Estate: est, Engine: eng, StateDir: opt.StateDir, Outputs: outputs, Log: opt.Log})
+		l2, err := build(ctx, NetworkArgs{Estate: est, Engine: eng, Net: n, StateDir: opt.StateDir, Outputs: outputs, Log: opt.Log})
 		if err != nil {
 			t.Down()
 			return nil, fmt.Errorf("the %s substrate: %w", substrate, err)

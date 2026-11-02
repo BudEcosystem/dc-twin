@@ -1,5 +1,5 @@
 // Package nicoagent impersonates the software NICo runs on the machines it manages, for machines
-// at `model` fidelity, which run no OS (D55). This is IMPERSONATION (D24, 07 — Impersonation): an
+// at `model` fidelity, which run no OS (D57). This is IMPERSONATION (D24, 07 — Impersonation): an
 // estate enables it by naming the stack's impersonators, and the run is labelled impersonated.
 //
 //   - `nico-dpu-agent`, for every BlueField DPU at `model`: the DPU's UEFI HTTP boot (boot.go),

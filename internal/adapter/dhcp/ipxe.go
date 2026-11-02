@@ -56,7 +56,7 @@ func isIPXEScript(b []byte) bool {
 }
 
 // IPXEResult, IPXEFetch, RunIPXE and IsIPXEScript are the interpreter for a stand-in that boots
-// what a script names on its own network path (the nicoagent impersonators, D55), rather than the
+// what a script names on its own network path (the nicoagent impersonators, D57), rather than the
 // walker's.
 type (
 	IPXEResult = ipxeResult

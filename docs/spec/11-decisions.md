@@ -940,7 +940,72 @@ control zone on no twin network: in a cluster it is on the cluster network, clos
 NetworkPolicy). **Reversed if:** OIDC (15's shared mode) is built; then a remote API takes users
 and roles, not one token.
 
-### D55 — NICo's software on a model machine is impersonated on the machine's own network path
+### D55 — SONiC-VS runs SONiC's bgp and gnmi containers; FRR is configured from CONFIG_DB
+Beside each `sonic-vs` switch, in its network namespace and sharing its `/etc/sonic` and redis,
+the twin runs SONiC's own **bgp** (`docker-fpm-frr`) and **gnmi** (`docker-sonic-gnmi`)
+containers, pinned at the dhcp_relay's build (D44: build artifacts, by sha256, loaded under a
+local tag), as a switch runs them beside swss. The switch container no longer starts the routing
+daemons `docker-sonic-vs` carries (zebra, staticd, mgmtd, fpmsyncd): they are the bgp
+container's. CONFIG_DB is in SONiC's **unified** routing mode (`docker_routing_config_mode:
+unified`, `frr_mgmt_framework_config: true`), so frrcfgd renders FRR from CONFIG_DB's `BGP_*`
+tables at start and applies every later write to them; the twin writes the fabric's numbered eBGP
+there (`BGP_GLOBALS`, `BGP_NEIGHBOR|default|<peer>`, …, each session with a permit-all route-map
+both ways, since FRR exchanges nothing on an eBGP session without a policy) and nothing into FRR. A VRF, a VNI or an
+EVPN address family a stack writes to CONFIG_DB reaches the kernel through SONiC's managers
+(vrfmgrd, vxlanmgrd) and FRR through frrcfgd. Every real switch has a **Loopback0**, its router
+id, from the top of the underlay down, redistributed into BGP; the gnmi container answers there on
+port 8080 over TLS with a certificate the estate CA issues at `up`, and accepts any client whose
+certificate the same CA issued (`client_auth`, `user_auth: none`): `stack-inputs/switches.json`
+names each switch's loopback and gNMI address, beside `switch-client.{crt,key}` and
+`switch-ca.crt`. gNMI reads every SONiC database and writes CONFIG_DB through SONiC's YANG models
+(the management framework's translib, e.g. `/sonic-vrf:sonic-vrf/VRF/VRF_LIST`); its native
+CONFIG_DB writes go through the host's D-Bus services, which no container runs, and fail. The twin
+supplies `/etc/sonic/constants.yml`, which a switch has from its host image and the bgp container
+reads. The bgp container loads its rendered `frr.conf` as soon as bgpd runs, which can be before
+bgpd answers; `up` checks that FRR holds the instance and loads it again (`vtysh -b`) until it
+does. A VRF needs the Docker host's kernel to have VRF devices and a VNI its vxlan driver: `up`
+probes for both in a switch's namespace and the fidelity report says what it found, since a
+host without them (a stock Colima VM has no `vrf` module) makes SONiC's managers and FRR refuse
+what is written. **Why:** tenant networking (VRFs, VNIs, EVPN) is configured on SONiC through
+CONFIG_DB, and only SONiC's own config daemon in its own bgp container takes CONFIG_DB to FRR as
+a switch does; the twin rendering bgpd.conf itself froze FRR at `up`. gNMI is the management
+interface SONiC switches are automated through, and an in-band loopback is where a fabric's
+automation reaches it. **Amends:** D44 (the twin no longer writes bgpd's configuration).
+**Reversed if:** SONiC publishes a VS image whose own containers run as a switch's do (then the
+twin starts that, not its parts), or a stack needs gNMI at the management port's address (then
+the switch's management port leases an address as NVOS's does, D46).
+
+### D56 — Cumulus is NVUE emulated over what Cumulus is built from: `generic/nvue-frr`
+Cumulus Linux is not freely redistributable and Cumulus VX has no standalone image after 5.13, so
+`cumulus-vx` stays registered and not runnable. **`generic/nvue-frr`** is a switch built from what
+Cumulus Linux is built from (Debian bookworm, FRR, ifupdown2, ISC dhcrelay; native on aarch64 and
+x86_64), configured the way Cumulus is: through **NVUE**, which the twin emulates (package
+`internal/nos/nvue`). Its ports are `swp<n>`, n the port's place on the front panel. At `up` the
+twin applies the switch's startup configuration from the model through NVUE (hostname, Loopback0,
+the rack segment's access ports in `br_default` with the gateway on the VLAN's SVI, addresses on
+fabric and service ports, BGP with a numbered neighbour per fabric link, the DHCP relay), then
+serves NVUE's REST API at the switch's Loopback0, port 8765, over TLS with a certificate the estate
+CA issues, from a socket made in the switch's own network namespace, so it is reached in band as
+gNMI on SONiC is (D55); user `cumulus`, with a password `stack-inputs/switches.json` gives.
+Revisions are NVUE's: `POST /nvue_v1/revision`, `PATCH`/`DELETE` of any path with `?rev=` (a JSON
+merge; null unsets), `PATCH /nvue_v1/revision/<id>` `{"state":"apply"}`, `GET` of any path at
+`?rev=applied|startup|<id>`. Applying renders the tree as Cumulus does, to
+`/etc/network/interfaces` and `/etc/frr/frr.conf`, and runs the switch's own `ifreload -a` and
+`frr-reload.py --reload`, and restarts dhcrelay when its arguments change; a revision that cannot
+render is `invalid` before the switch is touched, one a tool fails on is `apply_fail` with what it
+printed, and the applied configuration stays the last that applied. Only part of NVUE's schema is
+emulated (interfaces, the one bridge domain, VLAN VNIs, VRFs with L3 VNIs on VLANs from 4024 up,
+BGP per VRF with ipv4-unicast and l2vpn-evpn, the NVE, EVPN, the default VRF's relay); a path
+outside it is refused by name. A VNI is a VXLAN device of its own in the bridge, not Cumulus 5's
+single VXLAN device. **Why:** stacks automate Cumulus switches through NVUE, and the twin needs a
+switch they can configure for tenants (VRFs, VNIs, EVPN) on any host; the data plane and routing
+must be real for the configuration to mean anything, and FRR, ifupdown2 and the kernel are what a
+Cumulus switch uses for both, so only NVUE, the layer above them, is emulated, and labelled so.
+**Narrows:** D4's "the NOS's management API is emulated where no runnable image exists" (Q11) to
+NVUE's schema as listed. **Reversed if:** a Cumulus VX image an operator supplies runs here; then
+`cumulus-vx` becomes runnable beside this.
+
+### D57 — NICo's software on a model machine is impersonated on the machine's own network path
 At `model` fidelity a BlueField and a host run no OS, so NICo holds every managed host it ingests
 at `DPUInitializing/Init`, waiting for the DPU's discovery, and nothing after it (host discovery,
 Ready, the rack's maintenance, the NVLink domain) can be tested with NICo on a rack of `model`

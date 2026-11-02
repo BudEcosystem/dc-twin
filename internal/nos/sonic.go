@@ -1,6 +1,7 @@
 package nos
 
 import (
+	_ "embed"
 	"encoding/json"
 	"fmt"
 	"regexp"
@@ -9,15 +10,19 @@ import (
 	"strings"
 )
 
-// SONiC-VS (D44). The twin renders, from the model, what a SONiC switch boots from: its HWSKU (the
-// lane map SAI's virtual switch reads to bind each port to its container's eth<n>, and the port
-// table), CONFIG_DB (config_db.json, which the image's own start.sh merges and loads) and, in place
-// of the bgp container's bgpcfgd that docker-sonic-vs does not carry, FRR's bgpd configuration
-// for the neighbours CONFIG_DB lists. Then it hands over to the image's own supervisord, which
-// starts redis, syncd, orchagent, the *mgrd daemons and FRR as SONiC does. SONiC's dhcp_relay
-// container, started beside it in its network namespace once CONFIG_DB is loaded, renders its own
-// relay command lines from CONFIG_DB's VLAN table (`dhcrelay … -a %h:%p … -id Vlan1000 -iu …`):
-// the twin writes the VLAN's dhcp_servers and nothing of the relay.
+// SONiC-VS (D44, D55). The twin renders, from the model, what a SONiC switch boots from: its HWSKU
+// (the lane map SAI's virtual switch reads to bind each port to its container's eth<n>, and the
+// port table), CONFIG_DB (config_db.json, which the image's own start.sh merges and loads) and
+// /etc/sonic/constants.yml, which a switch has from its host image. Then it hands over to the
+// image's own supervisord, which starts redis, syncd, orchagent and the *mgrd daemons as SONiC
+// does, but not the routing daemons docker-sonic-vs also carries: on a switch they are the bgp
+// container's. Beside it, in its network namespace and sharing its CONFIG_DB, run SONiC's own
+// containers as a switch runs them: dhcp_relay, which renders its relay command lines from
+// CONFIG_DB's VLAN table (`dhcrelay … -a %h:%p … -id Vlan1000 -iu …`); bgp (docker-fpm-frr) in
+// SONiC's unified routing mode, where frrcfgd renders FRR's configuration from CONFIG_DB's BGP_*
+// tables at start and applies every later change to them, VRFs and EVPN included; and gnmi,
+// SONiC's gNMI server, at the switch's Loopback0 over TLS. The twin writes the fabric's routing
+// into CONFIG_DB and nothing into FRR, the relay or the gNMI server.
 //
 // Port numbering follows SONiC's: a port is Ethernet<first lane>, its lanes counted along the front
 // panel in the profile's order from the port's speed, so a 48×1G + 4×10G management switch is
@@ -145,9 +150,59 @@ func SonicName(sw Switch, port string) string {
 	return ""
 }
 
-// ConfigDB renders a switch's config_db.json: DEVICE_METADATA, PORT (the cabled ports), VLAN with
-// its dhcp_servers, VLAN_MEMBER, VLAN_INTERFACE with the segment's gateway, INTERFACE for routed
-// and service ports, BGP_NEIGHBOR and DEVICE_NEIGHBOR for the fabric links.
+// The gNMI server's port and where its TLS material is in the switch (the shared /etc/sonic).
+const (
+	SonicGNMIPort  = 8080
+	sonicCredsDir  = "/etc/sonic/credentials"
+	sonicGNMICert  = sonicCredsDir + "/gnmi.crt"
+	sonicGNMIKey   = sonicCredsDir + "/gnmi.key"
+	sonicGNMICA    = sonicCredsDir + "/ca.crt"
+	sonicConstants = "/etc/sonic/constants.yml"
+	// sonicFabricPolicy is the route-map every fabric session takes both ways
+	sonicFabricPolicy = "DCTWIN_FABRIC"
+)
+
+//go:embed sonic-constants.yml
+var sonicConstantsYML string
+
+// sonicSidecars are SONiC's containers beside swss other than the relay: bgp and gnmi.
+var sonicSidecars = []Sidecar{
+	{Role: "bgp", Image: SonicBGPImage, CapAdd: []string{"NET_ADMIN", "NET_RAW", "SYS_ADMIN"},
+		Check: []string{"vtysh", "-c", "show running-config"}, Pending: sonicBGPPending},
+	{Role: "gnmi", Image: SonicGNMIImage,
+		Check: []string{"sh", "-c", "supervisorctl status gnmi-native; ss -Hltn"}, Pending: sonicGNMIPending},
+}
+
+// sonicBGPPending: FRR holds the switch's BGP instance. The bgp container loads the frr.conf it
+// rendered from CONFIG_DB with `vtysh -b` as soon as bgpd runs, which can be before bgpd answers
+// (under emulation it was, and the load left FRR without the instance); loading it again then is
+// what an operator does, and frrcfgd applies only changes after start.
+func sonicBGPPending(sw Switch, out string) (string, []string) {
+	if sw.ASN == 0 || strings.Contains(out, fmt.Sprintf("router bgp %d\n", sw.ASN)) {
+		return "", nil
+	}
+	return fmt.Sprintf("FRR's router bgp %d", sw.ASN), []string{"vtysh", "-b"}
+}
+
+var gnmiRunning = regexp.MustCompile(`(?m)^gnmi-native\s+RUNNING`)
+
+// sonicGNMIPending: the gNMI server runs and listens on its port.
+func sonicGNMIPending(sw Switch, out string) (string, []string) {
+	if sw.GNMI == nil {
+		return "", nil // no TLS material: the server listens on loopback only, which nothing waits for
+	}
+	if !gnmiRunning.MatchString(out) || !strings.Contains(out, fmt.Sprintf(":%d ", SonicGNMIPort)) {
+		return fmt.Sprintf("the gNMI server on port %d", SonicGNMIPort), nil
+	}
+	return "", nil
+}
+
+// ConfigDB renders a switch's config_db.json: DEVICE_METADATA (in SONiC's unified routing mode),
+// PORT (the cabled ports), VLAN with its dhcp_servers, VLAN_MEMBER, VLAN_INTERFACE with the
+// segment's gateway, LOOPBACK_INTERFACE, INTERFACE for routed and service ports, DEVICE_NEIGHBOR
+// for the fabric links, the BGP instance with a neighbour per fabric link (BGP_GLOBALS,
+// BGP_GLOBALS_AF, ROUTE_REDISTRIBUTE, BGP_NEIGHBOR, BGP_NEIGHBOR_AF, keyed by VRF as frrcfgd reads
+// them), and GNMI.
 func ConfigDB(sw Switch) (map[string]map[string]any, error) {
 	ports, list, err := sonicCabled(sw)
 	if err != nil {
@@ -160,8 +215,10 @@ func ConfigDB(sw Switch) (map[string]map[string]any, error) {
 		}
 		db[table][key] = v
 	}
+	// unified: FRR's configuration is CONFIG_DB's, rendered and kept by frrcfgd, which is what
+	// takes a VRF, a VNI or an EVPN address family written there to FRR
 	meta := map[string]any{"hostname": sw.Hostname, "hwsku": SonicHWSKU(sw), "platform": sonicPlatform,
-		"docker_routing_config_mode": "separated", "type": "LeafRouter"}
+		"docker_routing_config_mode": "unified", "frr_mgmt_framework_config": "true", "type": "LeafRouter"}
 	if len(sw.Vlans) > 0 {
 		meta["type"] = "ToRRouter" // the switch a rack's hosts hang off
 	}
@@ -200,12 +257,35 @@ func ConfigDB(sw Switch) (map[string]map[string]any, error) {
 		put("VLAN_INTERFACE", v.Name, map[string]any{})
 		put("VLAN_INTERFACE", v.Name+"|"+v.Gateway.String(), map[string]any{})
 	}
+	if sw.Loopback.IsValid() {
+		put("LOOPBACK_INTERFACE", "Loopback0", map[string]any{})
+		put("LOOPBACK_INTERFACE", "Loopback0|"+sw.Loopback.String()+"/32", map[string]any{})
+	}
+	// the BGP instance: numbered eBGP to each fabric peer, connected routes (the segments, the
+	// /31s, the service subnets, Loopback0) redistributed, a data centre's timers (3 s keepalives,
+	// 10 s connect retry) so a replaced cable's session comes back in seconds, as on a switch
+	if sw.ASN != 0 {
+		put("BGP_GLOBALS", "default", map[string]any{"local_asn": strconv.FormatUint(uint64(sw.ASN), 10), "router_id": sw.RouterID.String(),
+			"load_balance_mp_relax": "true", "keepalive": "3", "holdtime": "9"})
+		put("BGP_GLOBALS_AF", "default|ipv4_unicast", map[string]any{"redistribute_connected": "true"})
+		put("ROUTE_REDISTRIBUTE", "default|connected|bgp|ipv4", map[string]any{})
+	}
+	// FRR requires a policy on every eBGP session (ebgp-requires-policy, which frrcfgd has no
+	// field for) and exchanges nothing without one: each fabric session takes a permit-all
+	// route-map both ways, as a switch's configuration gives it one
+	if len(sw.Routed) > 0 {
+		put("ROUTE_MAP", sonicFabricPolicy+"|10", map[string]any{"route_operation": "permit"})
+	}
 	for _, r := range sw.Routed {
 		name := ports[r.Port].Name
 		put("INTERFACE", name, map[string]any{})
 		put("INTERFACE", name+"|"+r.Addr.String(), map[string]any{})
-		put("BGP_NEIGHBOR", r.Peer.String(), map[string]any{"asn": strconv.FormatUint(uint64(r.PeerASN), 10), "name": r.PeerName,
-			"local_addr": r.Addr.Addr().String(), "admin_status": "up", "keepalive": "3", "holdtime": "9"})
+		put("BGP_NEIGHBOR", "default|"+r.Peer.String(), map[string]any{"asn": strconv.FormatUint(uint64(r.PeerASN), 10), "name": r.PeerName,
+			"local_addr": r.Addr.Addr().String(), "admin_status": "up", "keepalive": "3", "holdtime": "9", "conn_retry": "10"})
+		// route_map_in and _out are leaf-lists, which config_db.json holds as JSON lists (a string
+		// would be iterated by frrcfgd's template, character by character)
+		put("BGP_NEIGHBOR_AF", "default|"+r.Peer.String()+"|ipv4_unicast", map[string]any{"admin_status": "true",
+			"route_map_in": []string{sonicFabricPolicy}, "route_map_out": []string{sonicFabricPolicy}})
 		if host, port, ok := strings.Cut(r.PeerName, ":"); ok {
 			put("DEVICE_NEIGHBOR", name, map[string]any{"name": host, "port": port})
 		}
@@ -214,6 +294,12 @@ func ConfigDB(sw Switch) (map[string]map[string]any, error) {
 		name := ports[s.Port].Name
 		put("INTERFACE", name, map[string]any{})
 		put("INTERFACE", name+"|"+s.Gateway.String(), map[string]any{})
+	}
+	// mutual TLS: a client needs a certificate from the CA the server's chains to; user_auth none,
+	// so a client's certificate is all it needs (no PAM users, no GNMI_CLIENT_CERT roles)
+	if sw.GNMI != nil {
+		put("GNMI", "gnmi", map[string]any{"port": strconv.Itoa(SonicGNMIPort), "client_auth": "true", "user_auth": "none", "log_level": "2"})
+		put("GNMI", "certs", map[string]any{"server_crt": sonicGNMICert, "server_key": sonicGNMIKey, "ca_crt": sonicGNMICA})
 	}
 	return db, nil
 }
@@ -235,41 +321,12 @@ func sonicReadyKeys(sw Switch, ports map[string]SonicPort) []string {
 	return keys
 }
 
-// sonicBGPConf is the bgpd configuration bgpcfgd would write for CONFIG_DB's BGP_NEIGHBOR: numbered
-// eBGP to each, connected routes redistributed (the segments, the /31s, the service subnets), with
-// a data centre's timers (3 s keepalives, 10 s connect retry) so a replaced cable's session comes
-// back in seconds, as it does on a switch.
-func sonicBGPConf(sw Switch) string {
-	var b strings.Builder
-	w := func(format string, a ...any) { fmt.Fprintf(&b, format+"\n", a...) }
-	w("! dc-twin: %s's BGP, rendered from the estate in place of SONiC's bgpcfgd (docker-sonic-vs has none), for CONFIG_DB's BGP_NEIGHBOR", sw.Hostname)
-	w("log syslog informational")
-	w("router bgp %d", sw.ASN)
-	w(" bgp router-id %s", sw.RouterID)
-	w(" bgp log-neighbor-changes")
-	w(" no bgp ebgp-requires-policy")
-	w(" bgp bestpath as-path multipath-relax")
-	w(" timers bgp 3 9")
-	for _, r := range sw.Routed {
-		w(" neighbor %s remote-as %d", r.Peer, r.PeerASN)
-		w(" neighbor %s description %s", r.Peer, r.PeerName)
-		w(" neighbor %s timers connect 10", r.Peer)
-	}
-	w(" address-family ipv4 unicast")
-	for _, r := range sw.Routed {
-		w("  neighbor %s activate", r.Peer)
-	}
-	w("  redistribute connected")
-	w(" exit-address-family")
-	w("!")
-	return b.String()
-}
-
 // sonicStartScript is the switch container's command: wait for the twin to move the ports in,
-// render the HWSKU, config_db.json and bgpd.conf, then exec the image's supervisord (whose start.sh
-// loads CONFIG_DB and starts SONiC). A background job reports `started` once SONiC has created its
-// ports and every routed interface's address is in place, having started bgpd (start.sh does not:
-// on a switch the bgp container does).
+// render the HWSKU, config_db.json, constants.yml and the gNMI server's TLS files, take the routing
+// daemons out of the image's start.sh (they are the bgp container's), then exec the image's
+// supervisord (whose start.sh loads CONFIG_DB and starts SONiC). A background job reports
+// `started` once SONiC has created its ports and every routed interface's address is in place;
+// the substrate then starts the relay and the sidecars.
 func sonicStartScript(sw Switch) (string, error) {
 	ports, list, err := sonicCabled(sw)
 	if err != nil {
@@ -326,11 +383,22 @@ func sonicStartScript(sw Switch) (string, error) {
 	b.Write(cfg)
 	w("")
 	w("EOF")
-	if len(sw.Routed) > 0 {
-		w("cat > /etc/frr/bgpd.conf <<'EOF'")
-		b.WriteString(sonicBGPConf(sw))
-		w("EOF")
+	w("cat > %s <<'EOF'", sonicConstants)
+	b.WriteString(strings.TrimSuffix(sonicConstantsYML, "\n"))
+	w("")
+	w("EOF")
+	if sw.GNMI != nil {
+		w("mkdir -p %s && chmod 0755 %s", sonicCredsDir, sonicCredsDir)
+		for _, f := range []struct{ path, pem string }{{sonicGNMICA, sw.GNMI.CA}, {sonicGNMICert, sw.GNMI.Cert}, {sonicGNMIKey, sw.GNMI.Key}} {
+			w("cat > %s <<'EOF'", f.path)
+			b.WriteString(strings.TrimSuffix(f.pem, "\n"))
+			w("")
+			w("EOF")
+		}
+		w("chmod 0600 %s", sonicGNMIKey)
 	}
+	w("# zebra, staticd, mgmtd and fpmsyncd are the bgp container's, as on a switch")
+	w("sed -i -E '/supervisorctl start (zebra|staticd|mgmtd|fpmsyncd)$/d' /usr/bin/start.sh")
 	w("(")
 	w("  until [ \"$(redis-cli -n 0 EXISTS PORT_TABLE:PortInitDone 2>/dev/null)\" = 1 ]; do sleep 1; done")
 	w("  log \"ports created\"")
@@ -338,9 +406,6 @@ func sonicStartScript(sw Switch) (string, error) {
 		w("  until [ \"$(redis-cli -n 6 HGET '%s' state 2>/dev/null)\" = ok ]; do sleep 1; done", k)
 	}
 	w("  log \"interfaces ready\"")
-	if len(sw.Routed) > 0 {
-		w("  supervisorctl start bgpd >/dev/null")
-	}
 	w("  log started")
 	w(") &")
 	w("exec env HWSKU=%s /usr/local/bin/supervisord", sku)
