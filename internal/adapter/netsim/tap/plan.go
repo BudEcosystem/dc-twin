@@ -362,17 +362,21 @@ func BuildPlan(m *model.Model, est *schema.Estate, outputs map[string]string, ho
 		p.Attach = append(p.Attach, &AttachPlan{Container: at.Container, Netns: at.Netns, Interface: ifname, Switch: sp, Port: portName, SwitchIf: swIf, Address: addr, Gateway: gw})
 		sp.Config.Service = append(sp.Config.Service, nos.Service{Port: portName, Gateway: netip.PrefixFrom(gw, addr.Bits())})
 	}
+	// every real switch's Loopback0, its router id, from the top of the underlay down: where its
+	// management interfaces answer in band (and a VTEP's source), reached across the fabric as a
+	// connected route its BGP redistributes
+	b4 := ul.Addr().As4()
+	first := uint32(b4[0])<<24 | uint32(b4[1])<<16 | uint32(b4[2])<<8 | uint32(b4[3])
+	top := first + uint32(1)<<(32-ul.Bits()) - 2 // the last host address
+	if n := uint32(len(p.Switches)); n > 0 && top+1-n < first+uint32(2*len(p.Links)) {
+		return nil, fmt.Errorf("the underlay %s holds too few addresses for %d fabric links and %d loopbacks", ul, len(p.Links), n)
+	}
+	for i, sp := range p.Switches {
+		lo := v4(top - uint32(i))
+		sp.Config.Loopback, sp.Config.RouterID = lo, lo
+	}
 	for _, sp := range p.Switches {
-		c := &sp.Config
-		switch {
-		case len(c.Routed) > 0:
-			c.RouterID = c.Routed[0].Addr.Addr()
-		case len(c.Vlans) > 0:
-			c.RouterID = c.Vlans[0].Gateway.Addr()
-		case len(c.Service) > 0:
-			c.RouterID = c.Service[0].Gateway.Addr()
-		}
-		if _, err := sp.NOS.StartScript(*c); err != nil {
+		if _, err := sp.NOS.StartScript(sp.Config); err != nil {
 			return nil, err
 		}
 	}

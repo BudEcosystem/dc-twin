@@ -52,6 +52,13 @@ type Entry struct {
 	// in its network namespace (SONiC's dhcp_relay container beside swss); empty when the relay
 	// runs in the switch container.
 	RelayImage string
+	// Sidecars are the NOS's other containers, started beside the switch container in its
+	// network namespace once it has started, as a SONiC switch runs bgp and gnmi beside swss.
+	Sidecars []Sidecar
+	// API is the management API the twin serves for the NOS and configures it through, once it
+	// has started: "nvue" (package nvue, D56), or "" when the switch configures itself from its
+	// start-up script.
+	API string
 	// StartTimeout bounds a switch's start-up: how long `up` waits for it to finish.
 	StartTimeout time.Duration
 	// SoftwareChecksum: a host cabled to one of its ports must checksum its own frames. SONiC-VS
@@ -70,6 +77,31 @@ type Entry struct {
 	Provides []string
 	// IsNot is what the fidelity report prints for it.
 	IsNot []string
+}
+
+// Sidecar is one container a NOS runs beside its switch container: in its network namespace
+// (so with its hostname and its ports), with every shared directory (Entry.Shared; read-only
+// where the relay's is), tmpfs at /tmp and /var/tmp.
+type Sidecar struct {
+	// Role names it: the container is <switch container>-<role>, labelled dc-twin.role=<role>.
+	Role   string
+	Image  string
+	CapAdd []string
+	// Check is what the substrate runs in it to see it ready; Pending reads Check's output and
+	// says what it still waits for ("" when ready) and, when that is something a command run in
+	// it fixes, the command (Repair, run once per check).
+	Check   []string
+	Pending func(sw Switch, out string) (waiting string, repair []string)
+}
+
+// Sidecar returns the NOS's sidecar of a role.
+func (e Entry) Sidecar(role string) (Sidecar, bool) {
+	for _, s := range e.Sidecars {
+		if s.Role == role {
+			return s, true
+		}
+	}
+	return Sidecar{}, false
 }
 
 // Mount is a directory a switch container shares with its relay container.
@@ -92,9 +124,11 @@ type Relay struct {
 var registry = map[string]Entry{
 	"none": {Name: "none", Relay: Relay{Implementation: "the twin relay (model switch)", Circuit: "hostname:port", LinkSelection: true}},
 	SonicVS: {Name: SonicVS, Real: true, Runnable: true,
-		Image: SonicVSImage, RelayImage: SonicRelayImage,
-		Obtain: "docker pull --platform linux/amd64 " + SonicVSImage + "; the relay image is SONiC's docker-dhcp-relay.gz from build " + SonicRelayBuild + " (" + SonicRelayArtifact + ", sha256 " + SonicRelaySHA256 + "), docker load-ed and tagged " + SonicRelayImage + " (scripts/linux-substrate-e2e.sh does both)",
-		Arch:   []string{"x86_64"}, Platform: "linux/amd64", Emulated: []string{"aarch64"},
+		Image: SonicVSImage, RelayImage: SonicRelayImage, Sidecars: sonicSidecars,
+		Obtain: "docker pull --platform linux/amd64 " + SonicVSImage + "; the relay, bgp and gnmi images are SONiC's docker-dhcp-relay.gz, docker-fpm-frr.gz and docker-sonic-gnmi.gz from build " + SonicRelayBuild +
+			" (" + SonicRelayArtifact + ", sha256 " + SonicRelaySHA256 + "; " + SonicBGPArtifact + ", sha256 " + SonicBGPSHA256 + "; " + SonicGNMIArtifact + ", sha256 " + SonicGNMISHA256 + "), each docker load-ed and tagged " +
+			SonicRelayImage + ", " + SonicBGPImage + ", " + SonicGNMIImage + " (scripts/linux-substrate-e2e.sh does it)",
+		Arch: []string{"x86_64"}, Platform: "linux/amd64", Emulated: []string{"aarch64"},
 		Privileged: true, Sysctls: map[string]string{"net.ipv4.ip_forward": "1"},
 		Shared: []Mount{{Path: "/etc/sonic", RelayReadOnly: true}, {Path: "/var/run/redis"}},
 		// emulated, a switch boots in under 2 minutes on a quiet host and took over 10 with the
@@ -102,10 +136,12 @@ var registry = map[string]Entry{
 		// emulated Python process
 		StartTimeout: 30 * time.Minute, SoftwareChecksum: true,
 		Relay:    Relay{Implementation: "SONiC's dhcp_relay container: ISC dhcrelay 4.4.3-P1 with SONiC's patches, its command line rendered by SONiC from CONFIG_DB (`-a %h:%p`)", Circuit: "hostname:port"},
-		Provides: []string{"dhcp/relay-giaddr", "dhcp/relay-option-82", "switch/bgp-numbered"},
+		Provides: []string{"dhcp/relay-giaddr", "dhcp/relay-option-82", "switch/bgp-numbered", "switch/evpn", "switch/vrf", "switch/gnmi"},
 		IsNot: []string{
-			"sonic-vs is SONiC's virtual switch (docker-sonic-vs " + SonicVSVersion + "): swss, syncd and FRR as SONiC runs them, over SAI's virtual switch (vslib), whose forwarding is the Linux kernel's; no buffers, queues, ACL hardware or ASIC counters behave as a switch's do.",
-			"docker-sonic-vs carries no bgp container: the twin writes FRR's bgpd configuration from the same neighbours it puts in CONFIG_DB's BGP_NEIGHBOR, which is bgpcfgd's job on a switch; BGP is numbered eBGP over /31s, with no unnumbered sessions, no EVPN and no LLDP.",
+			"sonic-vs is SONiC's virtual switch (docker-sonic-vs " + SonicVSVersion + "): swss, syncd and the *mgrd daemons as SONiC runs them, over SAI's virtual switch (vslib), whose forwarding is the Linux kernel's; no buffers, queues, ACL hardware or ASIC counters behave as a switch's do.",
+			"Routing is SONiC's bgp container (docker-fpm-frr, build " + SonicRelayBuild + ", a later build than the switch image; the two share only CONFIG_DB and the network namespace, as on a switch), in place of the FRR docker-sonic-vs carries, in its unified mode: FRR's configuration comes from CONFIG_DB's BGP_* tables through frrcfgd, so a VRF, a VNI or an EVPN address family written to CONFIG_DB reaches FRR as it does on a switch whose management framework configures it. The twin writes the fabric's numbered eBGP over /31s there; no BGP unnumbered and no LLDP.",
+			"gNMI is SONiC's gnmi container (docker-sonic-gnmi, build " + SonicRelayBuild + ") at the switch's Loopback0, port 8080, over TLS with a certificate the estate CA issued, accepting only clients with a certificate from the same CA (stack-inputs/switches.json names the switches and the client's files). It reads every SONiC database and writes CONFIG_DB through SONiC's YANG models (the management framework's translib); its native CONFIG_DB writes go through the host's D-Bus services, which no container here runs, and fail. No REST, SSH CLI or management-port address: gNMI is reached in band, across the fabric.",
+			"A VRF needs the Docker host's kernel to have VRF support (CONFIG_NET_VRF), and a VNI its vxlan driver: where one is missing, SONiC's managers cannot create the device and FRR refuses the VRF. `up` probes for both and the fidelity report says what it found.",
 			"Its DHCP relay is SONiC's dhcp_relay container from a later SONiC build (" + SonicRelayBuild + ") than the switch image; the two share only CONFIG_DB and the network namespace, as on a switch. Option 82's circuit id is SONiC's `hostname:alias`, the alias being the model's port name, and its remote id the switch's MAC.",
 			"Only a switch's cabled ports exist in its config_db (SONiC-VS needs an interface behind every port it creates): an uncabled port is absent, not down. Ports are named EthernetN by their first lane, lanes by speed (1 up to 25G, 2 at 50G, 4 up to 200G, 8 above), with MTU 1500, the twin's cables'.",
 			"Hosts cabled to a SONiC-VS port (attached hosts, a peer switch's fabric port) checksum in software: the twin turns transmit checksum offload off on their veths, as SONiC's own test harness does.",
@@ -124,20 +160,40 @@ var registry = map[string]Entry{
 			"Its dhcrelay is unpatched: option 82's circuit id is the interface the request arrived on (the segment's VLAN), the same for every port of a segment, where SONiC's patched build sends hostname:port; no remote id and no link selection.",
 			"BGP is numbered eBGP over /31s on each fabric link; no BGP unnumbered, no EVPN and no LLDP daemon.",
 		}},
+	NVUEFRR: {Name: NVUEFRR, Real: true, Image: NVUEFRRImage, Arch: []string{"aarch64", "x86_64"}, Runnable: true, API: "nvue",
+		Obtain:       "build it (test/linuxnet/nos-nvue/Containerfile; scripts/linux-substrate-e2e.sh does) or set spec.adapters.network.nos.image",
+		Sysctls:      map[string]string{"net.ipv4.ip_forward": "1", "net.ipv6.conf.all.disable_ipv6": "1", "net.ipv6.conf.default.disable_ipv6": "1"},
+		StartTimeout: 90 * time.Second,
+		Relay:        Relay{Implementation: "ISC dhcrelay 4.4.3-P1 (Debian bookworm, unpatched; Cumulus Linux patches its own)", Circuit: "interface"},
+		Provides:     []string{"dhcp/relay-giaddr", "switch/bgp-numbered", "switch/evpn", "switch/vrf", "switch/nvue"},
+		IsNot: []string{
+			"generic/nvue-frr is not Cumulus Linux, which is not freely redistributable: it is what Cumulus Linux is built from (Debian bookworm, FRR 8.4, ifupdown2, ISC dhcrelay) configured as Cumulus is, through NVUE. NVUE is the twin's emulation (D56): its REST API at the switch's Loopback0, port 8765, over TLS with a certificate the estate CA issued, user cumulus with a password stack-inputs/switches.json gives; revisions are created, patched and applied as NVUE's are, and applying renders /etc/network/interfaces and /etc/frr/frr.conf, which the switch's own ifreload and frr-reload.py apply. No `nv` CLI, SSH or management-port address: NVUE is reached in band, across the fabric.",
+			"NVUE's schema is emulated in part: system hostname; interfaces (swp<n> ports, vlan<id> SVIs, lo) with addresses, VRF membership, link state and bridge access VLANs; the one VLAN-aware bridge, br_default, and its VLANs' VNIs; VRFs with an L3 VNI (on a VLAN from 4024 up, as NVUE reserves); BGP (the router's AS and router id; per VRF, numbered neighbours with ipv4-unicast and l2vpn-evpn, connected and static redistribution, export to EVPN); the NVE's VXLAN source address; EVPN; the default VRF's DHCP relay. A path outside it is refused by name. Revisions are numbered 1, 2, …, kept for the life of the twin, and applied synchronously; no rollback, no `nv config save` and nothing operational beyond the applied configuration.",
+			"A VNI is a VXLAN device of its own in br_default (one per VNI, not Cumulus 5's single VXLAN device), learning off; a VRF needs the Docker host's kernel to have VRF devices and a VNI its vxlan driver, which `up` probes for.",
+			"Its dhcrelay is unpatched: option 82's circuit id is the interface the request arrived on (the SVI), the same for every port of a segment; no remote id and no link selection.",
+		}},
 }
 
 // FRRDHCRelay is the generic NOS the twin can run on any architecture.
 const FRRDHCRelay = "generic/frr-dhcrelay"
+
+// NVUEFRR is the NOS configured through NVUE, Cumulus Linux's API, emulated over what Cumulus
+// Linux is built from (D56).
+const NVUEFRR = "generic/nvue-frr"
+
+// NVUEFRRImage is its container image (test/linuxnet/nos-nvue/Containerfile).
+const NVUEFRRImage = "dctwin-nos-nvue-frr:bookworm"
 
 // SonicVS is SONiC's virtual switch.
 const SonicVS = "sonic-vs"
 
 // The SONiC images, pinned. The switch is docker-sonic-vs as the SONiC project publishes it in its
 // Azure container registry (master build 1112479, commit 83775acca, 2026-05-13), by digest. The
-// project publishes no dhcp_relay image to a registry; its official VS build publishes one as a
-// build artifact (docker-dhcp-relay.gz, a `docker save`), pinned here by build and by the
-// tarball's sha256, loaded under a local tag. The two builds share CONFIG_DB's schema, which is
-// all a relay reads.
+// project publishes no dhcp_relay, bgp or gnmi image to a registry; its official VS build
+// publishes each as a build artifact (docker-dhcp-relay.gz, docker-fpm-frr.gz,
+// docker-sonic-gnmi.gz, each a `docker save`), pinned here by build and by the tarball's sha256,
+// loaded under a local tag. The three come from one build; they share CONFIG_DB's schema with the
+// switch image, which is what they read and write.
 const (
 	SonicVSImage       = "sonicdev-microsoft.azurecr.io/docker-sonic-vs@sha256:0de1c335c5ce02b1f1102068eeb44c8272147535647acd6a3153e0cb857b44ed"
 	SonicVSVersion     = "master.1112479-83775acca"
@@ -145,6 +201,12 @@ const (
 	SonicRelayBuild    = "master.1250767-408ffc98c"
 	SonicRelayArtifact = "https://sonic-build.azurewebsites.net/api/sonic/artifacts?branchName=master&buildId=1250767&platform=vs&target=target/docker-dhcp-relay.gz"
 	SonicRelaySHA256   = "939cbdb454b76849284d3e8f51e26da41f63a87a3e763047bf61ecad091fc980"
+	SonicBGPImage      = "dctwin-sonic-fpm-frr:master.1250767-408ffc98c"
+	SonicBGPArtifact   = "https://sonic-build.azurewebsites.net/api/sonic/artifacts?branchName=master&buildId=1250767&platform=vs&target=target/docker-fpm-frr.gz"
+	SonicBGPSHA256     = "c1daf6372d1eca20eeac6da7a7f52678a1964e2d215ff30edc6cb3a1b794116d"
+	SonicGNMIImage     = "dctwin-sonic-gnmi:master.1250767-408ffc98c"
+	SonicGNMIArtifact  = "https://sonic-build.azurewebsites.net/api/sonic/artifacts?branchName=master&buildId=1250767&platform=vs&target=target/docker-sonic-gnmi.gz"
+	SonicGNMISHA256    = "864ed2431d7f6b963fff005dbb458d84e0b8ae12779b20fbd96ccd29027a9244"
 )
 
 // Lookup returns a registered NOS.
@@ -196,6 +258,12 @@ type Switch struct {
 	MAC      string
 	ASN      uint32
 	RouterID netip.Addr
+	// Loopback is the switch's Loopback0 address (a /32, its router id), where its management
+	// interfaces answer in band; invalid when the plan gave it none.
+	Loopback netip.Addr
+	// GNMI is the TLS material of the switch's gNMI server, issued by the estate CA at up; nil
+	// at plan time and for a NOS without one.
+	GNMI *TLSFiles
 	// Panel is every front-panel port of the switch in the profile's order (its Ethernet ports
 	// that are not management ports), cabled or not: what a NOS that numbers its ports numbers
 	// them from, so a port's number does not depend on what is cabled.
@@ -203,6 +271,12 @@ type Switch struct {
 	Vlans   []Vlan
 	Routed  []Routed
 	Service []Service
+}
+
+// TLSFiles is a server's certificate, its key and the CA its clients' certificates must chain to,
+// all PEM.
+type TLSFiles struct {
+	CA, Cert, Key string
 }
 
 // PanelPort is a front-panel port: the model's name and speed ("1G", "400G").
@@ -264,15 +338,21 @@ func (s Switch) Ports() []string {
 // eth1, eth2, … in panel order (eth0 is its management port). Empty when the NOS has no such
 // port.
 func (e Entry) Interface(sw Switch, port string) string {
-	if e.Name == SonicVS {
-		for i, p := range sw.Panel {
-			if p.Name == port {
-				return fmt.Sprintf("eth%d", i+1)
-			}
-		}
-		return ""
+	prefix := ""
+	switch e.Name {
+	case SonicVS:
+		prefix = "eth"
+	case NVUEFRR:
+		prefix = "swp" // Cumulus Linux's front-panel ports
+	default:
+		return port
 	}
-	return port
+	for i, p := range sw.Panel {
+		if p.Name == port {
+			return fmt.Sprintf("%s%d", prefix, i+1)
+		}
+	}
+	return ""
 }
 
 // Entrypoint is the switch container's entrypoint: a shell running the start-up script, which is
@@ -297,6 +377,8 @@ func (e Entry) StartScript(sw Switch) (string, error) {
 		return e.frrStartScript(sw), nil
 	case SonicVS:
 		return sonicStartScript(sw)
+	case NVUEFRR:
+		return e.nvueStartScript(sw), nil
 	}
 	return "", fmt.Errorf("nos %s: the twin renders no configuration for it", e.Name)
 }
@@ -321,6 +403,9 @@ func (e Entry) frrStartScript(sw Switch) string {
 	w("done")
 	w("log \"ports present: $want\"")
 	w("ip link set lo up")
+	if sw.Loopback.IsValid() {
+		w("ip addr add %s/32 dev lo", sw.Loopback)
+	}
 	for _, v := range sw.Vlans {
 		w("# %s: network %s, rack %s", v.Name, v.Network, v.Rack)
 		w("ip link add %s type bridge", v.Name)
@@ -348,6 +433,48 @@ func (e Entry) frrStartScript(sw Switch) string {
 		w("log 'dhcrelay %s'", args)
 		w("dhcrelay %s >/var/log/dhcrelay.log 2>&1 &", args)
 	}
+	w("log started")
+	w("exec sleep infinity")
+	return b.String()
+}
+
+// nvueStartScript brings a generic/nvue-frr switch up unconfigured, as a switch boots before its
+// startup configuration is applied: its ports present, FRR running with no routing, ifupdown2's
+// state directory in place. The twin then applies the startup configuration through NVUE.
+func (e Entry) nvueStartScript(sw Switch) string {
+	var b strings.Builder
+	w := func(format string, a ...any) { fmt.Fprintf(&b, format+"\n", a...) }
+	var want []string
+	for _, p := range sw.Ports() {
+		want = append(want, e.Interface(sw, p))
+	}
+	sort.Strings(want)
+	w("#!/bin/sh")
+	w("# dc-twin: %s for %s (%s); configured through NVUE once up", e.Name, sw.Hostname, sw.Path)
+	w("log() { echo \"dctwin-nos $(date +%%H:%%M:%%S): $*\"; }")
+	w("want=%q", strings.Join(want, " "))
+	w("n=0")
+	w("for p in $want; do")
+	w("  while [ ! -e /sys/class/net/$p ]; do n=$((n+1)); [ $n -gt 3000 ] && { log \"port $p never arrived\"; exit 1; }; sleep 0.1; done")
+	w("done")
+	w("log \"ports present: $want\"")
+	w("ip link set lo up")
+	w("mkdir -p /run/network /etc/network/interfaces.d /var/log/frr /var/run/frr && chown frr:frr /var/log/frr /var/run/frr")
+	w("printf 'auto lo\\niface lo inet loopback\\n' > /etc/network/interfaces")
+	w("sed -i 's/^bgpd=no/bgpd=yes/' /etc/frr/daemons")
+	w("echo 'service integrated-vtysh-config' > /etc/frr/vtysh.conf")
+	w("printf 'frr defaults datacenter\\nhostname %s\\nlog syslog informational\\nservice integrated-vtysh-config\\n!\\n' > /etc/frr/frr.conf", sw.Hostname)
+	w("chown frr:frr /etc/frr/frr.conf /etc/frr/vtysh.conf")
+	w("/usr/lib/frr/frrinit.sh start")
+	w("# the DHCP relay NVUE configures: dhcrelay with the arguments its apply writes, restarted when")
+	w("# it ends (an apply that changes them ends it)")
+	w("(")
+	w("  while :; do")
+	w("    a=$(cat /run/dctwin-relay 2>/dev/null)")
+	w("    if [ -n \"$a\" ]; then dhcrelay $a </dev/null >>/var/log/dhcrelay.log 2>&1; fi")
+	w("    sleep 1")
+	w("  done")
+	w(") &")
 	w("log started")
 	w("exec sleep infinity")
 	return b.String()

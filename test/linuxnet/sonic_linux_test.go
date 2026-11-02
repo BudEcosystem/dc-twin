@@ -5,22 +5,163 @@ package linuxnet
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
+	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/BudEcosystem/dc-twin/internal/adapter/netsim/tap"
 	"github.com/BudEcosystem/dc-twin/internal/adapter/redfish"
 	"github.com/BudEcosystem/dc-twin/internal/engine"
 	"github.com/BudEcosystem/dc-twin/internal/nos"
 	"github.com/BudEcosystem/dc-twin/internal/schema"
 )
 
+// sonicManagement: SONiC's bgp and gnmi containers beside each switch (D55). FRR runs in the bgp
+// container, configured from CONFIG_DB by frrcfgd. gNMI answers at each switch's Loopback0, which
+// BGP carries across the fabric: from beside the aggregation switch, a client with the estate-CA
+// certificate the twin hands the stack reads the leaf's CONFIG_DB and creates a VRF on it through
+// SONiC's YANG model, which frrcfgd takes to FRR where the host's kernel can create the VRF; a
+// client with any other certificate is refused. An EVPN VNI written to CONFIG_DB becomes the
+// kernel's VXLAN device (vxlanmgrd) and FRR's advertise-all-vni (frrcfgd).
+func sonicManagement(t *testing.T, stateDir string, sub *tap.Substrate, leaf, agg string) {
+	t.Helper()
+	ctx := context.Background()
+	for _, path := range []string{leaf, agg} {
+		out, err := sub.SidecarExec(ctx, path, "bgp", "supervisorctl", "status")
+		t.Logf("%s: its bgp container's programs:\n%s", path, indent(out))
+		if err != nil && !strings.Contains(out, "frrcfgd") {
+			t.Errorf("%s: no bgp container: %v", path, err)
+		}
+		for _, d := range []string{"zebra", "bgpd", "fpmsyncd", "frrcfgd"} {
+			if !regexp.MustCompile(`(?m)^` + d + `\s+RUNNING`).MatchString(out) {
+				t.Errorf("%s: %s is not running in the bgp container", path, d)
+			}
+		}
+		out, _ = sub.Exec(ctx, path, "sh", "-c", "supervisorctl status zebra bgpd fpmsyncd")
+		if strings.Contains(out, "RUNNING") {
+			t.Errorf("%s: the switch container runs routing daemons of its own:\n%s", path, out)
+		}
+	}
+	var inputs []tap.SwitchInput
+	b, err := os.ReadFile(filepath.Join(stateDir, "stack-inputs", tap.SwitchesFile))
+	if err != nil || json.Unmarshal(b, &inputs) != nil {
+		t.Fatalf("stack-inputs/%s: %v", tap.SwitchesFile, err)
+	}
+	t.Logf("stack-inputs/%s:\n%s", tap.SwitchesFile, indent(string(b)))
+	files := map[string]string{}
+	for _, f := range []string{"switch-client.crt", "switch-client.key", "switch-ca.crt"} {
+		b, err := os.ReadFile(filepath.Join(stateDir, "stack-inputs", f))
+		if err != nil {
+			t.Fatal(err)
+		}
+		files[f] = string(b)
+	}
+	var target string
+	for _, in := range inputs {
+		if in.Path == leaf {
+			target = in.GNMI
+		}
+	}
+	if target == "" {
+		t.Fatalf("stack-inputs names no gNMI server for %s", leaf)
+	}
+	// a client beside the aggregation switch (its gnmi container has SONiC's gnmi_get and
+	// gnmi_set), reaching the leaf's loopback across the fabric
+	host, _, _ := strings.Cut(target, ":")
+	hostname := ""
+	for _, in := range inputs {
+		if in.Path == leaf {
+			hostname = in.Hostname
+		}
+	}
+	gnmi := func(tool string, args ...string) (string, error) {
+		script := `mkdir -p /tmp/c && printf '%s' "$1" > /tmp/c/client.crt && printf '%s' "$2" > /tmp/c/client.key && printf '%s' "$3" > /tmp/c/ca.crt && printf '%s' "$4" > /tmp/c/body.json && shift 4 && cd /tmp/c && exec "$@"`
+		cmd := append([]string{"sh", "-c", script, "sh", files["switch-client.crt"], files["switch-client.key"], files["switch-ca.crt"], `{"sonic-vrf:VRF_LIST":[{"name":"Vrf-tenant-a","vni":10001}]}`,
+			tool, "-target_addr", target, "-target_name", hostname, "-ca", "ca.crt", "-cert", "client.crt", "-key", "client.key", "-logtostderr"}, args...)
+		return sub.SidecarExec(ctx, agg, "gnmi", cmd...)
+	}
+	out, err := gnmi("gnmi_get", "-xpath_target", "CONFIG_DB", "-xpath", "BGP_NEIGHBOR")
+	t.Logf("gNMI Get CONFIG_DB/BGP_NEIGHBOR from %s at %s (across the fabric):\n%s", hostname, target, indent(out))
+	if err != nil || !strings.Contains(out, "default|") {
+		t.Errorf("gNMI Get of the leaf's BGP_NEIGHBOR: %v", err)
+	}
+	out, err = gnmi("gnmi_set", "-update", "/sonic-vrf:sonic-vrf/VRF/VRF_LIST:@./body.json")
+	t.Logf("gNMI Set /sonic-vrf:sonic-vrf/VRF/VRF_LIST (Vrf-tenant-a, VNI 10001):\n%s", indent(out))
+	if err != nil {
+		t.Errorf("gNMI Set of a VRF: %v", err)
+	}
+	var vrfRow string
+	for deadline := time.Now().Add(30 * time.Second); ; time.Sleep(time.Second) {
+		vrfRow, _ = sub.Exec(ctx, leaf, "redis-cli", "-n", "4", "--raw", "hgetall", "VRF|Vrf-tenant-a")
+		if strings.Contains(vrfRow, "10001") {
+			break
+		}
+		if time.Now().After(deadline) {
+			for _, path := range []string{leaf, agg} {
+				out, _ := sub.Exec(ctx, path, "sh", "-c", "redis-cli -n 4 --raw keys 'VRF*'; redis-cli -n 4 --raw hgetall 'VRF|Vrf-tenant-a'; grep -iE 'translib|cvl|vrf' /var/log/syslog | tail -5")
+				t.Logf("%s: CONFIG_DB VRF keys, the row, the log:\n%s", path, indent(out))
+				out, _ = sub.SidecarExec(ctx, path, "gnmi", "sh", "-c", "grep -iE 'set|vrf|error' /var/log/syslog 2>/dev/null | tail -8")
+				t.Logf("%s: its gnmi container's log:\n%s", path, indent(out))
+			}
+			t.Fatalf("Vrf-tenant-a is not in %s's CONFIG_DB 30 s after the gNMI Set (the row read: %q)", leaf, vrfRow)
+		}
+	}
+	t.Logf("%s's CONFIG_DB VRF|Vrf-tenant-a after the gNMI Set:\n%s", leaf, indent(vrfRow))
+	// a client whose certificate the estate CA did not issue
+	out, err = sub.SidecarExec(ctx, agg, "gnmi", "sh", "-c", `cd /tmp && openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 1 -subj /CN=stranger -keyout k -out c 2>/dev/null && printf '%s' "$1" > ca.crt && exec gnmi_get -target_addr "$2" -target_name "$3" -ca ca.crt -cert c -key k -xpath_target CONFIG_DB -xpath VRF -logtostderr`,
+		"sh", files["switch-ca.crt"], target, hostname)
+	if err == nil {
+		t.Errorf("a client with a certificate from another CA read CONFIG_DB:\n%s", out)
+	}
+	t.Logf("a client with a self-signed certificate is refused: %v", err)
+
+	vrf := sub.Kernel()["vrf"]
+	out, _ = sub.Exec(ctx, leaf, "ip", "-br", "link", "show", "type", "vrf")
+	t.Logf("kernel VRF support: %v; %s's VRF devices:\n%s", vrf, leaf, indent(out))
+	if vrf == nil {
+		waitFor(t, 30*time.Second, "Vrf-tenant-a in the leaf's kernel and FRR", func() bool {
+			k, _ := sub.Exec(ctx, leaf, "ip", "link", "show", "Vrf-tenant-a")
+			f, _ := sub.RoutingExec(ctx, leaf, "vtysh", "-c", "show running-config")
+			return strings.Contains(k, "vrf") && strings.Contains(f, "vrf Vrf-tenant-a\n vni 10001")
+		})
+	} else {
+		t.Logf("the Docker host's kernel has no VRF devices (%v): vrfmgrd and FRR refuse Vrf-tenant-a, as the fidelity report says", vrf)
+	}
+
+	// EVPN: a VTEP and a VNI mapped to a VLAN become the kernel's VXLAN device; the l2vpn evpn
+	// address family with advertise-all-vni reaches FRR
+	if _, err := sub.Exec(ctx, leaf, "sh", "-c", fmt.Sprintf(`redis-cli -n 4 HSET "VXLAN_TUNNEL|vtep1" src_ip %s >/dev/null &&
+redis-cli -n 4 HSET "VXLAN_EVPN_NVO|nvo1" source_vtep vtep1 >/dev/null &&
+redis-cli -n 4 HSET "VLAN|Vlan2001" vlanid 2001 >/dev/null &&
+redis-cli -n 4 HSET "VXLAN_TUNNEL_MAP|vtep1|map_10001_Vlan2001" vni 10001 vlan Vlan2001 >/dev/null &&
+redis-cli -n 4 HSET "BGP_GLOBALS_AF|default|l2vpn_evpn" advertise-all-vni true >/dev/null`, host)); err != nil {
+		t.Fatal(err)
+	}
+	if sub.Kernel()["vxlan"] == nil {
+		waitFor(t, 60*time.Second, "the leaf's VXLAN device for VNI 10001", func() bool {
+			out, _ := sub.Exec(ctx, leaf, "ip", "-d", "link", "show", "type", "vxlan")
+			return strings.Contains(out, "vxlan id 10001 local "+host)
+		})
+	}
+	waitFor(t, 60*time.Second, "advertise-all-vni in the leaf's FRR", func() bool {
+		out, _ := sub.RoutingExec(ctx, leaf, "vtysh", "-c", "show running-config")
+		return strings.Contains(out, "address-family l2vpn evpn") && strings.Contains(out, "advertise-all-vni")
+	})
+	out, _ = sub.RoutingExec(ctx, leaf, "vtysh", "-c", "show running-config")
+	t.Logf("%s: FRR's running configuration, from CONFIG_DB:\n%s", leaf, indent(out))
+	out, _ = sub.Exec(ctx, leaf, "ip", "-d", "link", "show", "type", "vxlan")
+	t.Logf("%s: the kernel's VXLAN devices:\n%s", leaf, indent(out))
+}
+
 // SONiC-VS on the OOB fabric (D4, D44): the rack's management switch and the aggregation switch
 // run docker-sonic-vs, the linux/amd64 image SONiC publishes, under the Docker host's binary
 // translation when the host is aarch64, each with SONiC's dhcp_relay container beside it. The
-// twin renders each switch's HWSKU, config_db.json and bgpd configuration from the model and
+// twin renders each switch's HWSKU and config_db.json from the model (FRR is SONiC's bgp container's) and
 // cables its TAPs and veths in as the container's eth<n>. Every BMC is leased by Kea through
 // SONiC's own dhcrelay, which SONiC configured from CONFIG_DB, with SONiC's circuit id
 // (`<hostname>:<port alias>`, the alias the model's port name); routes to Kea and back are learned
@@ -36,7 +177,7 @@ func TestSonicVS(t *testing.T) {
 	}
 	ctx := context.Background()
 	e, _ := nos.Lookup(nos.SonicVS)
-	for _, img := range []string{e.Image, e.RelayImage, keaImage} {
+	for _, img := range []string{e.Image, e.RelayImage, keaImage, nos.SonicBGPImage, nos.SonicGNMIImage} {
 		if !d.HasImage(ctx, img) {
 			t.Skipf("image %s is not present (RUN=TestSonicVS scripts/linux-substrate-e2e.sh fetches it)", img)
 		}
@@ -163,6 +304,8 @@ func TestSonicVS(t *testing.T) {
 			t.Errorf("observer: %s is %s", k, v)
 		}
 	}
+
+	sonicManagement(t, tw.Runtime.StateDir, sub, leaf, agg)
 
 	// the NOS observer: a pulled BMC cable is the switch's port oper down, read from SONiC. The
 	// reset above took the BMC's link down for a moment (its NIC goes with its controller), which

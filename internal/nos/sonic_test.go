@@ -13,7 +13,7 @@ import (
 // a rack's management switch as the generic pack has it: 48x1G, 4x10G uplinks
 func mgmtSwitch() Switch {
 	sw := Switch{Path: "site-1/hall-a/r01/mgmt-switch", Hostname: "r01-mgmt-switch", Profile: "generic/mgmt-switch-1g",
-		MAC: "02:DC:00:00:00:01", ASN: 65101, RouterID: netip.MustParseAddr("10.255.0.0")}
+		MAC: "02:DC:00:00:00:01", ASN: 65101, RouterID: netip.MustParseAddr("10.255.255.254"), Loopback: netip.MustParseAddr("10.255.255.254")}
 	for i := 1; i <= 48; i++ {
 		sw.Panel = append(sw.Panel, PanelPort{Name: fmt.Sprintf("eth%d", i), Speed: "1G"})
 	}
@@ -48,6 +48,17 @@ func TestRegistrySonicVS(t *testing.T) {
 	}
 	if e.Relay.Circuit != "hostname:port" || e.RelayImage == "" || !e.SoftwareChecksum || !e.Privileged || len(e.Shared) != 2 {
 		t.Errorf("sonic-vs relay %+v image %q, software checksum %v, privileged %v, shared %v", e.Relay, e.RelayImage, e.SoftwareChecksum, e.Privileged, e.Shared)
+	}
+	// SONiC's bgp and gnmi containers run beside the switch, from the relay's build
+	bgp, ok1 := e.Sidecar("bgp")
+	gnmi, ok2 := e.Sidecar("gnmi")
+	if !ok1 || !ok2 || bgp.Image != SonicBGPImage || gnmi.Image != SonicGNMIImage || len(bgp.Check) == 0 || bgp.Pending == nil || gnmi.Pending == nil {
+		t.Errorf("sonic-vs sidecars: %+v", e.Sidecars)
+	}
+	for _, c := range []string{"switch/evpn", "switch/vrf", "switch/gnmi"} {
+		if !strings.Contains(strings.Join(e.Provides, " "), c) {
+			t.Errorf("sonic-vs does not provide %s: %v", c, e.Provides)
+		}
 	}
 	f, _ := Lookup(FRRDHCRelay)
 	if !f.RunsOn("aarch64") || !f.RunsOn("x86_64") || f.RunsEmulated("aarch64") || f.SoftwareChecksum || f.RelayImage != "" {
@@ -115,6 +126,10 @@ func TestConfigDB(t *testing.T) {
 		meta["hwsku"] != "DCTwin-generic-mgmt-switch-1g" || meta["platform"] != "x86_64-kvm_x86_64-r0" {
 		t.Errorf("DEVICE_METADATA: %v", meta)
 	}
+	// unified routing: frrcfgd renders FRR from CONFIG_DB and applies every later change to it
+	if meta["docker_routing_config_mode"] != "unified" || meta["frr_mgmt_framework_config"] != "true" {
+		t.Errorf("routing mode: %v", meta)
+	}
 	// only the cabled ports, aliased by the model's names
 	if len(db["PORT"]) != 3 {
 		t.Errorf("PORT: %v", db["PORT"])
@@ -144,12 +159,46 @@ func TestConfigDB(t *testing.T) {
 			t.Errorf("INTERFACE lacks %s", k)
 		}
 	}
-	n := db["BGP_NEIGHBOR"]["10.255.0.1"].(map[string]any)
-	if n["asn"] != "65000" || n["local_addr"] != "10.255.0.0" || n["name"] != "oob-agg-1:eth1" {
-		t.Errorf("BGP_NEIGHBOR: %v", n)
+	for _, k := range []string{"Loopback0", "Loopback0|10.255.255.254/32"} {
+		if _, ok := db["LOOPBACK_INTERFACE"][k]; !ok {
+			t.Errorf("LOOPBACK_INTERFACE lacks %s: %v", k, db["LOOPBACK_INTERFACE"])
+		}
+	}
+	// the BGP instance, keyed by VRF as frrcfgd reads it
+	g, _ := db["BGP_GLOBALS"]["default"].(map[string]any)
+	if g["local_asn"] != "65101" || g["router_id"] != "10.255.255.254" || g["load_balance_mp_relax"] != "true" {
+		t.Errorf("BGP_GLOBALS: %v", db["BGP_GLOBALS"])
+	}
+	if _, ok := db["ROUTE_REDISTRIBUTE"]["default|connected|bgp|ipv4"]; !ok {
+		t.Errorf("ROUTE_REDISTRIBUTE: %v", db["ROUTE_REDISTRIBUTE"])
+	}
+	n, _ := db["BGP_NEIGHBOR"]["default|10.255.0.1"].(map[string]any)
+	if n["asn"] != "65000" || n["local_addr"] != "10.255.0.0" || n["name"] != "oob-agg-1:eth1" || n["conn_retry"] != "10" {
+		t.Errorf("BGP_NEIGHBOR: %v", db["BGP_NEIGHBOR"])
+	}
+	// FRR exchanges nothing on an eBGP session without a policy: a permit-all route-map both ways
+	if af, _ := db["BGP_NEIGHBOR_AF"]["default|10.255.0.1|ipv4_unicast"].(map[string]any); af["admin_status"] != "true" ||
+		fmt.Sprint(af["route_map_in"]) != "[DCTWIN_FABRIC]" || fmt.Sprint(af["route_map_out"]) != "[DCTWIN_FABRIC]" {
+		t.Errorf("BGP_NEIGHBOR_AF: %v", db["BGP_NEIGHBOR_AF"])
+	}
+	if rm, _ := db["ROUTE_MAP"]["DCTWIN_FABRIC|10"].(map[string]any); rm["route_operation"] != "permit" {
+		t.Errorf("ROUTE_MAP: %v", db["ROUTE_MAP"])
 	}
 	if d := db["DEVICE_NEIGHBOR"]["Ethernet48"].(map[string]any); d["name"] != "oob-agg-1" || d["port"] != "eth1" {
 		t.Errorf("DEVICE_NEIGHBOR: %v", d)
+	}
+	// no TLS material, no gNMI configuration (its server would listen on loopback only)
+	if db["GNMI"] != nil {
+		t.Errorf("GNMI without TLS material: %v", db["GNMI"])
+	}
+	withTLS := mgmtSwitch()
+	withTLS.GNMI = &TLSFiles{CA: "ca", Cert: "cert", Key: "key"}
+	tdb, _ := ConfigDB(withTLS)
+	if gn, _ := tdb["GNMI"]["gnmi"].(map[string]any); gn["port"] != "8080" || gn["client_auth"] != "true" || gn["user_auth"] != "none" {
+		t.Errorf("GNMI|gnmi: %v", tdb["GNMI"])
+	}
+	if c, _ := tdb["GNMI"]["certs"].(map[string]any); c["server_crt"] != sonicGNMICert || c["ca_crt"] != sonicGNMICA {
+		t.Errorf("GNMI|certs: %v", tdb["GNMI"])
 	}
 	agg, err := ConfigDB(aggSwitch())
 	if err != nil {
@@ -172,7 +221,9 @@ func TestConfigDB(t *testing.T) {
 func TestStartScripts(t *testing.T) {
 	sonic, _ := Lookup(SonicVS)
 	frr, _ := Lookup(FRRDHCRelay)
-	script, err := sonic.StartScript(mgmtSwitch())
+	withTLS := mgmtSwitch()
+	withTLS.GNMI = &TLSFiles{CA: "-----BEGIN CERTIFICATE-----\nCA\n-----END CERTIFICATE-----\n", Cert: "-----BEGIN CERTIFICATE-----\nLEAF\n-----END CERTIFICATE-----\n", Key: "-----BEGIN EC PRIVATE KEY-----\nKEY\n-----END EC PRIVATE KEY-----\n"}
+	script, err := sonic.StartScript(withTLS)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -183,25 +234,33 @@ func TestStartScripts(t *testing.T) {
 		"eth1:1\neth4:4\neth49:49\n",
 		"# name lanes alias speed index\nEthernet0 1 eth1 1000 1\nEthernet3 4 eth4 1000 4\nEthernet48 49 up1 10000 49\n",
 		"cat > /etc/sonic/config_db.json <<'EOF'",
-		"cat > /etc/frr/bgpd.conf <<'EOF'",
-		"router bgp 65101\n bgp router-id 10.255.0.0\n",
-		" neighbor 10.255.0.1 remote-as 65000\n neighbor 10.255.0.1 description oob-agg-1:eth1\n neighbor 10.255.0.1 timers connect 10\n",
-		"  neighbor 10.255.0.1 activate\n  redistribute connected\n",
+		"cat > /etc/sonic/constants.yml <<'EOF'\n# SONiC's /etc/sonic/constants.yml",
+		"  frr:\n    enable_snmp_agent: false\nEOF\n",
+		"cat > /etc/sonic/credentials/gnmi.crt <<'EOF'\n-----BEGIN CERTIFICATE-----\nLEAF\n-----END CERTIFICATE-----\nEOF\n",
+		"cat > /etc/sonic/credentials/ca.crt <<'EOF'\n-----BEGIN CERTIFICATE-----\nCA\n",
+		"chmod 0600 /etc/sonic/credentials/gnmi.key",
+		"sed -i -E '/supervisorctl start (zebra|staticd|mgmtd|fpmsyncd)$/d' /usr/bin/start.sh",
 		"redis-cli -n 0 EXISTS PORT_TABLE:PortInitDone",
 		"redis-cli -n 6 HGET 'INTERFACE_TABLE|Vlan1000|10.30.0.1/24' state",
 		"redis-cli -n 6 HGET 'INTERFACE_TABLE|Ethernet48|10.255.0.0/31' state",
-		"supervisorctl start bgpd",
 		"  log started\n) &\nexec env HWSKU=DCTwin-generic-mgmt-switch-1g /usr/local/bin/supervisord\n",
 	} {
 		if !strings.Contains(script, want) {
 			t.Errorf("sonic-vs script lacks %q:\n%s", want, script)
 		}
 	}
+	// FRR is configured from CONFIG_DB by the bgp container, never by the switch
+	for _, not := range []string{"/etc/frr/", "supervisorctl start bgpd"} {
+		if strings.Contains(script, not) {
+			t.Errorf("sonic-vs script has %q", not)
+		}
+	}
 	frrScript, err := frr.StartScript(mgmtSwitch())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(frrScript, "dhcrelay -4 -d -a -m discard -id Vlan1000 -iu up1 10.90.0.10") || !strings.Contains(frrScript, "ip addr add 10.255.0.0/31 dev up1") {
+	if !strings.Contains(frrScript, "dhcrelay -4 -d -a -m discard -id Vlan1000 -iu up1 10.90.0.10") || !strings.Contains(frrScript, "ip addr add 10.255.0.0/31 dev up1") ||
+		!strings.Contains(frrScript, "ip addr add 10.255.255.254/32 dev lo") || !strings.Contains(frrScript, " bgp router-id 10.255.255.254\n") {
 		t.Errorf("generic/frr-dhcrelay script:\n%s", frrScript)
 	}
 	// both are shell the switch's /bin/sh parses
@@ -217,16 +276,16 @@ func TestStartScripts(t *testing.T) {
 	if err := json.Unmarshal([]byte(script[start:start+end]), &parsed); err != nil || parsed["VLAN"]["Vlan1000"] == nil {
 		t.Errorf("config_db.json in the script: %v", err)
 	}
-	// a switch with no fabric links starts no bgpd and writes no bgpd.conf
+	// a switch with no fabric links has a BGP instance and no neighbours: a stack may add them
 	leaf := mgmtSwitch()
 	leaf.Routed = nil
 	leaf.Service = []Service{{Port: "up1", Gateway: netip.MustParsePrefix("10.90.0.1/24")}}
-	s2, err := sonic.StartScript(leaf)
+	ldb, err := ConfigDB(leaf)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(s2, "bgpd") {
-		t.Errorf("a switch without BGP neighbours starts bgpd:\n%s", s2)
+	if ldb["BGP_GLOBALS"]["default"] == nil || ldb["BGP_NEIGHBOR"] != nil {
+		t.Errorf("a switch without fabric links: BGP_GLOBALS %v, BGP_NEIGHBOR %v", ldb["BGP_GLOBALS"], ldb["BGP_NEIGHBOR"])
 	}
 	if _, err := (Entry{Name: "cumulus-vx"}).StartScript(leaf); err == nil {
 		t.Errorf("cumulus-vx rendered a script")
@@ -273,13 +332,36 @@ func TestPortStatesAndRelays(t *testing.T) {
 	}
 }
 
+// The bgp sidecar is ready once FRR holds the switch's instance, and asks for frr.conf to be
+// loaded again until it does; the gnmi sidecar once its server runs and listens.
+func TestSonicSidecarsPending(t *testing.T) {
+	sw := mgmtSwitch()
+	if w, fix := sonicBGPPending(sw, "Current configuration:\n!\nfrr version 10.7.1\nrouter pim\nexit\n"); w == "" || len(fix) != 2 || fix[0] != "vtysh" || fix[1] != "-b" {
+		t.Errorf("FRR without the instance: %q %v", w, fix)
+	}
+	if w, fix := sonicBGPPending(sw, "!\nrouter bgp 65101\n bgp router-id 10.255.255.254\n"); w != "" || fix != nil {
+		t.Errorf("FRR with the instance: %q %v", w, fix)
+	}
+	if w, _ := sonicGNMIPending(sw, ""); w != "" {
+		t.Errorf("no TLS material, nothing to wait for: %q", w)
+	}
+	sw.GNMI = &TLSFiles{}
+	up := "gnmi-native                      RUNNING   pid 36, uptime 0:00:09\nLISTEN 0      4096               *:8080            *:*\n"
+	if w, _ := sonicGNMIPending(sw, up); w != "" {
+		t.Errorf("gNMI listening: %q", w)
+	}
+	if w, _ := sonicGNMIPending(sw, "gnmi-native                      STARTING\n"); w == "" {
+		t.Errorf("gNMI starting counted as ready")
+	}
+}
+
 // scripts/linux-substrate-e2e.sh fetches the SONiC images the registry pins; the two must agree.
 func TestSonicPinsMatchTheE2EScript(t *testing.T) {
 	b, err := os.ReadFile("../../scripts/linux-substrate-e2e.sh")
 	if err != nil {
 		t.Skipf("the e2e script is not beside the package: %v", err)
 	}
-	for _, pin := range []string{SonicVSImage, SonicRelayImage, SonicRelayArtifact, SonicRelaySHA256} {
+	for _, pin := range []string{SonicVSImage, SonicRelayImage, SonicRelayArtifact, SonicRelaySHA256, SonicBGPImage, SonicBGPArtifact, SonicBGPSHA256, SonicGNMIImage, SonicGNMIArtifact, SonicGNMISHA256} {
 		if !strings.Contains(string(b), pin) {
 			t.Errorf("scripts/linux-substrate-e2e.sh does not pin %s", pin)
 		}

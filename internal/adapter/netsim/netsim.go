@@ -110,6 +110,16 @@ func (n *Net) loadOrCreateCA() error {
 
 // Certificate issues a leaf certificate for a device endpoint.
 func (n *Net) Certificate(cn string, names []string, ips []string) (tls.Certificate, error) {
+	return n.issue(cn, names, append(ips, "127.0.0.1"), x509.ExtKeyUsageServerAuth)
+}
+
+// ClientCertificate issues a client certificate: what a device that authenticates its clients by
+// the estate CA (a switch's gNMI server) accepts.
+func (n *Net) ClientCertificate(cn string) (tls.Certificate, error) {
+	return n.issue(cn, nil, nil, x509.ExtKeyUsageClientAuth)
+}
+
+func (n *Net) issue(cn string, names, ips []string, usage x509.ExtKeyUsage) (tls.Certificate, error) {
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return tls.Certificate{}, err
@@ -117,8 +127,8 @@ func (n *Net) Certificate(cn string, names []string, ips []string) (tls.Certific
 	serial, _ := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 62))
 	tmpl := &x509.Certificate{SerialNumber: serial, Subject: pkix.Name{CommonName: cn},
 		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().AddDate(1, 0, 0),
-		KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}, DNSNames: names}
-	for _, ip := range append(ips, "127.0.0.1") {
+		KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{usage}, DNSNames: names}
+	for _, ip := range ips {
 		if p := net.ParseIP(ip); p != nil {
 			tmpl.IPAddresses = append(tmpl.IPAddresses, p)
 		}
@@ -128,6 +138,23 @@ func (n *Net) Certificate(cn string, names []string, ips []string) (tls.Certific
 		return tls.Certificate{}, err
 	}
 	return tls.Certificate{Certificate: [][]byte{der, n.caCert.Raw}, PrivateKey: key}, nil
+}
+
+// PEM encodes an issued certificate (its chain) and its key.
+func PEM(c tls.Certificate) (cert, key string, err error) {
+	var cb []byte
+	for _, der := range c.Certificate {
+		cb = append(cb, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})...)
+	}
+	k, ok := c.PrivateKey.(*ecdsa.PrivateKey)
+	if !ok {
+		return "", "", fmt.Errorf("the key is a %T, not ECDSA", c.PrivateKey)
+	}
+	kd, err := x509.MarshalECPrivateKey(k)
+	if err != nil {
+		return "", "", err
+	}
+	return string(cb), string(pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: kd})), nil
 }
 
 // Listen opens the next free TCP port for a device endpoint of a kind. On the TAP substrate an
