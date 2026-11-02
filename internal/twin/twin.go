@@ -98,6 +98,8 @@ type Options struct {
 	GatewayAddr string
 	Log         *slog.Logger
 	Outputs     map[string]string
+	// LogRetention bounds the committed event log on disk (D27); zero fields take the defaults.
+	LogRetention engine.LogRetention
 }
 
 // Twin is a running estate.
@@ -229,6 +231,7 @@ func UpEstate(est *schema.Estate, file string, reg *pack.Registry, opt Options) 
 	if err != nil {
 		return nil, err
 	}
+	eng.SetLogRetention(opt.LogRetention)
 	n, err := netsim.New(opt.StateDir, est.Spec.Adapters.Network.BasePort)
 	if err != nil {
 		return nil, err

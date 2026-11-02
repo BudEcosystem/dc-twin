@@ -212,7 +212,15 @@ are **derived**: computed on read from seed, clock and committed state, never lo
 a retention policy (by count and by age) with snapshot-based compaction, and request bodies are
 redacted of credentials and tokens before commit ([15](15-security.md#secrets)). **Why:** logging
 sensors every tick was thousands of events per second, and the prototype already truncated and
-broke cause chains. **Reversed if:** never.
+broke cause chains. **Reversed if:** never. *Amended (2026-11-02), the log on disk:* the engine
+kept its retention for the window it holds in memory, while `state/events.jsonl` grew without
+bound (100 GB in four days on a 263-device estate NICo polls: almost all of it reads). The file
+now rolls into segments named by the sequence numbers they hold (`events.<first>-<last>.jsonl`)
+at a segment size, and closed segments, an estate restart's `events.<time>.jsonl` among them, are
+removed oldest first while the log is over its total or past its age (`dctwin up --log-max 2G
+--log-age 168h --log-segment 256M`, the defaults); each removal is committed as a twin event
+naming what went. Snapshot-based compaction is not built: a removed segment's events are gone, and
+a cause chain into them ends at the retention event.
 
 ### D28 — One expression language and a trigger registry
 Every condition, predicate and input mapping in profiles, formats, stacks and scenarios is **CEL**
