@@ -250,14 +250,14 @@ func logBGP(t *testing.T, sub *tap.Substrate, when string) {
 	t.Helper()
 	ctx := context.Background()
 	for _, path := range sortedKeys(sub.Switches()) {
-		out, err := sub.Exec(ctx, path, "vtysh", "-c", "show bgp summary")
+		out, err := sub.RoutingExec(ctx, path, "vtysh", "-c", "show bgp summary")
 		if err != nil {
 			t.Logf("%s: vtysh: %v", path, err)
 			continue
 		}
 		t.Logf("%s: %s `vtysh -c 'show bgp summary'`:\n%s", when, path, indent(out))
 		if strings.Contains(path, "oob-agg") {
-			rt, _ := sub.Exec(ctx, path, "vtysh", "-c", "show ip route bgp")
+			rt, _ := sub.RoutingExec(ctx, path, "vtysh", "-c", "show ip route bgp")
 			t.Logf("%s: %s `show ip route bgp`:\n%s", when, path, indent(rt))
 		}
 	}

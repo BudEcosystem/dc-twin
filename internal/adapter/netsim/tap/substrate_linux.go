@@ -5,14 +5,21 @@ package tap
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"crypto/tls"
 	"encoding/binary"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net"
+	"net/http"
 	"net/netip"
 	"os"
+	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -42,6 +49,7 @@ import (
 	"github.com/BudEcosystem/dc-twin/internal/engine"
 	"github.com/BudEcosystem/dc-twin/internal/model"
 	"github.com/BudEcosystem/dc-twin/internal/nos"
+	"github.com/BudEcosystem/dc-twin/internal/nos/nvue"
 	"github.com/BudEcosystem/dc-twin/internal/twin"
 )
 
@@ -70,6 +78,13 @@ type Substrate struct {
 	docker   *nos.Docker
 	volumes  []string // the switches' shared volumes, removed after their containers
 	attached []string
+	// ca issues the TLS material of real switches' management interfaces (the estate CA); nil
+	// leaves them without (a gNMI server then listens on its loopback only)
+	ca       *netsim.Net
+	stateDir string
+	// kernel is what up found the Docker host's kernel to support for a NOS's overlays: "vrf",
+	// "vxlan" -> nil, or why not
+	kernel map[string]error
 
 	obs    *observer
 	ctx    context.Context
@@ -124,9 +139,24 @@ type nosSwitch struct {
 	ns   netns.NsHandle
 	h    *netlink.Handle
 	// volumes are the switch's shared directories (nos.Entry.Shared), in order; relay is the
-	// container its DHCP relay runs in, beside it (nos.Entry.RelayImage).
-	volumes []string
-	relay   *nos.Container
+	// container its DHCP relay runs in, beside it (nos.Entry.RelayImage); sidecars its other
+	// containers beside it, by role (nos.Entry.Sidecars).
+	volumes  []string
+	relay    *nos.Container
+	sidecars map[string]*nos.Container
+	// nvue is the switch's NVUE when its NOS is configured through it (nos.Entry.API), served at
+	// its loopback in its namespace by nvueHTTP; nvuePassword is user cumulus's.
+	nvue         *nvue.Server
+	nvueHTTP     *http.Server
+	nvuePassword string
+}
+
+// routing is the container a switch's routing daemons run in: its bgp sidecar, or the switch's.
+func (sw *nosSwitch) routing() *nos.Container {
+	if c := sw.sidecars["bgp"]; c != nil {
+		return c
+	}
+	return sw.c
 }
 
 // cable is a fabric link between two real switches: the twin holds its middle (a two-port
@@ -155,7 +185,7 @@ func New(ctx context.Context, a twin.NetworkArgs) (netsim.L2, error) {
 		log = slog.Default()
 	}
 	s := &Substrate{plan: plan, eng: a.Engine, log: log, ns: netns.None(), nextNIC: 1, ports: map[string]*port{}, byDev: map[string]*port{},
-		bridges: map[string]*bridge{}, byPath: map[string]*nosSwitch{}}
+		bridges: map[string]*bridge{}, byPath: map[string]*nosSwitch{}, ca: a.Net, stateDir: a.StateDir, kernel: map[string]error{}}
 	s.ctx, s.cancel = context.WithCancel(ctx)
 	if err := s.start(); err != nil {
 		s.Close()
@@ -707,6 +737,9 @@ func (s *Substrate) startSwitches() error {
 		if e.RelayImage != "" && sp.Config.Relaying() {
 			images = append(images, e.RelayImage)
 		}
+		for _, sc := range e.Sidecars {
+			images = append(images, sc.Image)
+		}
 		for _, img := range images {
 			if !d.HasImage(ctx, img) {
 				return fmt.Errorf("switch %s: the image %s for nos %s is not present on the Docker host: %s", sp.Device.Path, img, e.Name, e.Obtain)
@@ -724,6 +757,17 @@ func (s *Substrate) startSwitches() error {
 			case err != nil:
 				return fmt.Errorf("switch %s: nos %s's image is %s, which this %s Docker host cannot run (it runs another architecture's images only through binfmt_misc: Rosetta or QEMU user mode): %w", sp.Device.Path, e.Name, e.Platform, compile.HostArch(), err)
 			}
+		}
+		if _, ok := e.Sidecar("gnmi"); ok && s.ca != nil && sp.Config.Loopback.IsValid() {
+			cert, err := s.ca.Certificate(sp.Config.Hostname, []string{sp.Config.Hostname}, []string{sp.Config.Loopback.String()})
+			if err != nil {
+				return fmt.Errorf("switch %s: its gNMI certificate: %w", sp.Device.Path, err)
+			}
+			crt, key, err := netsim.PEM(cert)
+			if err != nil {
+				return err
+			}
+			sp.Config.GNMI = &nos.TLSFiles{CA: string(s.ca.CAPEM), Cert: crt, Key: key}
 		}
 		script, err := e.StartScript(sp.Config)
 		if err != nil {
@@ -777,6 +821,18 @@ func (s *Substrate) startTimeout() time.Duration {
 // read-only), tmpfs where SONiC gives it tmpfs, and the capabilities a relay needs. It renders
 // its own configuration from CONFIG_DB, so it starts once the switch has loaded it.
 func (s *Substrate) startRelay(sw *nosSwitch) error {
+	c, err := s.runBeside(sw, "dhcp-relay", sw.plan.NOS.RelayImage, []string{"NET_ADMIN", "NET_RAW"})
+	if err != nil {
+		return fmt.Errorf("switch %s: its DHCP relay container: %w", sw.plan.Device.Path, err)
+	}
+	sw.relay = c
+	return nil
+}
+
+// runBeside starts one of a NOS's containers beside its switch container, as SONiC runs its
+// containers beside swss: in the switch's network namespace, with its shared directories (where
+// the relay's is read-only, every one's is), tmpfs where SONiC gives it tmpfs.
+func (s *Substrate) runBeside(sw *nosSwitch, role, image string, caps []string) (*nos.Container, error) {
 	e := sw.plan.NOS
 	var binds []string
 	for i, m := range e.Shared {
@@ -788,14 +844,218 @@ func (s *Substrate) startRelay(sw *nosSwitch) error {
 	}
 	ctx, cancel := context.WithTimeout(s.ctx, 10*time.Minute) // a loaded Docker host is slow to create
 	defer cancel()
-	c, err := s.docker.Run(ctx, nos.Spec{Name: sw.c.Name + "-dhcp-relay", Image: e.RelayImage, Platform: e.Platform,
+	return s.docker.Run(ctx, nos.Spec{Name: sw.c.Name + "-" + role, Image: image, Platform: e.Platform,
 		NetworkMode: "container:" + sw.c.ID, Env: []string{"RUNTIME_OWNER=local"}, Binds: binds,
-		Tmpfs: map[string]string{"/tmp": "", "/var/tmp": ""}, CapAdd: []string{"NET_ADMIN", "NET_RAW"},
-		Labels: map[string]string{"dc-twin.estate": s.plan.Estate, "dc-twin.switch": sw.plan.Device.Path, "dc-twin.nos": e.Name, "dc-twin.role": "dhcp-relay"}})
-	if err != nil {
-		return fmt.Errorf("switch %s: its DHCP relay container: %w", sw.plan.Device.Path, err)
+		Tmpfs: map[string]string{"/tmp": "", "/var/tmp": ""}, CapAdd: caps,
+		Labels: map[string]string{"dc-twin.estate": s.plan.Estate, "dc-twin.switch": sw.plan.Device.Path, "dc-twin.nos": e.Name, "dc-twin.role": role}})
+}
+
+// startSidecars starts a switch's other containers (nos.Entry.Sidecars) once it has started.
+func (s *Substrate) startSidecars(sw *nosSwitch) error {
+	for _, sc := range sw.plan.NOS.Sidecars {
+		c, err := s.runBeside(sw, sc.Role, sc.Image, sc.CapAdd)
+		if err != nil {
+			return fmt.Errorf("switch %s: its %s container: %w", sw.plan.Device.Path, sc.Role, err)
+		}
+		if sw.sidecars == nil {
+			sw.sidecars = map[string]*nos.Container{}
+		}
+		sw.sidecars[sc.Role] = c
 	}
-	sw.relay = c
+	return nil
+}
+
+// waitSidecars waits until every switch's sidecars say they are ready, running the repair a
+// sidecar names while it is not.
+func (s *Substrate) waitSidecars(deadline time.Time) error {
+	for _, sw := range s.switches {
+		for _, sc := range sw.plan.NOS.Sidecars {
+			c := sw.sidecars[sc.Role]
+			if c == nil {
+				continue
+			}
+			for {
+				out, _, _ := s.docker.Exec(s.ctx, c.ID, sc.Check...)
+				waiting, repair := sc.Pending(sw.plan.Config, out)
+				if waiting == "" {
+					break
+				}
+				if _, err := s.docker.Pid(s.ctx, c.ID); err != nil {
+					logs, _ := s.docker.Logs(s.ctx, c.ID)
+					return fmt.Errorf("switch %s: its %s container %s stopped: %v\n%s", sw.plan.Device.Path, sc.Role, c.Name, err, logs)
+				}
+				if time.Now().After(deadline) {
+					return fmt.Errorf("switch %s: its %s container %s has not got %s:\n%s", sw.plan.Device.Path, sc.Role, c.Name, waiting, out)
+				}
+				if repair != nil {
+					s.log.Info("tap: repairing a sidecar", "switch", sw.plan.Device.Path, "role", sc.Role, "waiting for", waiting, "cmd", strings.Join(repair, " "))
+					_, _, _ = s.docker.Exec(s.ctx, c.ID, repair...)
+				}
+				time.Sleep(2 * time.Second)
+			}
+		}
+	}
+	return nil
+}
+
+// startNVUE configures a switch whose NOS is configured through NVUE (D56): its NVUE applies the
+// startup configuration from the model (the switch's ifreload and frr-reload.py doing the work
+// in its container), then serves its REST API at the switch's Loopback0, port 8765, from a socket
+// made in the switch's own network namespace, so a client reaches it in band, across the fabric,
+// as it reaches a Cumulus switch's.
+func (s *Substrate) startNVUE(sw *nosSwitch) error {
+	pw := make([]byte, 12)
+	if _, err := rand.Read(pw); err != nil {
+		return err
+	}
+	sw.nvuePassword = hex.EncodeToString(pw)
+	id := sw.c.ID
+	apply := func(ctx context.Context, f nvue.Files) (string, error) {
+		out, code, err := s.docker.Exec(ctx, id, append([]string{"sh", "-c", nvue.ApplyScript, "sh"}, nvue.ApplyArgs(f)...)...)
+		if err != nil {
+			return out, err
+		}
+		if code != 0 {
+			return out, fmt.Errorf("exit %d:\n%s", code, strings.TrimSpace(out))
+		}
+		return out, nil
+	}
+	sw.nvue = nvue.NewServer(sw.plan.Config, sw.nvuePassword, apply)
+	ctx, cancel := context.WithTimeout(s.ctx, 5*time.Minute)
+	defer cancel()
+	if err := sw.nvue.ApplyStartup(ctx); err != nil {
+		return fmt.Errorf("switch %s: NVUE: %w", sw.plan.Device.Path, err)
+	}
+	s.log.Info("tap: NVUE applied the startup configuration", "switch", sw.plan.Device.Path)
+	lo := sw.plan.Config.Loopback
+	if s.ca == nil || !lo.IsValid() {
+		return nil
+	}
+	cert, err := s.ca.Certificate(sw.plan.Config.Hostname, []string{sw.plan.Config.Hostname}, []string{lo.String()})
+	if err != nil {
+		return err
+	}
+	var ln net.Listener
+	if err := inNS(sw.ns, func() error {
+		var err error
+		ln, err = net.Listen("tcp", netip.AddrPortFrom(lo, nvue.APIPort).String())
+		return err
+	}); err != nil {
+		return fmt.Errorf("switch %s: NVUE at %s: %w", sw.plan.Device.Path, lo, err)
+	}
+	sw.nvueHTTP = &http.Server{Handler: sw.nvue, ReadHeaderTimeout: 30 * time.Second}
+	go func() {
+		_ = sw.nvueHTTP.Serve(tls.NewListener(ln, &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12}))
+	}()
+	return nil
+}
+
+// NVUE is a real switch's NVUE, nil when its NOS has none.
+func (s *Substrate) NVUE(switchPath string) *nvue.Server {
+	if sw := s.realSwitch(switchPath); sw != nil {
+		return sw.nvue
+	}
+	return nil
+}
+
+// kernelProbes are the overlay devices a NOS that provides VRFs creates, and how to make one.
+var kernelProbes = []struct{ feature, add string }{
+	{"vrf", "ip link add dctwin-probe-vrf type vrf table 4093"},
+	{"vxlan", "ip link add dctwin-probe-vx type vxlan id 16777000 dstport 4789 nolearning"},
+}
+
+// probeKernel finds whether the Docker host's kernel has the devices a VRF and a VNI need, in a
+// switch's namespace (every container shares the host's kernel): SONiC's managers create them
+// when a VRF or a VXLAN tunnel is written to CONFIG_DB, and fail where the kernel has none.
+func (s *Substrate) probeKernel() {
+	for _, sw := range s.switches {
+		if !slices.Contains(sw.plan.NOS.Provides, "switch/vrf") {
+			continue
+		}
+		for _, p := range kernelProbes {
+			dev := strings.Fields(p.add)[3]
+			out, code, err := s.docker.Exec(s.ctx, sw.c.ID, "sh", "-c", p.add+" 2>&1 && ip link del "+dev)
+			switch {
+			case err != nil:
+				s.kernel[p.feature] = err
+			case code != 0:
+				s.kernel[p.feature] = errors.New(strings.TrimSpace(out))
+			default:
+				s.kernel[p.feature] = nil
+			}
+		}
+		return // one switch answers for the host
+	}
+}
+
+// SwitchesFile is what the substrate hands a stack in stack-inputs about its real switches'
+// management interfaces, beside the client certificate they accept (D55).
+const SwitchesFile = "switches.json"
+
+// SwitchInput is one real switch in stack-inputs/switches.json.
+type SwitchInput struct {
+	Path     string `json:"path"`
+	Hostname string `json:"hostname"`
+	NOS      string `json:"nos"`
+	Loopback string `json:"loopback"`
+	// GNMI is host:port of its gNMI server, absent where it has none.
+	GNMI string `json:"gnmi,omitempty"`
+	// NVUE is host:port of its NVUE REST API (https://<NVUE>/nvue_v1/), with the user and
+	// password it accepts; absent where it has none.
+	NVUE         string `json:"nvue,omitempty"`
+	NVUEUser     string `json:"nvueUser,omitempty"`
+	NVUEPassword string `json:"nvuePassword,omitempty"`
+	ASN          uint32 `json:"asn"`
+}
+
+// writeSwitchInputs writes stack-inputs/switches.json and, when a switch serves gNMI, a client
+// certificate the estate CA issued, the CA, and the client's key: what a site hands the software
+// that configures its switches.
+func (s *Substrate) writeSwitchInputs() error {
+	if s.stateDir == "" || len(s.switches) == 0 {
+		return nil
+	}
+	dir := filepath.Join(s.stateDir, "stack-inputs")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	var list []SwitchInput
+	gnmi := false
+	for _, sw := range s.switches {
+		c := sw.plan.Config
+		in := SwitchInput{Path: sw.plan.Device.Path, Hostname: c.Hostname, NOS: sw.plan.NOS.Name, ASN: c.ASN}
+		if c.Loopback.IsValid() {
+			in.Loopback = c.Loopback.String()
+		}
+		if c.GNMI != nil && sw.sidecars["gnmi"] != nil {
+			in.GNMI = netip.AddrPortFrom(c.Loopback, nos.SonicGNMIPort).String()
+			gnmi = true
+		}
+		if sw.nvueHTTP != nil {
+			in.NVUE, in.NVUEUser, in.NVUEPassword = netip.AddrPortFrom(c.Loopback, nvue.APIPort).String(), nvue.User, sw.nvuePassword
+		}
+		list = append(list, in)
+	}
+	b, _ := json.MarshalIndent(list, "", "  ")
+	if err := os.WriteFile(filepath.Join(dir, SwitchesFile), b, 0o600); err != nil {
+		return err
+	}
+	if !gnmi {
+		return nil
+	}
+	cert, err := s.ca.ClientCertificate("dctwin-stack")
+	if err != nil {
+		return err
+	}
+	crt, key, err := netsim.PEM(cert)
+	if err != nil {
+		return err
+	}
+	for name, body := range map[string]string{"switch-client.crt": crt, "switch-client.key": key, "switch-ca.crt": string(s.ca.CAPEM)} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o600); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -961,6 +1221,21 @@ func (s *Substrate) waitSwitches(timeout time.Duration) error {
 				return err
 			}
 		}
+		if err := s.startSidecars(sw); err != nil {
+			return err
+		}
+		if sw.plan.NOS.API == "nvue" {
+			if err := s.startNVUE(sw); err != nil {
+				return err
+			}
+		}
+	}
+	if err := s.waitSidecars(deadline); err != nil {
+		return err
+	}
+	s.probeKernel()
+	if err := s.writeSwitchInputs(); err != nil {
+		return fmt.Errorf("stack-inputs/%s: %w", SwitchesFile, err)
 	}
 	for _, sw := range s.switches {
 		if sw.relay == nil {
@@ -1165,6 +1440,44 @@ func (s *Substrate) RelayExec(ctx context.Context, switchPath string, cmd ...str
 	return out, err
 }
 
+// RoutingExec runs a command where a real switch's routing daemons run (vtysh): its bgp
+// sidecar, or the switch's own container.
+func (s *Substrate) RoutingExec(ctx context.Context, switchPath string, cmd ...string) (string, error) {
+	sw := s.realSwitch(switchPath)
+	if sw == nil {
+		return "", fmt.Errorf("no real switch %s", switchPath)
+	}
+	out, code, err := s.docker.Exec(ctx, sw.routing().ID, cmd...)
+	if err == nil && code != 0 {
+		err = fmt.Errorf("exit %d", code)
+	}
+	return out, err
+}
+
+// SidecarExec runs a command in one of a real switch's sidecar containers (its role: "bgp",
+// "gnmi").
+func (s *Substrate) SidecarExec(ctx context.Context, switchPath, role string, cmd ...string) (string, error) {
+	sw := s.realSwitch(switchPath)
+	if sw == nil || sw.sidecars[role] == nil {
+		return "", fmt.Errorf("no %s container for %s", role, switchPath)
+	}
+	out, code, err := s.docker.Exec(ctx, sw.sidecars[role].ID, cmd...)
+	if err == nil && code != 0 {
+		err = fmt.Errorf("exit %d", code)
+	}
+	return out, err
+}
+
+// Kernel is what up found the Docker host's kernel to support for a NOS's overlays: "vrf",
+// "vxlan" -> nil, or why not. Empty when no NOS that provides VRFs runs.
+func (s *Substrate) Kernel() map[string]error {
+	out := map[string]error{}
+	for k, v := range s.kernel {
+		out[k] = v
+	}
+	return out
+}
+
 // Relays lists the relay containers: switch device path -> container name.
 func (s *Substrate) Relays() map[string]string {
 	out := map[string]string{}
@@ -1230,6 +1543,41 @@ func (s *Substrate) Report() netsim.L2Report {
 	if relays > 0 {
 		r.Lines = append(r.Lines, fmt.Sprintf("tap: %d switches relay DHCP from a relay container of their NOS's own beside them (SONiC's dhcp_relay), in their network namespace.", relays))
 	}
+	var gnmi []string
+	routing := 0
+	for _, sw := range s.switches {
+		if sw.sidecars["bgp"] != nil {
+			routing++
+		}
+		if sw.sidecars["gnmi"] != nil && sw.plan.Config.GNMI != nil {
+			gnmi = append(gnmi, fmt.Sprintf("%s %s", sw.plan.Config.Hostname, netip.AddrPortFrom(sw.plan.Config.Loopback, nos.SonicGNMIPort)))
+		}
+	}
+	if routing > 0 {
+		r.Lines = append(r.Lines, fmt.Sprintf("tap: %d switches route from their NOS's bgp container beside them (SONiC's docker-fpm-frr, unified mode: FRR configured from CONFIG_DB by frrcfgd).", routing))
+	}
+	if len(gnmi) > 0 {
+		r.Lines = append(r.Lines, fmt.Sprintf("tap: gNMI (SONiC's gnmi container, TLS, clients by an estate-CA certificate: stack-inputs/switch-client.crt) at %s.", strings.Join(gnmi, ", ")))
+	}
+	var nv []string
+	for _, sw := range s.switches {
+		if sw.nvueHTTP != nil {
+			nv = append(nv, fmt.Sprintf("%s %s", sw.plan.Config.Hostname, netip.AddrPortFrom(sw.plan.Config.Loopback, nvue.APIPort)))
+		}
+	}
+	if len(nv) > 0 {
+		r.Lines = append(r.Lines, fmt.Sprintf("tap: NVUE (the twin's, D56: revisions rendered to ifupdown2 and FRR in the switch; TLS, user cumulus, its password in stack-inputs/switches.json) at %s.", strings.Join(nv, ", ")))
+	}
+	for _, p := range kernelProbes {
+		err, probed := s.kernel[p.feature]
+		switch {
+		case !probed:
+		case err == nil:
+			r.Lines = append(r.Lines, fmt.Sprintf("tap: the Docker host's kernel creates %s devices: a switch can carry them.", p.feature))
+		default:
+			r.Lines = append(r.Lines, fmt.Sprintf("tap: the Docker host's kernel cannot create %s devices (%v): a switch's NOS fails to create one written to its configuration.", p.feature, err))
+		}
+	}
 	for why, n := range s.plan.Skipped {
 		r.Lines = append(r.Lines, fmt.Sprintf("tap: %d BMC ports have no endpoint: %s.", n, why))
 	}
@@ -1290,6 +1638,9 @@ func (s *Substrate) Close() error {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 		var wg sync.WaitGroup
 		for _, sw := range s.switches {
+			if sw.nvueHTTP != nil {
+				_ = sw.nvueHTTP.Close()
+			}
 			if sw.h != nil {
 				sw.h.Close()
 			}
@@ -1299,6 +1650,11 @@ func (s *Substrate) Close() error {
 			wg.Add(1)
 			go func(sw *nosSwitch) {
 				defer wg.Done()
+				for role, c := range sw.sidecars {
+					if err := s.docker.Remove(ctx, c.ID); err != nil {
+						s.log.Warn("removing a switch's container", "role", role, "container", c.Name, "err", err)
+					}
+				}
 				if sw.relay != nil {
 					if err := s.docker.Remove(ctx, sw.relay.ID); err != nil {
 						s.log.Warn("removing a relay container", "container", sw.relay.Name, "err", err)

@@ -176,6 +176,18 @@ func TestPlanSonicVS(t *testing.T) {
 	if len(p.Switches) != 2 || len(p.Links) != 1 || len(p.Attach) != 2 {
 		t.Fatalf("%d switches, %d cables, %d attachments: want 2, 1, 2", len(p.Switches), len(p.Links), len(p.Attach))
 	}
+	// every switch's Loopback0 is its router id, from the top of the underlay down, clear of the /31s
+	los := map[netip.Addr]bool{}
+	for i, sp := range p.Switches {
+		want := netip.AddrFrom4([4]byte{10, 255, 255, byte(254 - i)})
+		if sp.Config.Loopback != want || sp.Config.RouterID != want {
+			t.Errorf("%s: loopback %s router id %s, want %s", sp.Device.Path, sp.Config.Loopback, sp.Config.RouterID, want)
+		}
+		los[sp.Config.Loopback] = true
+	}
+	if len(los) != len(p.Switches) {
+		t.Errorf("loopbacks are not unique: %v", los)
+	}
 	for _, sp := range p.Switches {
 		if sp.NOS.Name != nos.SonicVS || !sp.Emulated || sp.Image != nos.SonicVSImage || sp.Config.MAC == "" || len(sp.Config.Panel) == 0 {
 			t.Errorf("%s: nos %s emulated %v image %s MAC %q panel %d", sp.Device.Path, sp.NOS.Name, sp.Emulated, sp.Image, sp.Config.MAC, len(sp.Config.Panel))
@@ -210,10 +222,13 @@ func TestPlanSonicVS(t *testing.T) {
 			if _, ok := db["INTERFACE"]["Ethernet48|"+up.Addr.String()]; !ok {
 				t.Errorf("%s: no %s on Ethernet48: %v", sp.Device.Path, up.Addr, db["INTERFACE"])
 			}
-			for _, want := range []string{"eth49:49\n", "Ethernet48 49 up1 10000 49\n", "redis-cli -n 6 HGET 'INTERFACE_TABLE|Vlan1000|10.30.0.1/24' state", "exec env HWSKU=DCTwin-generic-mgmt-switch-1g /usr/local/bin/supervisord", "neighbor " + up.Peer.String() + " remote-as 65000"} {
+			for _, want := range []string{"eth49:49\n", "Ethernet48 49 up1 10000 49\n", "redis-cli -n 6 HGET 'INTERFACE_TABLE|Vlan1000|10.30.0.1/24' state", "exec env HWSKU=DCTwin-generic-mgmt-switch-1g /usr/local/bin/supervisord"} {
 				if !strings.Contains(script, want) {
 					t.Errorf("%s: script lacks %q", sp.Device.Path, want)
 				}
+			}
+			if n, _ := db["BGP_NEIGHBOR"]["default|"+up.Peer.String()].(map[string]any); n["asn"] != "65000" {
+				t.Errorf("%s: BGP_NEIGHBOR %v", sp.Device.Path, db["BGP_NEIGHBOR"])
 			}
 			continue
 		}
