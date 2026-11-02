@@ -130,7 +130,9 @@ func TestEngineLogRecordsItsRetention(t *testing.T) {
 	if total > 32<<10+8<<10 {
 		t.Errorf("the log is %d bytes on disk, over its 32 KiB and one segment", total)
 	}
-	notes := e.Events(0, func(ev schema.Event) bool { return ev.Kind == "twin" && strings.HasPrefix(ev.Message, "event log retention") })
+	notes := e.Events(0, func(ev schema.Event) bool {
+		return ev.Kind == "twin" && strings.HasPrefix(ev.Message, "event log retention")
+	})
 	if len(notes) == 0 {
 		t.Fatal("the log does not record what retention removed")
 	}

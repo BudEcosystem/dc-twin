@@ -31,13 +31,13 @@ type Engine struct {
 	timerSeq  uint64
 	cancelled map[uint64]bool
 
-	seq     uint64
-	events  []schema.Event // retained window
-	retain  int
-	log     *eventLog // the committed log on disk, within its retention (eventlog.go)
-	subs    map[int]chan schema.Event
-	subSeq  int
-	subMu   sync.Mutex
+	seq    uint64
+	events []schema.Event // retained window
+	retain int
+	log    *eventLog // the committed log on disk, within its retention (eventlog.go)
+	subs   map[int]chan schema.Event
+	subSeq int
+	subMu  sync.Mutex
 
 	faults   []*ActiveFault
 	faultSeq int
