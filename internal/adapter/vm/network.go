@@ -24,6 +24,11 @@ import (
 // at the site addresses its outputs name (`siteServices`) and to estate endpoints at theirs. The
 // MACs are the model's. Nothing else is reachable.
 //
+// On the TAP substrate, a port the model cables to a real NOS is that switch's port (D57): the
+// substrate made a TAP of it in the NOS, and the NIC's cable is spliced onto the TAP
+// (netsim.Splice) in place of the twin's switch port. The switch's VLAN, relay and routing then
+// carry the guest; the twin relays and routes nothing for the port, and observes the same.
+//
 // The networking is observed, not owned: every lease the relay delivers to the guest and every
 // connection the guest opens through the gateway is committed as an `observe` event on the
 // port's path (field `lease`, field `flow`), with the machine's last power request as its cause.
@@ -62,7 +67,9 @@ type nic struct {
 	peer    string // the switch port it is cabled to ("<switch>:<port>"), or "" when uncabled
 	network string
 	cable   *qemu.Cable
-	hp      *netsim.HostPort
+	hp      *netsim.HostPort // the twin's switch port (D48), or nil when spliced
+	splice  *netsim.Splice   // the NIC spliced onto a real switch's port (D57), or nil
+	swIf    string           // the switch port it is spliced onto, as the switch names it
 
 	mu      sync.Mutex
 	lease   string
@@ -99,8 +106,15 @@ func (m *machine) cableNICs(d *model.Device, svcs []netsim.Service) error {
 				n.peer = peer.Device.Name + ":" + peer.Name
 			}
 		}
-		mac, _ := net.ParseMAC(p.MAC)
 		ref := p.Ref
+		if l2 := m.a.rt.Net.L2; l2 != nil {
+			if port := l2.HostPort(ref); port != nil {
+				n.splice = netsim.NewSplice(c, port, netsim.SpliceConfig{Ref: ref, OnDHCP: n.dhcp, Observe: n.flow, Log: m.a.log})
+				m.nics = append(m.nics, n)
+				continue
+			}
+		}
+		mac, _ := net.ParseMAC(p.MAC)
 		cfg := netsim.HostPortConfig{Ref: ref, MAC: mac, Services: svcs, Routes: m.a.rt.Net.Routes, Log: m.a.log,
 			Observe: n.flow, OnDHCP: n.dhcp, Uplink: m.a.uplink}
 		if p.Link != nil {
@@ -118,10 +132,72 @@ func (m *machine) cableNICs(d *model.Device, svcs []netsim.Service) error {
 	return nil
 }
 
+// linkSetter is a running machine's set_link (qemu.QMP).
+type linkSetter interface {
+	SetLink(netdev string, up bool) error
+}
+
+// syncLinks gives each NIC of the running machine the carrier its cable has: up while the port
+// has its link (engine.LinkUp: cabled, the cable in, no fault) and the far end's port is up (a
+// switch with power), down otherwise, through QMP set_link, so a pulled cable is link-down in the
+// guest as on the switch. Only changes are sent, unless all (a new QEMU process, whose NICs start
+// up).
+func (m *machine) syncLinks(q linkSetter, all bool) {
+	m.linkMu.Lock()
+	defer m.linkMu.Unlock()
+	if all || m.links == nil {
+		m.links = map[int]bool{}
+	}
+	eng := m.a.rt.Engine
+	for i, n := range m.nics {
+		want := eng.LinkUp(n.port)
+		if want {
+			if peer := n.port.Link.Peer(n.port); peer != nil {
+				want = eng.PortUp(peer)
+			}
+		}
+		if had, ok := m.links[i]; ok && had == want {
+			continue
+		}
+		if err := q.SetLink(fmt.Sprintf("net%d", i), want); err != nil {
+			m.a.log.Warn("vm: link state", "port", n.port.Ref, "err", err)
+			continue
+		}
+		m.links[i] = want
+	}
+}
+
+// followLinks keeps every running machine's NICs' carrier on their cables', on each engine event.
+func (a *Adapter) followLinks() {
+	defer a.wg.Done()
+	id, ch := a.rt.Engine.Subscribe(4096)
+	defer func() { a.rt.Engine.Unsubscribe(id) }()
+	for {
+		select {
+		case <-a.stopped:
+			return
+		case _, ok := <-ch:
+			if !ok {
+				id, ch = a.rt.Engine.Subscribe(4096)
+				continue
+			}
+		}
+		for _, path := range a.order {
+			m := a.machines[path]
+			if pm := m.running(); pm != nil && pm.QMP != nil {
+				m.syncLinks(pm.QMP, false)
+			}
+		}
+	}
+}
+
 func (m *machine) closeNICs() {
 	for _, n := range m.nics {
 		if n.hp != nil {
 			n.hp.Close()
+		}
+		if n.splice != nil {
+			n.splice.Close()
 		}
 		n.cable.Close()
 	}
@@ -193,8 +269,12 @@ func (n *nic) dhcp(dir string, payload []byte) {
 	if r := msg.Router(); len(r) > 0 {
 		data["router"] = r[0].String()
 	}
-	n.commit("lease", ip, fmt.Sprintf("the guest's DHCP client on %s (%s) was leased %s on %s by %s, relayed by the twin relay at %s",
-		n.port.Name, n.port.MAC, ip, n.network, server, n.peer), data)
+	relay := "the twin relay at " + n.peer
+	if n.splice != nil {
+		relay = "the switch at " + n.peer + " (its NOS's relay)"
+	}
+	n.commit("lease", ip, fmt.Sprintf("the guest's DHCP client on %s (%s) was leased %s on %s by %s, relayed by %s",
+		n.port.Name, n.port.MAC, ip, n.network, server, relay), data)
 }
 
 // flow observes a connection the guest opened through the gateway, or was refused.
@@ -203,9 +283,12 @@ func (n *nic) flow(f netsim.Flow) {
 		return
 	}
 	n.mu.Lock()
-	if f.Refused != "" {
+	switch {
+	case f.Refused != "":
 		n.refuse[f.Refused]++
-	} else {
+	case n.splice != nil:
+		n.flows[f.Proto+" "+f.Dst.String()]++ // the switch routed it: counted by where it went
+	default:
 		n.flows[f.Service]++
 	}
 	n.mu.Unlock()
@@ -228,15 +311,18 @@ type NIC struct {
 	Port, MAC, Network, Peer string
 	Socket                   string
 	Linked                   bool
-	Gateway                  string
-	Server, NoRelay          string
-	Lease                    string
-	Leases                   int
-	Flows                    map[string]int
-	Refused                  map[string]int
-	Classes                  map[string]int
-	Requests                 []string // the vendor class of each DHCP request, in order (the first 256)
-	DHCPRequests, Replies    int64
+	// Spliced: the NIC is spliced onto a real switch's port (D57), Switch's NOS's name for it.
+	Spliced               bool
+	Switch                string
+	Gateway               string
+	Server, NoRelay       string
+	Lease                 string
+	Leases                int
+	Flows                 map[string]int
+	Refused               map[string]int
+	Classes               map[string]int
+	Requests              []string // the vendor class of each DHCP request, in order (the first 256)
+	DHCPRequests, Replies int64
 }
 
 // NICs lists a machine's NICs.
@@ -247,11 +333,19 @@ func (a *Adapter) NICs(path string) []NIC {
 	}
 	var out []NIC
 	for _, n := range m.nics {
-		server, why := n.hp.Relay()
 		n.mu.Lock()
 		x := NIC{Port: n.port.Ref, MAC: n.port.MAC, Network: n.network, Peer: n.peer, Socket: n.cable.Path, Linked: n.cable.Linked(),
-			Server: server, NoRelay: why, Lease: n.lease, Leases: n.leases, Flows: map[string]int{}, Refused: map[string]int{}, Classes: map[string]int{},
-			DHCPRequests: n.hp.DHCPRequests.Load(), Replies: n.hp.DHCPReplies.Load()}
+			Lease: n.lease, Leases: n.leases, Flows: map[string]int{}, Refused: map[string]int{}, Classes: map[string]int{}}
+		if n.hp != nil {
+			x.Server, x.NoRelay = n.hp.Relay()
+			x.DHCPRequests, x.Replies = n.hp.DHCPRequests.Load(), n.hp.DHCPReplies.Load()
+		} else {
+			x.Spliced, x.Switch, x.Server = true, n.peer, n.server
+			for _, c := range n.classes {
+				x.DHCPRequests += int64(c)
+			}
+			x.Replies = int64(n.leases)
+		}
 		for k, v := range n.flows {
 			x.Flows[k] = v
 		}
@@ -263,8 +357,10 @@ func (a *Adapter) NICs(path string) []NIC {
 		}
 		x.Requests = append([]string(nil), n.seq...)
 		n.mu.Unlock()
-		if g := n.hp.Gateway(); g.IsValid() {
-			x.Gateway = g.String()
+		if n.hp != nil {
+			if g := n.hp.Gateway(); g.IsValid() {
+				x.Gateway = g.String()
+			}
 		}
 		out = append(out, x)
 	}
@@ -278,6 +374,22 @@ func (a *Adapter) networkReport() (lines []string) {
 	for _, path := range a.order {
 		for _, x := range a.NICs(path) {
 			s := fmt.Sprintf("network: %s (%s) cabled to %s on %s", x.Port, x.MAC, orNone(x.Peer), orNone(x.Network))
+			if x.Spliced {
+				s += "; spliced onto the real switch port (D57): the switch's VLAN, relay and routing carry it"
+				if x.Lease != "" {
+					s += fmt.Sprintf("; leased %s from %s", x.Lease, orNone(x.Server))
+				}
+				if len(x.Flows) > 0 {
+					var f []string
+					for k, v := range x.Flows {
+						f = append(f, fmt.Sprintf("%s %d", k, v))
+					}
+					sort.Strings(f)
+					s += "; connections: " + strings.Join(f, ", ")
+				}
+				lines = append(lines, s)
+				continue
+			}
 			if x.Server != "" {
 				s += fmt.Sprintf("; DHCP relayed by the segment's twin relay to %s (%d requests, %d replies", x.Server, x.DHCPRequests, x.Replies)
 				if x.Lease != "" {

@@ -22,12 +22,15 @@ import (
 //	@@dc-twin hello boot=<boot_id> kernel=<release> arch=<machine> cpus=<n> memKiB=<n> kmod=<loaded|refused|absent>
 //	@@dc-twin alive boot=<boot_id>                       (every HeartbeatEvery)
 //	@@dc-twin kmsg <base64 of "<prio>,<seq>,<usec>,<flags>;<text>">  (each /dev/kmsg record, as the kernel gives it)
+//	@@dc-twin exec-done <id> rc=<n> <base64 of the output>   (an exec's exit code and its first 4 KiB of output)
 //
 // Twin to guest:
 //
 //	@@dc-twin attach                                     (answered by hello; the first starts the kmsg stream)
 //	@@dc-twin kmsg-write <N>text                         (one kernel record at level N: printk'd by the agent's
 //	                                                      kernel module when it is loaded, else written to /dev/kmsg)
+//	@@dc-twin exec <id> <base64 of a shell script>       (run by sh in the background while attached; answered by
+//	                                                      exec-done)
 const (
 	Marker = "@@dc-twin "
 	// Listening is the line the agent's start puts in the kernel log, and so on the console: the
@@ -43,6 +46,11 @@ const (
 	// KernelModuleFile is the file the module exposes: a line written to it is printk'd, so its
 	// record has facility kern, as a driver's has (D50).
 	KernelModuleFile = "/proc/dctwin-kmsg"
+	// MaxExecScript is the longest script an exec line carries: base64 on one line within the
+	// 4095 bytes a tty's line discipline gives a line in canonical mode.
+	MaxExecScript = 2048
+	// MaxExecOutput is how much of an exec's output (stdout and stderr) the agent sends back.
+	MaxExecOutput = 4096
 )
 
 // GuestAgent is the guest's half of the agent: a shell function for busybox ash, started in the
@@ -61,7 +69,7 @@ const (
 // says so in the journal entry it makes of it.
 func GuestAgent() string {
 	return strings.NewReplacer("@HB@", strconv.Itoa(HeartbeatEvery), "@M@", strings.TrimSpace(Marker),
-		"@KMOD@", KernelModule, "@KFILE@", KernelModuleFile).Replace(guestAgent)
+		"@KMOD@", KernelModule, "@KFILE@", KernelModuleFile, "@OUT@", strconv.Itoa(MaxExecOutput)).Replace(guestAgent)
 }
 
 const guestAgent = `# the in-host agent (internal/inhost): the twin's lines arrive on the serial console, marked @M@;
@@ -79,6 +87,7 @@ inhost_agent() {
 		if [ -w @KFILE@ ]; then kmsg=@KFILE@ kmod=loaded; else kmod=refused; fi
 	fi
 	frame() { printf '@M@ %s\n' "$*" > $t; }
+	mkdir -p /tmp
 	attached=
 	echo "dc-twin guest: in-host agent listening on $t" > /dev/kmsg
 	while IFS= read -r line; do
@@ -95,6 +104,14 @@ inhost_agent() {
 			fi ;;
 		"@M@ kmsg-write "*)
 			printf '%s\n' "${line#@M@ kmsg-write }" > $kmsg ;;
+		"@M@ exec "*)
+			[ -n "$attached" ] || continue
+			x=${line#@M@ exec }
+			(id=${x%% *}; f=/tmp/dctwin-exec.$id
+			printf '%s' "${x#* }" | base64 -d > $f
+			sh $f > $f.out 2>&1 < /dev/null; rc=$?
+			frame "exec-done $id rc=$rc $(head -c @OUT@ $f.out | base64 | tr -d '\n')"
+			rm -f $f $f.out) & ;;
 		esac
 	done < $t
 }
@@ -105,7 +122,7 @@ inhost_agent &
 type Frame struct {
 	Kind   string            // hello, alive, kmsg
 	Fields map[string]string // hello and alive: key=value pairs
-	Record string            // kmsg: the record as /dev/kmsg gave it, decoded
+	Record string            // kmsg: the record as /dev/kmsg gave it, decoded; exec-done: the output
 }
 
 // ParseFrame finds the agent's frame in a console line. A kernel message the console printed
@@ -125,6 +142,18 @@ func ParseFrame(line string) (Frame, bool) {
 			return Frame{}, false
 		}
 		return Frame{Kind: kind, Record: string(rec)}, true
+	case "exec-done":
+		id, rest, _ := strings.Cut(body, " ")
+		rc, enc, _ := strings.Cut(rest, " ")
+		code, ok := strings.CutPrefix(rc, "rc=")
+		if _, err := strconv.ParseUint(id, 10, 64); err != nil || !ok {
+			return Frame{}, false
+		}
+		out, err := base64.StdEncoding.DecodeString(strings.TrimSpace(enc))
+		if err != nil {
+			return Frame{}, false
+		}
+		return Frame{Kind: kind, Fields: map[string]string{"id": id, "rc": code}, Record: string(out)}, true
 	case "hello", "alive":
 		f := Frame{Kind: kind, Fields: map[string]string{}}
 		for _, kv := range strings.Fields(body) {
@@ -135,6 +164,14 @@ func ParseFrame(line string) (Frame, bool) {
 		return f, true
 	}
 	return Frame{}, false // the twin's own lines echoed back, or something this agent does not send
+}
+
+// ExecLine asks the agent to run a shell script; it answers exec-done with the same id.
+func ExecLine(id uint64, script string) (string, error) {
+	if len(script) > MaxExecScript {
+		return "", fmt.Errorf("an exec script is at most %d bytes (the console's line), not %d", MaxExecScript, len(script))
+	}
+	return fmt.Sprintf("%sexec %d %s\n", Marker, id, base64.StdEncoding.EncodeToString([]byte(script))), nil
 }
 
 // AttachLine and KmsgWriteLine are the twin's lines to the guest.

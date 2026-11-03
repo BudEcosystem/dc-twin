@@ -176,34 +176,56 @@ func PlanSegments(m *model.Model) []Segment {
 		if n.DHCP != "twin" && n.DHCP != "stack" {
 			continue
 		}
-		a := planAddressing(m, n)
-		seen := map[*model.Rack]*Segment{}
-		var order []*model.Rack
-		for _, p := range n.Ports {
-			r := p.Device.RackOf()
-			if r == nil || p.Link == nil {
+		out = append(out, networkSegments(m, n)...)
+	}
+	return out
+}
+
+// NetworkSegments is one network's segments whether or not it has DHCP: for a network without
+// one, what a real switch carries as its rack's VLAN and gateway (D57). A network without an IPv4
+// CIDR has none, and an unknown one nil.
+func NetworkSegments(m *model.Model, network string) []Segment {
+	n := m.Networks[network]
+	if n == nil {
+		return nil
+	}
+	if n.DHCP != "twin" && n.DHCP != "stack" && planAddressing(m, n).scheme == schemeNone {
+		return []Segment{}
+	}
+	return networkSegments(m, n)
+}
+
+// networkSegments numbers a network's racks by its addressing scheme: one segment per rack with
+// a cabled port on the network.
+func networkSegments(m *model.Model, n *model.Network) []Segment {
+	out := []Segment{}
+	a := planAddressing(m, n)
+	seen := map[*model.Rack]*Segment{}
+	var order []*model.Rack
+	for _, p := range n.Ports {
+		r := p.Device.RackOf()
+		if r == nil || p.Link == nil {
+			continue
+		}
+		s := seen[r]
+		if s == nil {
+			pfx, gw, err := a.subnet(r)
+			if err != nil {
 				continue
 			}
-			s := seen[r]
-			if s == nil {
-				pfx, gw, err := a.subnet(r)
-				if err != nil {
-					continue
-				}
-				s = &Segment{Network: name, Rack: r.Path, Index: a.index(r), Prefix: pfx, Gateway: gw}
-				seen[r] = s
-				order = append(order, r)
-			}
-			sw := p.Link.Peer(p).Device.Path
-			if !contains(s.Switches, sw) {
-				s.Switches = append(s.Switches, sw)
-			}
+			s = &Segment{Network: n.Name, Rack: r.Path, Index: a.index(r), Prefix: pfx, Gateway: gw}
+			seen[r] = s
+			order = append(order, r)
 		}
-		sort.Slice(order, func(i, j int) bool { return order[i].Path < order[j].Path })
-		for _, r := range order {
-			sort.Strings(seen[r].Switches)
-			out = append(out, *seen[r])
+		sw := p.Link.Peer(p).Device.Path
+		if !contains(s.Switches, sw) {
+			s.Switches = append(s.Switches, sw)
 		}
+	}
+	sort.Slice(order, func(i, j int) bool { return order[i].Path < order[j].Path })
+	for _, r := range order {
+		sort.Strings(seen[r].Switches)
+		out = append(out, *seen[r])
 	}
 	return out
 }

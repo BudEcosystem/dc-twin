@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -25,7 +26,39 @@ type Docker struct {
 	Socket string
 	// Podman: the socket is Podman's Docker-compatible API.
 	Podman bool
+	// Memory, when not 0, is every container's memory limit in bytes, with no swap beyond it
+	// (spec.adapters.network.nos.memory): a twin on a shared host bounds what its switches take.
+	Memory int64
 	c      *http.Client
+}
+
+// minMemory is the smallest limit an Engine accepts (Docker's, 6 MiB).
+const minMemory = 6 << 20
+
+// ParseMemory reads a container memory limit as the Engine's CLI writes one: bytes, or a number
+// with k, m or g (binary units); "" is no limit.
+func ParseMemory(s string) (int64, error) {
+	if s == "" {
+		return 0, nil
+	}
+	mult := int64(1)
+	num := s
+	switch strings.ToLower(s[len(s)-1:]) {
+	case "k":
+		mult, num = 1<<10, s[:len(s)-1]
+	case "m":
+		mult, num = 1<<20, s[:len(s)-1]
+	case "g":
+		mult, num = 1<<30, s[:len(s)-1]
+	}
+	n, err := strconv.ParseInt(num, 10, 64)
+	if err != nil || n <= 0 || n > (1<<62)/mult {
+		return 0, fmt.Errorf("memory %q: bytes, or a positive number with k, m or g", s)
+	}
+	if n*mult < minMemory {
+		return 0, fmt.Errorf("memory %q: below the 6m an Engine accepts", s)
+	}
+	return n * mult, nil
 }
 
 // Container is a started switch container.
@@ -157,6 +190,9 @@ func (d *Docker) Run(ctx context.Context, s Spec) (*Container, error) {
 			// carries the hostname (SONiC's %h)
 			hc["UTSMode"] = s.NetworkMode
 		}
+	}
+	if d.Memory > 0 {
+		hc["Memory"], hc["MemorySwap"] = d.Memory, d.Memory
 	}
 	if s.Privileged {
 		hc["Privileged"] = true

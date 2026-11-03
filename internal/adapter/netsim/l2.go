@@ -24,6 +24,10 @@ type L2 interface {
 	// bridge holding the segment gateway, with the switch's MAC. It is nil (and no error) when
 	// the substrate bridged no endpoint for that network and rack.
 	Gateway(network, rack string, gw netip.Prefix, mac net.HardwareAddr) (L2Gateway, error)
+	// HostPort is the real switch port a vm host's data port (its ref) is spliced onto (D57):
+	// frames written to it leave the switch's port, and what the switch sends there is read from
+	// it. It is nil when the port is not spliced.
+	HostPort(ref string) Cable
 	// NOS names the real NOS serving the switch at the far end of a port ref ("" for a model
 	// switch).
 	NOS(ref string) string

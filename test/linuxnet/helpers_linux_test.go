@@ -26,6 +26,7 @@ import (
 	_ "github.com/BudEcosystem/dc-twin/internal/adapter/redfish"
 	"github.com/BudEcosystem/dc-twin/internal/compile"
 	"github.com/BudEcosystem/dc-twin/internal/model"
+	"github.com/BudEcosystem/dc-twin/internal/nos"
 	"github.com/BudEcosystem/dc-twin/internal/schema"
 	"github.com/BudEcosystem/dc-twin/internal/twin"
 )
@@ -39,6 +40,23 @@ func need(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("the TAP substrate needs root")
 	}
+}
+
+// nosMemory is DCTWIN_NOS_MEMORY, every container's memory limit on a shared host
+// (spec.adapters.network.nos.memory, and the tests' own Kea).
+func nosMemory() string { return os.Getenv("DCTWIN_NOS_MEMORY") }
+
+// nosRuntime is the NOS runtime the tests start their own containers on, bounded as the twin's are.
+func nosRuntime(t *testing.T) (*nos.Docker, error) {
+	t.Helper()
+	d, err := nos.NewDocker()
+	if err != nil {
+		return nil, err
+	}
+	if d.Memory, err = nos.ParseMemory(nosMemory()); err != nil {
+		t.Fatalf("DCTWIN_NOS_MEMORY: %v", err)
+	}
+	return d, nil
 }
 
 func loadEstate(t *testing.T, file string, subst map[string]string) *schema.Estate {
@@ -55,11 +73,21 @@ func loadEstate(t *testing.T, file string, subst map[string]string) *schema.Esta
 	if err := schema.Decode([]byte(s), &est); err != nil {
 		t.Fatal(err)
 	}
+	if m := nosMemory(); m != "" {
+		est.Spec.Adapters.Network.NOS.Memory = m
+	}
 	return &est
 }
 
 // up brings an estate up with the DHCP and Redfish adapters on the TAP substrate.
 func up(t *testing.T, est *schema.Estate) (*twin.Twin, *tap.Substrate, *dhcp.Adapter) {
+	t.Helper()
+	tw, sub := upWith(t, est, "dhcp", "redfish")
+	return tw, sub, tw.Adapter("dhcp").(*dhcp.Adapter)
+}
+
+// upWith brings an estate up with the adapters named on the TAP substrate.
+func upWith(t *testing.T, est *schema.Estate, adapters ...string) (*twin.Twin, *tap.Substrate) {
 	t.Helper()
 	reg, err := compile.Registry()
 	if err != nil {
@@ -70,7 +98,7 @@ func up(t *testing.T, est *schema.Estate) (*twin.Twin, *tap.Substrate, *dhcp.Ada
 		lvl = slog.LevelDebug
 	}
 	start := time.Now()
-	tw, err := twin.UpEstate(est, "", reg, twin.Options{StateDir: t.TempDir(), Adapters: []string{"dhcp", "redfish"},
+	tw, err := twin.UpEstate(est, "", reg, twin.Options{StateDir: t.TempDir(), Adapters: adapters,
 		Log: slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: lvl}))})
 	if err != nil {
 		t.Fatal(err)
@@ -81,7 +109,7 @@ func up(t *testing.T, est *schema.Estate) (*twin.Twin, *tap.Substrate, *dhcp.Ada
 		t.Fatalf("the substrate is %T, not tap", tw.Net.L2)
 	}
 	t.Logf("up in %s on substrate %s (netns %s)", time.Since(start).Round(time.Millisecond), tw.Net.Substrate(), sub.Netns())
-	return tw, sub, tw.Adapter("dhcp").(*dhcp.Adapter)
+	return tw, sub
 }
 
 func waitLeased(t *testing.T, a *dhcp.Adapter, want int, timeout time.Duration) time.Duration {

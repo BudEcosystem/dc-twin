@@ -331,3 +331,58 @@ func TestServer(t *testing.T) {
 		t.Errorf("startup: %v", out)
 	}
 }
+
+// An apply's frr-reload output keeps every error it printed, however early, ahead of its last
+// lines: the first error is what failed the batch, and frr-reload's line-by-line retry after it
+// prints far more than the tail keeps.
+func TestReloadSummaryKeepsTheFirstError(t *testing.T) {
+	var in strings.Builder
+	in.WriteString("Lines to add:\n% Unknown command: vni 104001\nline 3: Failure to communicate[13] to zebra, line: vni 104001\n")
+	for i := 0; i < 30; i++ {
+		fmt.Fprintf(&in, "retry line %d\n", i)
+	}
+	cmd := exec.Command("sh", "-c", "printf '%s' \"$1\" | "+ReloadSummary, "sh", in.String())
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("%v %s", err, out)
+	}
+	s := string(out)
+	for _, want := range []string{"% Unknown command: vni 104001", "Failure to communicate[13] to zebra", "retry line 29"} {
+		if !strings.Contains(s, want) {
+			t.Errorf("the summary lacks %q:\n%s", want, s)
+		}
+	}
+	if strings.Contains(s, "retry line 5\n") {
+		t.Errorf("the summary keeps more than the tail:\n%s", s)
+	}
+}
+
+// The VRFs' stanzas (each VRF's L3 VNI) are what an apply gives vtysh before frr-reload: only
+// the vrf ... exit-vrf blocks of the rendered frr.conf, whole, and nothing of router bgp.
+func TestVRFStanzas(t *testing.T) {
+	sw := leaf()
+	tree, _ := Startup(sw)
+	Patch(tree, nil, map[string]any{
+		"vrf": map[string]any{
+			"tenant-a": map[string]any{"evpn": map[string]any{"vni": map[string]any{"104001": map[string]any{}}},
+				"router": map[string]any{"bgp": map[string]any{"enable": "on"}}},
+			"tenant-b": map[string]any{"evpn": map[string]any{"vni": map[string]any{"104002": map[string]any{}}}},
+		},
+		"nve":  map[string]any{"vxlan": map[string]any{"enable": "on", "source": map[string]any{"address": "10.255.255.253"}}},
+		"evpn": map[string]any{"enable": "on"},
+	})
+	f, err := Render(tree, sw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := exec.Command("sh", "-c", "printf '%s' \"$1\" | "+VRFStanzas, "sh", f.FRR).CombinedOutput()
+	if err != nil {
+		t.Fatalf("%v %s", err, out)
+	}
+	if want := "vrf tenant-a\n vni 104001\nexit-vrf\nvrf tenant-b\n vni 104002\nexit-vrf\n"; string(out) != want {
+		t.Errorf("stanzas:\n%s\nwant:\n%s", out, want)
+	}
+	if !strings.Contains(ApplyScript, VRFStanzas) || strings.Index(ApplyScript, "vtysh -f") > strings.Index(ApplyScript, "frr-reload.py --reload") {
+		t.Error("the apply does not give vtysh the VRFs' stanzas before frr-reload")
+	}
+}
