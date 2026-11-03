@@ -84,7 +84,7 @@ func (c *nvueClient) apply(patches map[string]any) map[string]any {
 // where it has none.
 func TestNVUE(t *testing.T) {
 	need(t)
-	d, err := nos.NewDocker()
+	d, err := nosRuntime(t)
 	if err != nil {
 		t.Skipf("no Docker Engine for the NOS runtime: %v", err)
 	}

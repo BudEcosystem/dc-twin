@@ -1,0 +1,49 @@
+# The TAP substrate with `vm` hosts on a real NOS's ports (D57): two racks of one server each, both
+# at vm fidelity with the twin's own OS (os: twin), on a clos-2tier frontend fabric that runs
+# generic/nvue-frr (one leaf per rack, one spine in the network rack). Each server's provisioning
+# and frontend NICs are TAPs moved into its leaf as swp<n>, the twin splicing the guest's NIC onto
+# them: the leaf carries each network's rack segment as a VLAN with the segment gateway, relays the
+# provisioning VLAN by giaddr to the stack's Kea at the spine's eth64 (swp64), and routes both
+# across the fabric over eBGP. The BMCs stay on the model OOB switches (twin site DHCP).
+# test/linuxnet substitutes the Kea container's and the probe namespace's names.
+apiVersion: dc-twin/v1alpha1
+kind: Estate
+metadata:
+  name: linuxnet-vm-nos
+spec:
+  seed: 2027
+  clock: wall
+  timeScale: 0.05
+  packs: [generic@0.1.0]
+  fidelity:
+    default: model
+    overrides:
+      - { select: "r0{1,2}/server-01", level: vm, os: twin }
+  sites:
+    - name: site-1
+      halls:
+        - name: hall-a
+          rows:
+            - name: a
+              positions: 4
+              racks:
+                - { name: r01, position: 1, format: generic/cpu-rack, params: { servers: 1 }, feeds: [A, B] }
+                - { name: r02, position: 2, format: generic/cpu-rack, params: { servers: 1 }, feeds: [A, B] }
+                - { name: n01, position: 4, format: generic/network-rack, feeds: [A, B] }
+  networks:
+    oob:          { role: management,   dhcp: twin,  cidr: 10.30.0.0/20, fabric: oob }
+    provisioning: { role: provisioning, dhcp: stack, cidr: 10.40.0.0/20, fabric: frontend, server: 10.90.0.10 }
+    frontend:     { role: frontend,     dhcp: none,  cidr: 10.50.0.0/20, fabric: frontend }
+  fabrics:
+    - { name: oob,      template: oob-flat,   nos: none }
+    - { name: frontend, template: clos-2tier, nos: generic/nvue-frr, params: { leafsPerRack: 1, spines: 1 }, placeIn: n01 }
+  facility:
+    power:
+      feeds: [{ name: A, capacityW: 200000 }, { name: B, capacityW: 200000 }]
+  adapters:
+    vm: { memoryMB: 512, cpus: 1 }
+    network:
+      substrate: tap
+      attach:
+        - { container: KEA_CONTAINER, port: "spine-1:eth64", address: 10.90.0.10/24, gateway: 10.90.0.1 }
+        - { netns: PROBE_NETNS, port: "spine-1:eth63", address: 10.90.1.10/24, gateway: 10.90.1.1, interface: probe0 }

@@ -43,7 +43,7 @@ type Runtime struct {
 }
 
 // ClaimBoot records that adapter name boots the model host at path itself (an impersonator's
-// firmware, D57), so the boot walker leaves it alone.
+// firmware, D58), so the boot walker leaves it alone.
 func (rt *Runtime) ClaimBoot(path, name string) {
 	rt.bootMu.Lock()
 	defer rt.bootMu.Unlock()

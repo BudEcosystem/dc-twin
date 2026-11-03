@@ -112,6 +112,9 @@ type NOSOptions struct {
 	Image string `json:"image,omitempty"`
 	// Underlay is the IPv4 prefix fabric links' /31s are numbered from (default 10.255.0.0/16).
 	Underlay string `json:"underlay,omitempty"`
+	// Memory is every NOS container's memory limit, with no swap beyond it (bytes, or k, m, g:
+	// "512m"); unset, containers are unlimited.
+	Memory string `json:"memory,omitempty"`
 }
 
 // Attachment cables a running container to a real switch's port.

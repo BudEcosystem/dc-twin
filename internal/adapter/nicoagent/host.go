@@ -18,7 +18,7 @@ import (
 	"github.com/BudEcosystem/dc-twin/internal/model"
 )
 
-// NICo's discovery agent, scout, for a host at `model` fidelity (D57). NICo boots a host it is
+// NICo's discovery agent, scout, for a host at `model` fidelity (D58). NICo boots a host it is
 // ingesting into scout over the network: a host behind a DPU through the DPU (its host-facing
 // port, answered by the DPU's DHCP server, dpuserve.go), a host without one on its provisioning
 // port through the twin relay, as the DGX of the Ready path does. Scout reports the host's

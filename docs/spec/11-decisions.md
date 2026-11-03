@@ -999,7 +999,8 @@ Revisions are NVUE's: `POST /nvue_v1/revision`, `PATCH`/`DELETE` of any path wit
 merge; null unsets), `PATCH /nvue_v1/revision/<id>` `{"state":"apply"}`, `GET` of any path at
 `?rev=applied|startup|<id>`. Applying renders the tree as Cumulus does, to
 `/etc/network/interfaces` and `/etc/frr/frr.conf`, and runs the switch's own `ifreload -a` and
-`frr-reload.py --reload`, and restarts dhcrelay when its arguments change; a revision that cannot
+`frr-reload.py --reload` (each VRF's stanza given to vtysh first, so frr-reload sends no `vrf`
+line, which its diff could put in a `router bgp` context, D57), and restarts dhcrelay when its arguments change; a revision that cannot
 render is `invalid` before the switch is touched, one a tool fails on is `apply_fail` with what it
 printed, and the applied configuration stays the last that applied. Only part of NVUE's schema is
 emulated (interfaces, the one bridge domain, VLAN VNIs, VRFs with L3 VNIs on VLANs from 4024 up,
@@ -1013,7 +1014,38 @@ Cumulus switch uses for both, so only NVUE, the layer above them, is emulated, a
 NVUE's schema as listed. **Reversed if:** a Cumulus VX image an operator supplies runs here; then
 `cumulus-vx` becomes runnable beside this.
 
-### D57 — NICo's software on a model machine is impersonated on the machine's own network path
+### D57 — A `vm` host's port on a real NOS is that switch's port: its NIC spliced onto a TAP
+On the TAP substrate, each data port of a `vm` host (its host ports: the ports its OS sees, D48)
+that the model cables to a real NOS's front-panel port is that switch's port. The substrate makes
+it a TAP in the twin's namespace with the switch port's MAC, moves it into the NOS's namespace and
+names it as the NOS names the port (`swp<n>`, `eth<n>`), as a BMC's endpoint is (D45); its carrier
+follows `engine.PortUp` (the cable, a port fault, the host's power). The NIC's QEMU stream cable
+(D48) is spliced onto the TAP (`netsim.Splice`): frames cross unchanged both ways, and the switch's
+VLAN, relay and routing carry the guest; the twin relays and routes nothing for the port. The
+switch carries each of the host's networks as its rack segment's VLAN with the segment gateway
+(the network's /24 for the rack, numbered as a DHCP network's segments are),
+relaying by giaddr to the stack's server when the network has DHCP; a network without DHCP gets
+the VLAN and gateway alone, and the host is addressed by its OS. A switch carrying two networks'
+segments of one rack gives each its own VLAN id (`Vlan<1000 + segment index>`, else the next one
+free). The observer contract is D48's: each DHCP message the splice carries is observed (the lease
+is a `lease` event on the port, relayed "by the switch"), and each connection the guest opens (a
+TCP SYN, a first UDP datagram) is a `flow` routed by the switch. A port on a model switch, and
+every port on the loopback substrate, keeps the twin's switch port and gateway (D48). Every `vm`
+NIC, spliced or not, has the carrier its cable has: the vm adapter sets each NIC's link through
+QMP `set_link` from `engine.LinkUp` (cabled, the cable in, no port fault) and the far end's port,
+so a pulled cable is link-down in the guest as it is on the switch. The in-host
+agent gains `exec` (a script, base64 on one console line of at most 2 KiB; answered with its exit
+code and first 4 KiB of output), the twin's own hand in an `os: twin` guest, which the twin's guest
+needs to configure its NICs; no stack is given it (D10). **Why:** a tenant's traffic across a VRF
+or a VNI could not be sent from a server: the guest's NICs reached only the twin's userspace
+gateway. The TAP is what D45 already makes a switch port of; splicing the existing cable onto it
+keeps QEMU's command line, power cycles (each new QEMU process connects to the same socket) and
+the observer as they are, and needs nothing QEMU-side on Linux. **Costs:** a userspace copy per
+frame; enough for function, not for measurement. **Amends:** D48 (its "Reversed if": the gateway
+of a port on a real NOS is the switch). **Reversed if:** throughput matters; then the TAP's
+descriptor is handed to QEMU (`-netdev tap,fd=`) and the observer reads a packet socket on it.
+
+### D58 — NICo's software on a model machine is impersonated on the machine's own network path
 At `model` fidelity a BlueField and a host run no OS, so NICo holds every managed host it ingests
 at `DPUInitializing/Init`, waiting for the DPU's discovery, and nothing after it (host discovery,
 Ready, the rack's maintenance, the NVLink domain) can be tested with NICo on a rack of `model`

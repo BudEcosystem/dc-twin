@@ -639,6 +639,34 @@ func bmcPort(d *model.Device) *model.Port {
 // BMCPort is exported for adapters.
 func BMCPort(d *model.Device) *model.Port { return bmcPort(d) }
 
+// HostPorts are the Ethernet ports the host's OS sees: its own, other than the BMC's, and
+// those of sub-devices that are not machines of their own (a DPU or NIC at model fidelity
+// presents its ports to the host as PCIe functions). They are a `vm` host's NICs (D48), and the
+// ports the TAP substrate splices onto a real NOS's (D57).
+func HostPorts(d *model.Device) []*model.Port {
+	var out []*model.Port
+	bmc := bmcPort(d)
+	add := func(dev *model.Device, skip *model.Port) {
+		for _, p := range dev.Ports {
+			if p.Kind != "ethernet" || p.MAC == "" || p == skip || p.Role == "management" {
+				continue
+			}
+			out = append(out, p)
+		}
+	}
+	if d.HasBMC() {
+		add(d, bmc)
+	} else {
+		add(d, nil)
+	}
+	for _, ch := range d.Children {
+		if ch.Fidelity != "vm" {
+			add(ch, bmcPort(ch))
+		}
+	}
+	return out
+}
+
 func (c *compiler) addPort(d *model.Device, comp *model.Component, name string, ps schema.PortSpec) {
 	if _, dup := d.PortBy[name]; dup {
 		c.errf("%s: two ports named %s", d.Path, name)

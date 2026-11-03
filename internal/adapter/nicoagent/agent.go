@@ -20,7 +20,7 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-// What runs on the DPU once it has booted, impersonated (D57). NICo's DPU image (carbide.efi,
+// What runs on the DPU once it has booted, impersonated (D58). NICo's DPU image (carbide.efi,
 // booted over the network while the DPU is in DPUInitializing/Init) reports the DPU's hardware
 // to nico-api (DiscoverMachine, reporter DPU_AGENT), takes the machine certificate it is given,
 // and installs the DPU's OS; the OS's forge-dpu-agent then asks nico-api what to do

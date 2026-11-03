@@ -21,6 +21,7 @@ package inhost
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -91,6 +92,15 @@ type guest struct {
 	kmsg      *os.File
 	journal   *os.File
 	lastErr   string
+	nextExec  uint64
+	execs     map[uint64]chan execResult // waiting for exec-done, by id
+}
+
+// execResult is an exec's answer, or why there is none.
+type execResult struct {
+	out string
+	rc  int
+	err error
 }
 
 // Hello is what the agent says of the guest when the twin attaches.
@@ -326,6 +336,16 @@ func (g *guest) line(s string) {
 		g.mu.Unlock()
 	case "kmsg":
 		g.record(f.Record)
+	case "exec-done":
+		id, _ := strconv.ParseUint(f.Fields["id"], 10, 64)
+		rc, _ := strconv.Atoi(f.Fields["rc"])
+		g.mu.Lock()
+		ch := g.execs[id]
+		delete(g.execs, id)
+		g.mu.Unlock()
+		if ch != nil {
+			ch <- execResult{out: f.Record, rc: rc}
+		}
 	}
 }
 
@@ -362,12 +382,56 @@ func (g *guest) detach(why string) {
 	was := g.attached
 	g.attached, g.listening = false, false
 	g.pending = nil
+	execs := g.execs
+	g.execs = nil
 	g.mu.Unlock()
+	for _, ch := range execs {
+		ch <- execResult{err: errors.New("the in-host agent detached: " + why)}
+	}
 	if was {
 		g.observe("inhost.agent", "detached", "in-host agent detached: "+why, 0, nil)
 		if g.a.nodes != nil {
 			g.a.nodes.mark(g)
 		}
+	}
+}
+
+// Exec runs a shell script in an os: twin guest through its in-host agent, and returns its
+// output (stdout and stderr, the first MaxExecOutput bytes) and exit code. It is the twin's own
+// hand in its own guest (a test or scenario configures the guest's network with it), over the
+// console the agent already speaks on; no stack is given it (D10).
+func (a *Adapter) Exec(ctx context.Context, path, script string) (string, int, error) {
+	g := a.byPath[path]
+	if g == nil {
+		return "", 0, fmt.Errorf("%s has no in-host agent (not an os: twin vm host)", path)
+	}
+	g.mu.Lock()
+	if !g.attached {
+		g.mu.Unlock()
+		return "", 0, fmt.Errorf("%s: the in-host agent is not attached", path)
+	}
+	g.nextExec++
+	id := g.nextExec
+	l, err := ExecLine(id, script)
+	if err != nil {
+		g.mu.Unlock()
+		return "", 0, err
+	}
+	ch := make(chan execResult, 1)
+	if g.execs == nil {
+		g.execs = map[uint64]chan execResult{}
+	}
+	g.execs[id] = ch
+	g.mu.Unlock()
+	g.send(l)
+	select {
+	case r := <-ch:
+		return r.out, r.rc, r.err
+	case <-ctx.Done():
+		g.mu.Lock()
+		delete(g.execs, id)
+		g.mu.Unlock()
+		return "", 0, fmt.Errorf("%s: exec: %w", path, ctx.Err())
 	}
 }
 

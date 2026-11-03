@@ -68,7 +68,8 @@ type Substrate struct {
 
 	mu       sync.Mutex
 	nextNIC  tcpip.NICID
-	ports    map[string]*port // by port ref
+	ports    map[string]*port     // by port ref
+	hosts    map[string]*hostPort // vm hosts' spliced data ports, by port ref (D57)
 	byDev    map[string]*port
 	bridges  map[string]*bridge // "network|rack path"
 	gws      []*gateway
@@ -116,6 +117,62 @@ type nic struct {
 	mu   sync.Mutex
 	addr netip.Prefix
 	gw   netip.Addr
+}
+
+// hostPort is a vm host's data port on a real NOS (D57): a TAP whose device is the switch's port,
+// read and written raw. The vm adapter splices the guest's NIC onto it (netsim.Splice); nothing of
+// the twin's is behind it.
+type hostPort struct {
+	plan    *HostPortPlan
+	f       *os.File
+	carrier int32 // 1 on, 0 off (the cable, the host's power)
+}
+
+// errNoCarrier is a host port's write while its cable is down: the frame is not delivered.
+var errNoCarrier = errors.New("tap: the port has no carrier")
+
+func (h *hostPort) ReadFrame(b []byte) (int, error) {
+	for {
+		n, err := h.f.Read(b)
+		if err != nil {
+			return 0, netsim.ErrClosed
+		}
+		if atomic.LoadInt32(&h.carrier) == 1 {
+			return n, nil
+		}
+		// sent before the carrier went: a pulled cable carries nothing
+	}
+}
+
+func (h *hostPort) WriteFrame(b []byte) error {
+	if atomic.LoadInt32(&h.carrier) == 0 {
+		return errNoCarrier
+	}
+	_, err := h.f.Write(b)
+	return err
+}
+
+func (h *hostPort) setCarrier(up bool) error {
+	v := int32(0)
+	if up {
+		v = 1
+	}
+	if atomic.LoadInt32(&h.carrier) == v {
+		return nil
+	}
+	rc, err := h.f.SyscallConn()
+	if err != nil {
+		return err
+	}
+	var ierr error
+	if err := rc.Control(func(fd uintptr) { ierr = unix.IoctlSetPointerInt(int(fd), unix.TUNSETCARRIER, int(v)) }); err != nil {
+		return err
+	}
+	if ierr != nil {
+		return fmt.Errorf("carrier on %s: %w", h.plan.SwitchIf, ierr)
+	}
+	atomic.StoreInt32(&h.carrier, v)
+	return nil
 }
 
 // port is a BMC management port's endpoint.
@@ -185,7 +242,7 @@ func New(ctx context.Context, a twin.NetworkArgs) (netsim.L2, error) {
 		log = slog.Default()
 	}
 	s := &Substrate{plan: plan, eng: a.Engine, log: log, ns: netns.None(), nextNIC: 1, ports: map[string]*port{}, byDev: map[string]*port{},
-		bridges: map[string]*bridge{}, byPath: map[string]*nosSwitch{}, ca: a.Net, stateDir: a.StateDir, kernel: map[string]error{}}
+		bridges: map[string]*bridge{}, hosts: map[string]*hostPort{}, byPath: map[string]*nosSwitch{}, ca: a.Net, stateDir: a.StateDir, kernel: map[string]error{}}
 	s.ctx, s.cancel = context.WithCancel(ctx)
 	if err := s.start(); err != nil {
 		s.Close()
@@ -229,6 +286,11 @@ func (s *Substrate) start() error {
 	for _, ep := range s.plan.Endpoints {
 		if err := s.addEndpoint(ep); err != nil {
 			return fmt.Errorf("endpoint %s: %w", ep.Ref, err)
+		}
+	}
+	for _, hp := range s.plan.HostPorts {
+		if err := s.addHostPort(hp); err != nil {
+			return fmt.Errorf("host port %s: %w", hp.Ref, err)
 		}
 	}
 	for i, lp := range s.plan.Links {
@@ -377,6 +439,53 @@ func (s *Substrate) addEndpoint(ep *EndpointPlan) error {
 	s.mu.Lock()
 	s.ports[ep.Ref] = p
 	s.byDev[ep.Device] = p
+	s.mu.Unlock()
+	return nil
+}
+
+// addHostPort creates a vm host port's TAP in the twin's namespace, gives its device the switch
+// port's MAC and moves it into the NOS's namespace under the port's name there, as a BMC's
+// endpoint (D45, D57). Its carrier starts off: syncLinks turns it on while the cable is in and
+// the host is powered.
+func (s *Substrate) addHostPort(hp *HostPortPlan) error {
+	fd := -1
+	if err := inNS(s.ns, func() error {
+		var err error
+		fd, err = tun.OpenTAP(hp.TapIf) // non-blocking: the runtime's poller reads it
+		return err
+	}); err != nil {
+		return fmt.Errorf("TAP %s: %w", hp.TapIf, err)
+	}
+	h := &hostPort{plan: hp, f: os.NewFile(uintptr(fd), hp.TapIf), carrier: 1}
+	if err := h.setCarrier(false); err != nil {
+		h.f.Close()
+		return err
+	}
+	sw := s.byPath[hp.Switch.Device.Path]
+	if err := s.nl(func(nh *netlink.Handle) error {
+		l, err := nh.LinkByName(hp.TapIf)
+		if err != nil {
+			return err
+		}
+		if mac, err := net.ParseMAC(hp.Peer.MAC); err == nil && hp.Peer.MAC != "" {
+			if err := nh.LinkSetHardwareAddr(l, mac); err != nil {
+				return err
+			}
+		}
+		if err := nh.LinkSetNsFd(l, int(sw.ns)); err != nil {
+			return fmt.Errorf("move into %s: %w", sw.c.Name, err)
+		}
+		moved, err := sw.h.LinkByName(hp.TapIf)
+		if err != nil {
+			return err
+		}
+		return sw.h.LinkSetName(moved, hp.SwitchIf) // the NOS brings it up and into its VLAN
+	}); err != nil {
+		h.f.Close()
+		return err
+	}
+	s.mu.Lock()
+	s.hosts[hp.Ref] = h
 	s.mu.Unlock()
 	return nil
 }
@@ -634,6 +743,16 @@ func (s *Substrate) DevicePort(device string) netsim.L2Port {
 	return nil
 }
 
+// HostPort is the switch port a vm host's data port is spliced onto (D57), or nil.
+func (s *Substrate) HostPort(ref string) netsim.Cable {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if h := s.hosts[ref]; h != nil {
+		return h
+	}
+	return nil
+}
+
 func (s *Substrate) NOS(ref string) string {
 	dev, _, _ := strings.Cut(ref, ":")
 	s.mu.Lock()
@@ -725,6 +844,7 @@ func (s *Substrate) startSwitches() error {
 	if err != nil {
 		return fmt.Errorf("a real NOS needs a NOS runtime: %w", err)
 	}
+	d.Memory = s.plan.NOSMemory
 	s.docker = d
 	// a loaded Docker host takes minutes over a container create: this bounds the images' checks
 	// and the switches' creation, not their start-up (waitSwitches)
@@ -956,12 +1076,6 @@ func (s *Substrate) NVUE(switchPath string) *nvue.Server {
 		return sw.nvue
 	}
 	return nil
-}
-
-// kernelProbes are the overlay devices a NOS that provides VRFs creates, and how to make one.
-var kernelProbes = []struct{ feature, add string }{
-	{"vrf", "ip link add dctwin-probe-vrf type vrf table 4093"},
-	{"vxlan", "ip link add dctwin-probe-vx type vxlan id 16777000 dstport 4789 nolearning"},
 }
 
 // probeKernel finds whether the Docker host's kernel has the devices a VRF and a VNI need, in a
@@ -1346,6 +1460,18 @@ func (s *Substrate) syncLinks() {
 			s.log.Warn("tap: link state", "port", p.plan.Ref, "err", err)
 		}
 	}
+	s.mu.Lock()
+	hosts := make([]*hostPort, 0, len(s.hosts))
+	for _, h := range s.hosts {
+		hosts = append(hosts, h)
+	}
+	s.mu.Unlock()
+	for _, h := range hosts {
+		// the host's port is up while its cable is in and the host is on (engine.PortUp)
+		if err := h.setCarrier(s.eng.PortUp(h.plan.Port)); err != nil {
+			s.log.Warn("tap: link state", "port", h.plan.Ref, "err", err)
+		}
+	}
 	for _, c := range s.cables {
 		want := s.eng.PortUp(c.plan.Link.A) && s.eng.PortUp(c.plan.Link.B)
 		s.setLink(c.a, want, &c.appliedA)
@@ -1521,6 +1647,9 @@ func (s *Substrate) Report() netsim.L2Report {
 	sort.Strings(real)
 	r.Lines = append(r.Lines, fmt.Sprintf("Substrate tap (D20): %d BMC ports are their own NICs (the model's MAC, on their own TAP) in a userspace stack (gVisor netstack); TAPs, bridges and cables live in network namespace %s; %d model-switch segments are Linux bridges with the twin relay at their gateway; real switches: %s; %d fabric cables; %d hosts attached.",
 		len(s.ports), s.nsName, len(s.bridges), orNone(strings.Join(real, ", ")), len(s.cables), len(s.attached)))
+	if len(s.plan.HostPorts) > 0 {
+		r.Lines = append(r.Lines, fmt.Sprintf("tap: %d vm host data ports are their real switches' ports (D57): each a TAP moved into its NOS, the guest's NIC spliced onto it frame for frame, so the switch's VLAN, relay and routing carry the guest; the twin relays and routes nothing for them.", len(s.plan.HostPorts)))
+	}
 	emulated, relays := map[string]int{}, 0
 	for _, sw := range s.switches {
 		if sw.plan.Emulated {
@@ -1581,6 +1710,9 @@ func (s *Substrate) Report() netsim.L2Report {
 	for why, n := range s.plan.Skipped {
 		r.Lines = append(r.Lines, fmt.Sprintf("tap: %d BMC ports have no endpoint: %s.", n, why))
 	}
+	for why, n := range s.plan.HostSkipped {
+		r.Lines = append(r.Lines, fmt.Sprintf("tap: %d vm host data ports are not spliced onto a real switch: %s.", n, why))
+	}
 	if s.obs != nil {
 		r.Lines = append(r.Lines, s.obs.summary()...)
 	}
@@ -1626,6 +1758,9 @@ func (s *Substrate) Close() error {
 	}
 	for _, g := range s.gws {
 		g.close()
+	}
+	for _, h := range s.hosts {
+		h.f.Close()
 	}
 	s.mu.Unlock()
 	if s.st != nil {
