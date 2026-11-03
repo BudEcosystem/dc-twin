@@ -34,7 +34,7 @@ const keaImage = "dctwin-kea-e2e:2.6"
 // cables (a BMC's, a fabric link's) show up there.
 func TestRealNOS(t *testing.T) {
 	need(t)
-	d, err := nos.NewDocker()
+	d, err := nosRuntime(t)
 	if err != nil {
 		t.Skipf("no Docker Engine for the NOS runtime: %v", err)
 	}
@@ -271,11 +271,18 @@ func logBGP(t *testing.T, sub *tap.Substrate, when string) {
 // are up at once).
 func startKeaContainer(t *testing.T, d *nos.Docker, name string) *nos.Container {
 	t.Helper()
+	return startKeaContainerOn(t, d, name, "10.30")
+}
+
+// startKeaContainerOn starts Kea with one /24 per rack under a /16's first two octets: rack
+// r0<i+1>'s <net>.<i>.0/24, its router at .1 (the segment gateway on the rack's switch).
+func startKeaContainerOn(t *testing.T, d *nos.Docker, name, net string) *nos.Container {
+	t.Helper()
 	var subnets []any
 	for i, rack := range []string{"r01", "r02"} {
-		subnets = append(subnets, map[string]any{"id": i + 1, "subnet": fmt.Sprintf("10.30.%d.0/24", i),
-			"pools":        []any{map[string]any{"pool": fmt.Sprintf("10.30.%d.10 - 10.30.%d.250", i, i)}},
-			"option-data":  []any{map[string]any{"name": "routers", "data": fmt.Sprintf("10.30.%d.1", i)}},
+		subnets = append(subnets, map[string]any{"id": i + 1, "subnet": fmt.Sprintf("%s.%d.0/24", net, i),
+			"pools":        []any{map[string]any{"pool": fmt.Sprintf("%s.%d.10 - %s.%d.250", net, i, net, i)}},
+			"option-data":  []any{map[string]any{"name": "routers", "data": fmt.Sprintf("%s.%d.1", net, i)}},
 			"user-context": map[string]any{"rack": rack}})
 	}
 	cfg := map[string]any{"Dhcp4": map[string]any{

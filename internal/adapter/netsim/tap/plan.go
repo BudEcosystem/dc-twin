@@ -42,12 +42,18 @@ import (
 type Plan struct {
 	Estate    string
 	Endpoints []*EndpointPlan
+	// HostPorts are vm hosts' data ports cabled to a real NOS (D57).
+	HostPorts []*HostPortPlan
 	Bridges   []*BridgePlan
 	Switches  []*SwitchPlan
 	Links     []*LinkPlan
 	Attach    []*AttachPlan
 	// Skipped counts BMC ports given no endpoint, by reason.
 	Skipped map[string]int
+	// HostSkipped counts vm hosts' data ports not spliced onto a real NOS, by reason.
+	HostSkipped map[string]int
+	// NOSMemory is every NOS container's memory limit in bytes (0: none).
+	NOSMemory int64
 }
 
 // EndpointPlan is one BMC management port's endpoint.
@@ -67,6 +73,27 @@ type EndpointPlan struct {
 	TapIf, SwitchIf string
 	Bridge          *BridgePlan // model switch
 	Switch          *SwitchPlan // real NOS
+}
+
+// HostPortPlan is one data port of a vm host cabled to a real NOS's front-panel port (D57): a TAP
+// whose device is the switch port, as a BMC's is, but with no NIC of the twin's behind it: the
+// twin splices the guest's NIC (its QEMU stream cable, D48) onto the TAP, so the guest's frames
+// are the switch's, the NOS relays its DHCP and routes its traffic.
+type HostPortPlan struct {
+	Index   int
+	Ref     string // the host port, "device:port"
+	Device  string
+	MAC     net.HardwareAddr
+	Network string
+	Rack    string
+	Port    *model.Port
+	Peer    *model.Port
+	Dev     *model.Device
+	// TapIf is the TAP's name in the twin's namespace; SwitchIf its name in the NOS's.
+	TapIf, SwitchIf string
+	Switch          *SwitchPlan
+	// Vlan is the switch's VLAN for the port's network and rack.
+	Vlan string
 }
 
 // BridgePlan is a model switch segment: one Linux bridge per rack segment per network.
@@ -111,6 +138,12 @@ type AttachPlan struct {
 	Gateway   netip.Addr
 }
 
+// kernelProbes are the overlay devices a NOS that provides VRFs creates, and how to make one.
+var kernelProbes = []struct{ feature, add string }{
+	{"vrf", "ip link add dctwin-pvrf type vrf table 4093"},
+	{"vxlan", "ip link add dctwin-pvx type vxlan id 16777000 dstport 4789 nolearning"},
+}
+
 const defaultUnderlay = "10.255.0.0/16"
 
 var unsafeName = regexp.MustCompile(`[^a-zA-Z0-9_.-]+`)
@@ -130,7 +163,12 @@ func BuildPlan(m *model.Model, est *schema.Estate, outputs map[string]string, ho
 	if rt := opts.NOS.Runtime; rt != "" && rt != "docker" {
 		return nil, fmt.Errorf("spec.adapters.network.nos.runtime %q: the runtime is docker (the Docker Engine's socket)", rt)
 	}
-	p := &Plan{Estate: est.Metadata.Name, Skipped: map[string]int{}}
+	p := &Plan{Estate: est.Metadata.Name, Skipped: map[string]int{}, HostSkipped: map[string]int{}}
+	mem, err := nos.ParseMemory(opts.NOS.Memory)
+	if err != nil {
+		return nil, fmt.Errorf("spec.adapters.network.nos.memory: %w", err)
+	}
+	p.NOSMemory = mem
 	segs := map[string]dhcp.Segment{}
 	for _, s := range dhcp.PlanSegments(m) {
 		segs[s.Network+"|"+s.Rack] = s
@@ -181,7 +219,7 @@ func BuildPlan(m *model.Model, est *schema.Estate, outputs map[string]string, ho
 	}
 	sort.Slice(devs, func(i, j int) bool { return devs[i].Path < devs[j].Path })
 	bridges := map[string]*BridgePlan{}
-	vlans := map[*SwitchPlan]map[string]*nos.Vlan{}
+	vlans := vlanSet{}
 	for _, d := range devs {
 		port := compile.BMCPort(d)
 		switch {
@@ -227,20 +265,9 @@ func BuildPlan(m *model.Model, est *schema.Estate, outputs map[string]string, ho
 			if ep.SwitchIf == "" {
 				return nil, fmt.Errorf("switch %s: %s's port %s is not a front-panel port %s can carry", sp.Device.Path, port.Ref, peer.Name, sp.NOS.Name)
 			}
-			if vlans[sp] == nil {
-				vlans[sp] = map[string]*nos.Vlan{}
-			}
-			key := seg.Network + "|" + seg.Rack
-			v := vlans[sp][key]
-			if v == nil {
-				v = &nos.Vlan{Name: fmt.Sprintf("Vlan%d", 1000+seg.Index), Network: seg.Network, Rack: seg.Rack,
-					Gateway: netip.PrefixFrom(seg.Gateway, seg.Prefix.Bits())}
-				relay, err := relayTargets(n, outputs)
-				if err != nil {
-					return nil, fmt.Errorf("switch %s: %w", sp.Device.Path, err)
-				}
-				v.Relay = relay
-				vlans[sp][key] = v
+			v, err := vlans.get(sp, seg, n, outputs)
+			if err != nil {
+				return nil, err
 			}
 			v.Ports = append(v.Ports, peer.Name)
 		} else {
@@ -255,6 +282,9 @@ func BuildPlan(m *model.Model, est *schema.Estate, outputs map[string]string, ho
 			ep.Bridge, ep.SwitchIf = b, ep.TapIf
 		}
 		p.Endpoints = append(p.Endpoints, ep)
+	}
+	if err := planHostPorts(p, m, byDev, vlans, outputs); err != nil {
+		return nil, err
 	}
 	for _, sp := range p.Switches {
 		var keys []string
@@ -383,6 +413,111 @@ func BuildPlan(m *model.Model, est *schema.Estate, outputs map[string]string, ho
 		}
 	}
 	return p, nil
+}
+
+// vlanSet is each real switch's VLANs, by "network|rack".
+type vlanSet map[*SwitchPlan]map[string]*nos.Vlan
+
+// get is a switch's VLAN for a segment, made the first time: the segment's gateway, a relay to
+// the stack's server when the network has DHCP, and a VLAN id the switch has not used: 1000 + the
+// segment's index, or the next one free (a switch carrying two networks' segments of one rack).
+func (vs vlanSet) get(sp *SwitchPlan, seg dhcp.Segment, n *model.Network, outputs map[string]string) (*nos.Vlan, error) {
+	if vs[sp] == nil {
+		vs[sp] = map[string]*nos.Vlan{}
+	}
+	key := seg.Network + "|" + seg.Rack
+	if v := vs[sp][key]; v != nil {
+		return v, nil
+	}
+	used := map[string]bool{}
+	for _, v := range vs[sp] {
+		used[v.Name] = true
+	}
+	id := 1000 + seg.Index
+	for used[fmt.Sprintf("Vlan%d", id)] {
+		id++
+	}
+	if id > 4094 {
+		return nil, fmt.Errorf("switch %s: no VLAN id is free for %s's segment of %s", sp.Device.Path, seg.Network, seg.Rack)
+	}
+	v := &nos.Vlan{Name: fmt.Sprintf("Vlan%d", id), Network: seg.Network, Rack: seg.Rack, Gateway: netip.PrefixFrom(seg.Gateway, seg.Prefix.Bits())}
+	if n.DHCP == "twin" || n.DHCP == "stack" {
+		relay, err := relayTargets(n, outputs)
+		if err != nil {
+			return nil, fmt.Errorf("switch %s: %w", sp.Device.Path, err)
+		}
+		v.Relay = relay
+	}
+	vs[sp][key] = v
+	return v, nil
+}
+
+// planHostPorts plans every vm host's data ports cabled to a real NOS (D57): each joins its
+// switch's VLAN for its network's rack segment. A port on a model switch keeps the twin's
+// gateway (D48) and is counted, as are ports that cannot be spliced.
+func planHostPorts(p *Plan, m *model.Model, byDev map[*model.Device]*SwitchPlan, vlans vlanSet, outputs map[string]string) error {
+	var devs []*model.Device
+	for _, d := range m.Devices {
+		if d.Fidelity == "vm" && d.IsHost() { // a real NOS's switch is vm by its NOS (D21), not a host
+			devs = append(devs, d)
+		}
+	}
+	sort.Slice(devs, func(i, j int) bool { return devs[i].Path < devs[j].Path })
+	segs := map[string]map[string]dhcp.Segment{} // network -> rack path -> segment
+	for _, d := range devs {
+		for _, port := range compile.HostPorts(d) {
+			if port.Link == nil {
+				p.HostSkipped["a vm host's port is not cabled"]++
+				continue
+			}
+			peer := port.Link.Peer(port)
+			sp := byDev[peer.Device]
+			if sp == nil {
+				if peer.Device.BaseClass == "switch" {
+					p.HostSkipped["a vm host's port on a model switch (the twin's gateway serves it, D48)"]++
+				} else {
+					p.HostSkipped["a vm host's port is cabled to something that is not a switch"]++
+				}
+				continue
+			}
+			n := m.Networks[port.Network]
+			r := port.Device.RackOf()
+			if n == nil || r == nil {
+				p.HostSkipped["a vm host's port on a real NOS is on no network, or in no rack"]++
+				continue
+			}
+			if segs[n.Name] == nil {
+				segs[n.Name] = map[string]dhcp.Segment{}
+				for _, s := range dhcp.NetworkSegments(m, n.Name) {
+					segs[n.Name][s.Rack] = s
+				}
+			}
+			seg, ok := segs[n.Name][r.Path]
+			if !ok || !seg.Gateway.IsValid() {
+				p.HostSkipped["a vm host's port on a real NOS is on a network with no IPv4 segment for its rack (no cidr)"]++
+				continue
+			}
+			mac, err := net.ParseMAC(port.MAC)
+			if err != nil {
+				p.HostSkipped["a vm host's port has no MAC"]++
+				continue
+			}
+			swIf := sp.NOS.Interface(sp.Config, peer.Name)
+			if swIf == "" {
+				return fmt.Errorf("switch %s: %s's port %s is not a front-panel port %s can carry", sp.Device.Path, port.Ref, peer.Name, sp.NOS.Name)
+			}
+			v, err := vlans.get(sp, seg, n, outputs)
+			if err != nil {
+				return err
+			}
+			v.Ports = append(v.Ports, peer.Name)
+			hp := &HostPortPlan{Index: len(p.HostPorts), Ref: port.Ref, Device: d.Path, MAC: mac, Network: n.Name, Rack: r.Path,
+				Port: port, Peer: peer, Dev: d, Switch: sp, SwitchIf: swIf, Vlan: v.Name}
+			hp.TapIf = fmt.Sprintf("h%05x", hp.Index)
+			p.HostPorts = append(p.HostPorts, hp)
+		}
+	}
+	return nil
 }
 
 // switchMAC is a switch's own MAC: its management port's, which a NOS takes as its system MAC

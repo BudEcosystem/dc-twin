@@ -171,4 +171,11 @@ func (q *QMP) Status() (string, error) {
 	return st.Status, nil
 }
 
+// SetLink is set_link on a NIC's netdev (its id, net<i>): down, the guest's NIC loses its carrier
+// as a pulled cable takes a real NIC's; up, it regains it.
+func (q *QMP) SetLink(netdev string, up bool) error {
+	_, err := q.Execute("set_link", map[string]any{"name": netdev, "up": up})
+	return err
+}
+
 func (q *QMP) Close() error { return q.conn.Close() }

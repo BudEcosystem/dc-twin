@@ -637,7 +637,17 @@ func (e *Engine) PortUp(p *model.Port) bool {
 	return e.portUp(p)
 }
 
-func (e *Engine) portUp(p *model.Port) bool {
+// LinkUp is whether a port has its cable as its own end sees it: cabled, the cable in, and the
+// port up by admin and by every fault. Unlike PortUp it does not count the port's own device's
+// power: a running machine's NIC is powered by the machine running.
+func (e *Engine) LinkUp(p *model.Port) bool {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return p.Link != nil && e.cableUp(p)
+}
+
+// cableUp is the port's admin state, its cable and its faults.
+func (e *Engine) cableUp(p *model.Port) bool {
 	if !p.AdminUp {
 		return false
 	}
@@ -650,6 +660,13 @@ func (e *Engine) portUp(p *model.Port) bool {
 				return false
 			}
 		}
+	}
+	return true
+}
+
+func (e *Engine) portUp(p *model.Port) bool {
+	if !e.cableUp(p) {
+		return false
 	}
 	d := p.Device
 	if !d.State.AC {

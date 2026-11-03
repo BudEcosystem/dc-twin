@@ -38,6 +38,18 @@
 #     suite's Kea, a process in the test's namespace, is the host's kea-dhcp4 or else the Kea
 #     image's own, run by the image's musl loader.
 #
+#   ENGINE=podman-rootless (with MODE=native): the engine is the invoking user's rootless Podman,
+#     its Docker-compatible API served for the run on a socket in the work directory; the test
+#     runs as root, opens the containers' namespaces and moves their ports in, and no rootful
+#     engine is touched (a shared host that allows only rootless containers).
+#   (f) TestVMHostsOnRealNOS: two x86_64 vm hosts (os: twin, KVM) on generic/nvue-frr leaves (D57):
+#       their NICs spliced onto TAPs in the leaves; DHCP from Kea through the leaf's relay, static
+#       frontend addresses routed across the fabric, a pulled cable, and a tenant VRF with an L3 VNI
+#       through NVUE. Opt-in (RUN=TestVMHostsOnRealNOS MODE=native): it needs /dev/kvm, QEMU and the
+#       twin's x86_64 guest image (dctwin assets fetch; DCTWIN_ASSETS, default ~/.cache/dc-twin/assets).
+#   NOS_MEMORY=512m: every container the twin and the tests create gets that memory limit, with no
+#     swap beyond it (spec.adapters.network.nos.memory), for a host with a memory budget.
+#
 # Everything a run creates is named dctwin-* (containers, volumes, network namespaces) and removed
 # at the end; nothing else is touched: no firewall rule, route or bridge outside its namespaces.
 #
@@ -51,7 +63,7 @@ mode=${MODE:-container}
 work=$(mktemp -d "${TMPDIR:-/tmp}/dctwin-linuxnet.XXXXXX")
 log="$work/linux-substrate-e2e.log"
 name=dctwin-linuxnet-$$
-estates='linuxnet-nos linuxnet-model linuxnet-sonic'
+estates='linuxnet-nos linuxnet-model linuxnet-sonic linuxnet-nvue linuxnet-vm-nos'
 
 case $mode in
   container)
@@ -62,7 +74,11 @@ case $mode in
     if [ "$(uname -s)" != Linux ] || ! sudo -n true 2>/dev/null; then
       echo "FAIL: MODE=native needs a Linux host and passwordless sudo" >&2; exit 2
     fi
-    if command -v podman >/dev/null; then
+    if [ "${ENGINE:-}" = podman-rootless ]; then
+      command -v podman >/dev/null || { echo "FAIL: ENGINE=podman-rootless needs podman" >&2; exit 2; }
+      eng=(podman)
+      rootless=
+    elif command -v podman >/dev/null; then
       eng=(sudo podman)
       rootless=podman # builds run rootless, their images are loaded into root's store
     elif command -v docker >/dev/null; then
@@ -92,7 +108,7 @@ cleanup() {
     for ns in $(ip netns list 2>/dev/null | awk '{print $1}' | grep -E '^dctwin-(linuxnet-|probe-)' || true); do
       sudo ip netns del "$ns" || true
     done
-    [ -n "$svc" ] && { sudo kill "$svc" 2>/dev/null || true; }
+    [ -n "$svc" ] && { kill "$svc" 2>/dev/null || sudo kill "$svc" 2>/dev/null || true; }
     rm -rf "$work/kea-root"
   fi
   true
@@ -101,7 +117,14 @@ trap cleanup EXIT
 
 if [ "$mode" = native ]; then
   case $(uname -m) in aarch64|arm64) goarch=arm64 ;; x86_64|amd64) goarch=amd64 ;; *) echo "FAIL: unsupported architecture" >&2; exit 1 ;; esac
-  if [ "${eng[1]}" = podman ]; then
+  if [ "${eng[0]}" = podman ]; then
+    sock="$work/podman.sock"
+    podman system service --time=0 "unix://$sock" >"$work/podman-service.log" 2>&1 &
+    svc=$!
+    for _ in $(seq 1 100); do test -S "$sock" && break; sleep 0.1; done
+    test -S "$sock" || { echo "FAIL: the Podman API service did not start (see $work/podman-service.log)" >&2; exit 1; }
+    engine_host="unix://$sock"
+  elif [ "${eng[1]:-}" = podman ]; then
     sock="$work/podman.sock"
     sudo podman system service --time=0 "unix://$sock" >"$work/podman-service.log" 2>&1 &
     svc=$!
@@ -173,7 +196,7 @@ case $run in *Sonic*)
   sonic_artifact "$sonic_gnmi" "$sonic_gnmi_url" "$sonic_gnmi_sha256" docker-sonic-gnmi
 ;; esac
 case $run in TestSonicVS) ;; *) image dctwin-nos-frr-dhcrelay:bookworm "$root/test/linuxnet/nos/Containerfile" "$root/test/linuxnet/nos" ;; esac
-case $run in *TestNVUE*) image dctwin-nos-nvue-frr:bookworm "$root/test/linuxnet/nos-nvue/Containerfile" "$root/test/linuxnet/nos-nvue" ;; esac
+case $run in *TestNVUE*|*TestVMHosts*) image dctwin-nos-nvue-frr:bookworm "$root/test/linuxnet/nos-nvue/Containerfile" "$root/test/linuxnet/nos-nvue" ;; esac
 
 (cd "$root" && CGO_ENABLED=0 GOOS=linux GOARCH=$goarch go test -c -o "$work/linuxnet.test" ./test/linuxnet/)
 
@@ -198,7 +221,7 @@ if [ "$mode" = native ]; then
   mkdir -p "$work/test/linuxnet"
   cp -R "$root/test/linuxnet/testdata" "$work/test/linuxnet/"
   # its own network namespace, loopback up: the twin's loopback endpoints are not the host's
-  sudo env DCTWIN_LINUXNET=1 DOCKER_HOST="$engine_host" PATH="$testpath" unshare --net sh -c \
+  sudo env DCTWIN_LINUXNET=1 DCTWIN_NOS_MEMORY="${NOS_MEMORY:-}" DCTWIN_ASSETS="${DCTWIN_ASSETS:-$HOME/.cache/dc-twin/assets}" DOCKER_HOST="$engine_host" PATH="$testpath" unshare --net sh -c \
     'ip link set lo up && cd "$1" && exec "$2" -test.v -test.count=1 -test.timeout=45m -test.run "$3"' \
     sh "$work/test/linuxnet" "$work/linuxnet.test" "$run" 2>&1 | tee "$log"
   rc=${PIPESTATUS[0]}
@@ -208,7 +231,7 @@ else
   runner=dctwin-linuxnet-e2e:cf-$(sha256 "$root/test/linuxnet/Containerfile" | cut -c1-12)
   image "$runner" "$root/test/linuxnet/Containerfile" "$root/test/linuxnet"
   docker create --name "$name" --privileged --pid=host -v /var/run/docker.sock:/var/run/docker.sock \
-    -e DCTWIN_LINUXNET=1 "$runner" \
+    -e DCTWIN_LINUXNET=1 -e DCTWIN_NOS_MEMORY="${NOS_MEMORY:-}" "$runner" \
     /work/linuxnet.test -test.v -test.count=1 -test.timeout=45m -test.run "$run" >/dev/null
   docker cp "$work/linuxnet.test" "$name:/work/linuxnet.test"
   docker cp "$root/test/linuxnet/testdata" "$name:/work/test/linuxnet/testdata"

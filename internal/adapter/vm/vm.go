@@ -155,7 +155,9 @@ type machine struct {
 	nvram     *qemu.NVRAM
 	cpus, mem int
 	nics      []*nic // the host's ports, cabled to the twin's switch ports (network.go, D48)
-	tpmCerts  string // what manufacturing the TPM gave it (tpm.go), or why it has no certificates
+	linkMu    sync.Mutex
+	links     map[int]bool // each NIC's carrier as last set through QMP (syncLinks)
+	tpmCerts  string       // what manufacturing the TPM gave it (tpm.go), or why it has no certificates
 	nv        nvramState
 }
 
@@ -217,6 +219,10 @@ func (a *Adapter) Start(ctx context.Context, rt *adapter.Runtime) error {
 		go m.work()
 		go m.watchConsole()
 		go m.watchNVRAM()
+	}
+	if len(a.order) > 0 {
+		a.wg.Add(1)
+		go a.followLinks()
 	}
 	for _, path := range a.order {
 		if initialOn[path] {
@@ -459,32 +465,8 @@ func (m *machine) config() qemu.Config {
 	return c
 }
 
-// hostPorts are the Ethernet ports the host's OS sees: its own, other than the BMC's, and
-// those of sub-devices that are not machines of their own (a DPU or NIC at model fidelity
-// presents its ports to the host as PCIe functions).
-func hostPorts(d *model.Device) []*model.Port {
-	var out []*model.Port
-	bmc := compile.BMCPort(d)
-	add := func(dev *model.Device, skip *model.Port) {
-		for _, p := range dev.Ports {
-			if p.Kind != "ethernet" || p.MAC == "" || p == skip || p.Role == "management" {
-				continue
-			}
-			out = append(out, p)
-		}
-	}
-	if d.HasBMC() {
-		add(d, bmc)
-	} else {
-		add(d, nil)
-	}
-	for _, ch := range d.Children {
-		if ch.Fidelity != "vm" {
-			add(ch, compile.BMCPort(ch))
-		}
-	}
-	return out
-}
+// hostPorts are the Ethernet ports the host's OS sees (compile.HostPorts).
+func hostPorts(d *model.Device) []*model.Port { return compile.HostPorts(d) }
 
 // start powers the machine on: swtpm first when it has one, then QEMU paused, then the
 // observer attaches and the guest is let run. Power is reported On when QEMU says it resumed.
@@ -516,6 +498,7 @@ func (m *machine) start(reset bool) error {
 		map[string]any{"commandLine": m.lastArgs, "pid": pm.PID(), "qemuVersion": pm.QMP.Version})
 	m.a.wg.Add(1)
 	go m.watch(pm)
+	m.syncLinks(pm.QMP, true) // before the guest runs: a NIC whose cable is out starts without carrier
 	if err := pm.Cont(); err != nil {
 		pm.Quit(5 * time.Second)
 		return err

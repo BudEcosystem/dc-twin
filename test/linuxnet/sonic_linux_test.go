@@ -171,7 +171,7 @@ redis-cli -n 4 HSET "BGP_GLOBALS_AF|default|l2vpn_evpn" advertise-all-vni true >
 // back.
 func TestSonicVS(t *testing.T) {
 	need(t)
-	d, err := nos.NewDocker()
+	d, err := nosRuntime(t)
 	if err != nil {
 		t.Skipf("no Docker Engine for the NOS runtime: %v", err)
 	}

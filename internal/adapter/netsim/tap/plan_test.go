@@ -1,6 +1,7 @@
 package tap
 
 import (
+	"fmt"
 	"net/netip"
 	"os"
 	"strings"
@@ -28,11 +29,18 @@ func loadEstate(t *testing.T, name string) *schema.Estate {
 
 func compileModel(t *testing.T, est *schema.Estate) *model.Model {
 	t.Helper()
+	return compileModelFor(t, est, compile.HostArch())
+}
+
+// compileModelFor compiles for a host of the architecture given: an estate whose vm hosts are
+// x86_64 compiles for an x86_64 host (KVM) wherever the test runs.
+func compileModelFor(t *testing.T, est *schema.Estate, hostArch string) *model.Model {
+	t.Helper()
 	reg, err := compile.Registry()
 	if err != nil {
 		t.Fatal(err)
 	}
-	res, err := compile.Compile(est, reg, compile.Options{HostArch: compile.HostArch()})
+	res, err := compile.Compile(est, reg, compile.Options{HostArch: hostArch})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -254,4 +262,175 @@ func TestPlanSonicVS(t *testing.T) {
 		}
 	}
 	t.Logf("%d BMC endpoints into %d SONiC-VS switches, %d cables, %d attachments", len(p.Endpoints), len(p.Switches), len(p.Links), len(p.Attach))
+}
+
+// spec.adapters.network.nos.memory bounds every NOS container; a bad value is refused at plan.
+func TestPlanNOSMemory(t *testing.T) {
+	est := loadEstate(t, "tap-nos.yaml")
+	m := compileModel(t, est)
+	p, err := BuildPlan(m, est, nil, "aarch64")
+	if err != nil || p.NOSMemory != 0 {
+		t.Fatalf("no memory set: %d, %v", p.NOSMemory, err)
+	}
+	est.Spec.Adapters.Network.NOS.Memory = "768m"
+	if p, err = BuildPlan(m, est, nil, "aarch64"); err != nil || p.NOSMemory != 768<<20 {
+		t.Fatalf("768m: %d, %v", p.NOSMemory, err)
+	}
+	est.Spec.Adapters.Network.NOS.Memory = "lots"
+	if _, err = BuildPlan(m, est, nil, "aarch64"); err == nil || !strings.Contains(err.Error(), "spec.adapters.network.nos.memory") {
+		t.Fatalf("lots: %v", err)
+	}
+}
+
+// Every device the kernel probe creates has a name the kernel takes (IFNAMSIZ: 15 characters):
+// a longer one fails with "Attribute failed policy validation", which read as a kernel without
+// VRF devices on every host.
+func TestKernelProbeNames(t *testing.T) {
+	for _, p := range kernelProbes {
+		f := strings.Fields(p.add)
+		if len(f) < 4 || f[0] != "ip" || f[2] != "add" {
+			t.Fatalf("%s: %q is not ip link add <dev>", p.feature, p.add)
+		}
+		if len(f[3]) > 15 {
+			t.Errorf("%s: device %q is %d characters, more than IFNAMSIZ allows (15)", p.feature, f[3], len(f[3]))
+		}
+	}
+}
+
+// A vm host's data ports cabled to a real NOS are the switch's ports (D57): each is a TAP moved
+// into its leaf, and the leaf carries each network's rack segment as a VLAN of its own, with the
+// segment gateway, relaying the DHCP network to the stack's server and not the other. The BMCs
+// stay on their model switches' bridges.
+func TestPlanVMHostPorts(t *testing.T) {
+	est := loadEstate(t, "tap-vm-nos.yaml")
+	p, err := BuildPlan(compileModelFor(t, est, "x86_64"), est, nil, "x86_64")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p.HostPorts) != 4 {
+		t.Fatalf("%d host ports, want both servers' eth0 and eth1; skipped %v", len(p.HostPorts), p.Skipped)
+	}
+	names := map[string]bool{}
+	for _, ep := range p.Endpoints {
+		names[ep.TapIf] = true
+		if ep.Bridge == nil {
+			t.Errorf("BMC %s: not on its model switch's bridge", ep.Ref)
+		}
+	}
+	for _, hp := range p.HostPorts {
+		if hp.Switch == nil || !strings.Contains(hp.Switch.Device.Path, "leaf-") {
+			t.Fatalf("%s: not on a leaf (%v)", hp.Ref, hp.Switch)
+		}
+		rack := hp.Rack[strings.LastIndex(hp.Rack, "/")+1:]
+		if !strings.Contains(hp.Switch.Device.Path, "leaf-"+rack+"-") {
+			t.Errorf("%s: on %s, not its rack's leaf", hp.Ref, hp.Switch.Device.Path)
+		}
+		if names[hp.TapIf] || len(hp.TapIf) > 15 {
+			t.Errorf("%s: TAP name %q is taken or too long", hp.Ref, hp.TapIf)
+		}
+		names[hp.TapIf] = true
+		if want := hp.Switch.NOS.Interface(hp.Switch.Config, hp.Peer.Name); hp.SwitchIf != want || !strings.HasPrefix(want, "swp") {
+			t.Errorf("%s: switch interface %q, want %q", hp.Ref, hp.SwitchIf, want)
+		}
+		if hp.MAC.String() != hp.Port.MAC {
+			t.Errorf("%s: MAC %s, the model's is %s", hp.Ref, hp.MAC, hp.Port.MAC)
+		}
+		if hp.Vlan == "" {
+			t.Errorf("%s: no VLAN", hp.Ref)
+		}
+	}
+	leaves := 0
+	for _, sp := range p.Switches {
+		if !strings.Contains(sp.Device.Path, "leaf-") {
+			if len(sp.Config.Vlans) != 0 || len(sp.Config.Service) != 2 {
+				t.Errorf("spine %s: %d VLANs, %d service ports", sp.Device.Path, len(sp.Config.Vlans), len(sp.Config.Service))
+			}
+			continue
+		}
+		leaves++
+		r := 0
+		if strings.Contains(sp.Device.Path, "leaf-r02-") {
+			r = 1
+		}
+		if len(sp.Config.Vlans) != 2 {
+			t.Fatalf("leaf %s: VLANs %+v, want provisioning and frontend", sp.Device.Path, sp.Config.Vlans)
+		}
+		seen := map[string]bool{}
+		for _, v := range sp.Config.Vlans {
+			if seen[v.Name] {
+				t.Errorf("leaf %s: VLAN %s twice", sp.Device.Path, v.Name)
+			}
+			seen[v.Name] = true
+			if len(v.Ports) != 1 {
+				t.Errorf("leaf %s: %s ports %v, want the one server's", sp.Device.Path, v.Name, v.Ports)
+			}
+			switch v.Network {
+			case "provisioning":
+				if v.Gateway != netip.MustParsePrefix(fmt.Sprintf("10.40.%d.1/24", r)) || len(v.Relay) != 1 || v.Relay[0] != netip.MustParseAddr("10.90.0.10") {
+					t.Errorf("leaf %s: provisioning VLAN %+v", sp.Device.Path, v)
+				}
+			case "frontend":
+				if v.Gateway != netip.MustParsePrefix(fmt.Sprintf("10.50.%d.1/24", r)) || len(v.Relay) != 0 {
+					t.Errorf("leaf %s: frontend VLAN %+v, want its gateway and no relay (no DHCP)", sp.Device.Path, v)
+				}
+			default:
+				t.Errorf("leaf %s: VLAN on network %s", sp.Device.Path, v.Network)
+			}
+		}
+		for _, hp := range p.HostPorts {
+			if hp.Switch == sp && !seen[hp.Vlan] {
+				t.Errorf("%s: VLAN %s is not on its leaf", hp.Ref, hp.Vlan)
+			}
+		}
+	}
+	if leaves != 2 {
+		t.Errorf("%d leaves", leaves)
+	}
+}
+
+// Only vm hosts' data ports are spliced: a model host has no NIC to splice, and a vm host's port
+// on a model switch keeps the twin's gateway (D48).
+func TestPlanHostPortsOnlyVMOnRealNOS(t *testing.T) {
+	est := loadEstate(t, "tap-vm-nos.yaml")
+	est.Spec.Fidelity.Overrides = nil
+	p, err := BuildPlan(compileModelFor(t, est, "x86_64"), est, nil, "x86_64")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p.HostPorts) != 0 {
+		t.Errorf("model hosts: %d host ports", len(p.HostPorts))
+	}
+	for _, sp := range p.Switches {
+		if len(sp.Config.Vlans) != 0 {
+			t.Errorf("model hosts: %s carries VLANs %+v", sp.Device.Path, sp.Config.Vlans)
+		}
+	}
+	est = loadEstate(t, "tap-vm-nos.yaml")
+	est.Spec.Fabrics[1].NOS = "none"
+	est.Spec.Adapters.Network.Attach = nil
+	p, err = BuildPlan(compileModelFor(t, est, "x86_64"), est, nil, "x86_64")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p.HostPorts) != 0 || p.HostSkipped["a vm host's port on a model switch (the twin's gateway serves it, D48)"] != 4 {
+		t.Errorf("model switches: %d host ports; skipped %v", len(p.HostPorts), p.HostSkipped)
+	}
+}
+
+// A real NOS's switches are vm by their NOS (D21), not hosts: their ports are never host ports,
+// and an estate without vm hosts counts no host port skipped.
+func TestPlanHostPortsAreHostsOnly(t *testing.T) {
+	est := loadEstate(t, "tap-nvue.yaml")
+	p, err := BuildPlan(compileModel(t, est), est, nil, "aarch64")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p.HostPorts) != 0 || len(p.HostSkipped) != 0 {
+		t.Errorf("no vm hosts: %d host ports, skipped %v", len(p.HostPorts), p.HostSkipped)
+	}
+	for why := range p.Skipped {
+		if strings.Contains(why, "vm host") {
+			t.Errorf("a BMC port skipped as %q", why)
+		}
+	}
 }
