@@ -98,6 +98,8 @@ type Options struct {
 	GatewayAddr string
 	Log         *slog.Logger
 	Outputs     map[string]string
+	// LogRetention bounds the committed event log on disk (D27); zero fields take the defaults.
+	LogRetention engine.LogRetention
 }
 
 // Twin is a running estate.
@@ -229,6 +231,7 @@ func UpEstate(est *schema.Estate, file string, reg *pack.Registry, opt Options) 
 	if err != nil {
 		return nil, err
 	}
+	eng.SetLogRetention(opt.LogRetention)
 	n, err := netsim.New(opt.StateDir, est.Spec.Adapters.Network.BasePort)
 	if err != nil {
 		return nil, err
@@ -258,6 +261,13 @@ func UpEstate(est *schema.Estate, file string, reg *pack.Registry, opt Options) 
 	}
 	rt := &adapter.Runtime{Engine: eng, Reg: reg, Net: n, StateDir: opt.StateDir, Assets: AssetsDir(), Log: opt.Log, Outputs: outputs, AllowTCG: opt.AllowTCG, Claims: claims}
 	t := &Twin{Estate: est, File: file, Engine: eng, Reg: reg, Net: n, Lock: res.Lock, Warnings: warnings, Runtime: rt}
+	// Peer is read from adapters' goroutines while later adapters are still starting.
+	var peersMu sync.Mutex
+	rt.Peer = func(name string) adapter.Adapter {
+		peersMu.Lock()
+		defer peersMu.Unlock()
+		return t.Adapter(name)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	t.cancel = cancel
 	if substrate != "" {
@@ -281,7 +291,9 @@ func UpEstate(est *schema.Estate, file string, reg *pack.Registry, opt Options) 
 			t.Down()
 			return nil, fmt.Errorf("adapter %s: %w", name, err)
 		}
+		peersMu.Lock()
 		t.Adapters = append(t.Adapters, a)
+		peersMu.Unlock()
 	}
 	eng.Start()
 	_ = n.Write()

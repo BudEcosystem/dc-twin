@@ -473,6 +473,49 @@ func TestHostPortRoutesToTheSiteNetworkWithoutNAT(t *testing.T) {
 	}
 }
 
+// A service in the namespace reaches an estate endpoint at its site address through the router,
+// as NICo's nvlink-manager reaches a switch tray's NMX-C at the tray's NVOS lease: the router
+// terminates the connection and opens one to where the twin serves that address; an address
+// nothing serves is refused.
+func TestSiteNetworkReachesEstateEndpoints(t *testing.T) {
+	ns, link := nsStack(t)
+	sn, err := ParseSiteNetwork("prefix=10.90.0.0/24 gateway=10.90.0.1 link=" + link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	up := NewUplink(sn, net.HardwareAddr{0x02, 0xdc, 0, 0, 0, 0x01}, nil)
+	defer up.Close()
+	nmxc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, "nmx-c") }))
+	defer nmxc.Close()
+	up.SetSiteRoutes(func() map[string]string { return map[string]string{"10.30.2.16:9370": nmxc.Listener.Addr().String()} })
+	deadline := time.Now().Add(5 * time.Second)
+	for !up.Linked() && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	get := func(site string) (string, error) {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		ap := netip.MustParseAddrPort(site)
+		c, err := gonet.DialContextTCP(ctx, ns, tcpip.FullAddress{NIC: 1, Addr: tcpip.AddrFrom4(ap.Addr().As4()), Port: ap.Port()}, ipv4.ProtocolNumber)
+		if err != nil {
+			return "", err
+		}
+		defer c.Close()
+		fmt.Fprintf(c, "GET / HTTP/1.0\r\n\r\n")
+		b, err := io.ReadAll(c)
+		return string(b), err
+	}
+	if body, err := get("10.30.2.16:9370"); err != nil || !strings.Contains(body, "nmx-c") {
+		t.Fatalf("the namespace reached %q (%v), want the estate endpoint", body, err)
+	}
+	if _, err := get("10.30.2.16:9999"); err == nil {
+		t.Error("a port nothing serves at the address was not refused")
+	}
+	if up.EndpointFlows.Load() != 1 || up.EndpointRefused.Load() != 1 {
+		t.Errorf("flows %d, refused %d", up.EndpointFlows.Load(), up.EndpointRefused.Load())
+	}
+}
+
 func TestParseSiteNetwork(t *testing.T) {
 	n, err := ParseSiteNetwork("prefix=10.90.0.0/24, gateway=10.90.0.1 link=127.0.0.1:17800")
 	if err != nil || n.Gateway.String() != "10.90.0.1" || n.Link != "127.0.0.1:17800" {

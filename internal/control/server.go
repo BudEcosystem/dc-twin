@@ -415,14 +415,22 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, s.catalogue())
 	case p == "/credentials" && r.Method == http.MethodGet:
-		// the BMC credentials of devices, for the operator's own tools (redacted from events)
+		// the BMC credentials of devices, for the operator's own tools (redacted from events): the
+		// account that logs in now, which a stack may have changed (NICo rotates every BMC's
+		// password), and the factory account when it differs (what a site's inventory holds)
 		ds, _ := eng.SelectDevices(q.Get("select"))
 		out := []map[string]string{}
 		eng.Read(func(*model.Model) {
 			for _, d := range ds {
-				if d.HasBMC() {
-					out = append(out, map[string]string{"path": d.Path, "user": d.Identity.BMCUser, "password": d.Identity.BMCPassword, "redfish": d.Endpoint.ListenTLS, "siteIP": d.Endpoint.SiteIP})
+				if !d.HasBMC() {
+					continue
 				}
+				user, pass := currentAccount(d)
+				c := map[string]string{"path": d.Path, "user": user, "password": pass, "redfish": d.Endpoint.ListenTLS, "siteIP": d.Endpoint.SiteIP}
+				if user != d.Identity.BMCUser || pass != d.Identity.BMCPassword {
+					c["factoryUser"], c["factoryPassword"] = d.Identity.BMCUser, d.Identity.BMCPassword
+				}
+				out = append(out, c)
 			}
 		})
 		writeJSON(w, out)
@@ -594,4 +602,26 @@ func jsonErr(w http.ResponseWriter, status int, msg string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
+}
+
+// currentAccount is the BMC account that logs in now: the factory user's, as it stands (a stack
+// may have changed its password), else the first enabled administrator, else the factory account.
+func currentAccount(d *model.Device) (user, pass string) {
+	var admin *model.Account
+	for i := range d.State.Accounts {
+		a := &d.State.Accounts[i]
+		if !a.Enabled || a.Locked || a.User == "" {
+			continue
+		}
+		if a.User == d.Identity.BMCUser {
+			return a.User, a.Password
+		}
+		if admin == nil && a.Role == "Administrator" {
+			admin = a
+		}
+	}
+	if admin != nil {
+		return admin.User, admin.Password
+	}
+	return d.Identity.BMCUser, d.Identity.BMCPassword
 }

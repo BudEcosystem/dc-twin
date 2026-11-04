@@ -108,10 +108,11 @@ spec:
     - { name: power, quantity: power, unit: W, source: power }
     - { name: leak, quantity: leak, source: tray-leak-detector }
   firmware:
-    - { component: bmc, baseline: "24.09.17", applyOn: reset }
-    - { component: uefi, baseline: "1.06.02", applyOn: reset }
-    - { component: cpld, baseline: "0.2.1", applyOn: ac-cycle }
-    - { component: gpu, baseline: "97.00.82.00.01", applyOn: ac-cycle }
+    # the levels its BMC serves: the captured GB200's (D35; the nvidia/gb-bmc capture)
+    - { component: bmc, baseline: "GB200Nvl-24.12-8", applyOn: reset }
+    - { component: uefi, baseline: "buildbrain-gcid-38635631", applyOn: reset }
+    - { component: cpld, baseline: "0x00 0x0b 0x03 0x04", applyOn: ac-cycle }
+    - { component: gpu, baseline: "97.00.6C.00.03", applyOn: ac-cycle }
   behaviours:
     power: { onSeconds: 40, offSeconds: 10, requires: "rack.power.sourcesOn >= rack.power.minSources" }
     boot: { postSeconds: 120 }
@@ -207,8 +208,8 @@ spec:
   firmware:
     # The BMC runs a pushed image after the BMC reboot its updater requests next (DPF: task
     # Completed, then Manager.Reset), which is where the engine applies a staged bmc component.
-    - { component: bmc, baseline: "BF-24.10-16", applyOn: reset }
-    - { component: nic, baseline: "32.43.1014", applyOn: reset }
+    - { component: bmc, baseline: "BF-24.10-10", applyOn: reset }
+    - { component: nic, baseline: "32.43.1008", applyOn: reset }
     # The Arm's boot firmware (the BMC's DPU_UEFI, DPU_ATF and DPU_BSP), which a BFB's installer
     # writes as its ARM capsule and the Arm runs from its next reset. At vm the twin stages the
     # BFB's versions when the installer reports the capsule written (DPF checks them against the

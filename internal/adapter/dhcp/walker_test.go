@@ -281,7 +281,7 @@ func TestBootWalkPXEAndHTTPBoot(t *testing.T) {
 		fw, ipxe := reqs[0], reqs[len(reqs)-1]
 		wantClass := "PXEClient:Arch:00007:UNDI:003016"
 		if target == "UefiHttp" {
-			wantClass = "HTTPClient:Arch:00016"
+			wantClass = "HTTPClient:Arch:00016:UNDI:003016"
 		}
 		if fw.class != wantClass || !bytes.Equal(fw.ndi, []byte{1, 3, 16}) || len(fw.uuid) != 17 || fw.uuid[0] != 0 {
 			t.Errorf("%s firmware DHCP: class %q ndi %v uuid %x", h, fw.class, fw.ndi, fw.uuid)
@@ -407,6 +407,11 @@ exit
 	if vars["a"] != "2" {
 		t.Errorf("a = %q", vars["a"])
 	}
+	// NICo's script for a DPU past discovery boots its disk: sanboot of a local drive, an exit
+	res = runIPXE(context.Background(), []byte("#!ipxe\nsanboot --no-describe --drive 0x80 ||\nsanboot --no-describe --drive 0x81 ||\nexit\n"), base, map[string]string{}, fetch)
+	if res.Booted || !strings.HasPrefix(res.Reason, "exit") {
+		t.Errorf("local sanboot: %+v", res)
+	}
 	// an unhandled failure ends the script, as in iPXE
 	res = runIPXE(context.Background(), []byte("#!ipxe\niseq a b && goto x\nboot\n:x\n"), base, map[string]string{}, fetch)
 	if res.Booted || res.Step != "script" || !strings.Contains(res.Reason, "failed") {
@@ -418,7 +423,7 @@ exit
 	}
 	if vendorClassFor("aarch64", false, "003016") != "PXEClient:Arch:00011:UNDI:003016" ||
 		vendorClassFor("x86_64", false, "003016") != "PXEClient:Arch:00007:UNDI:003016" ||
-		vendorClassFor("x86_64", true, "") != "HTTPClient:Arch:00016" || vendorClassFor("aarch64", true, "") != "HTTPClient:Arch:00019" {
+		vendorClassFor("x86_64", true, "003016") != "HTTPClient:Arch:00016:UNDI:003016" || vendorClassFor("aarch64", true, "003016") != "HTTPClient:Arch:00019:UNDI:003016" {
 		t.Error("vendor classes")
 	}
 }

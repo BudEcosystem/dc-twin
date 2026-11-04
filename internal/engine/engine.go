@@ -5,12 +5,10 @@
 package engine
 
 import (
-	"bufio"
 	"container/heap"
 	"encoding/json"
 	"fmt"
 	"math/rand"
-	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -33,14 +31,13 @@ type Engine struct {
 	timerSeq  uint64
 	cancelled map[uint64]bool
 
-	seq     uint64
-	events  []schema.Event // retained window
-	retain  int
-	logFile *bufio.Writer
-	logFH   *os.File
-	subs    map[int]chan schema.Event
-	subSeq  int
-	subMu   sync.Mutex
+	seq    uint64
+	events []schema.Event // retained window
+	retain int
+	log    *eventLog // the committed log on disk, within its retention (eventlog.go)
+	subs   map[int]chan schema.Event
+	subSeq int
+	subMu  sync.Mutex
 
 	faults   []*ActiveFault
 	faultSeq int
@@ -100,11 +97,11 @@ func New(m *model.Model, reg *pack.Registry, logPath string) (*Engine, error) {
 	}
 	e.started = e.now
 	if logPath != "" {
-		fh, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+		l, err := openEventLog(logPath, DefaultLogRetention)
 		if err != nil {
 			return nil, err
 		}
-		e.logFH, e.logFile = fh, bufio.NewWriter(fh)
+		e.log = l
 	}
 	e.mu.Lock()
 	e.commit(schema.Event{Kind: "twin", Source: schema.EventSource{Class: "twin", Principal: "engine"}, Path: m.Site,
@@ -162,11 +159,33 @@ func (e *Engine) Stop() {
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if e.logFile != nil {
-		e.logFile.Flush()
-		e.logFH.Close()
-		e.logFile = nil
+	if e.log != nil {
+		e.log.close()
+		e.log = nil
 	}
+}
+
+// SetLogRetention bounds the committed log on disk (D27), and applies the bounds at once to what
+// an earlier run left in the state directory.
+func (e *Engine) SetLogRetention(r LogRetention) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.log == nil {
+		return
+	}
+	e.log.ret = r.withDefaults()
+	e.logRemoved(e.log.prune())
+}
+
+// logRemoved commits the removal of log segments, so the log says what it no longer holds.
+func (e *Engine) logRemoved(segs []string) {
+	if len(segs) == 0 {
+		return
+	}
+	r := e.log.ret
+	e.commit(schema.Event{Kind: "twin", Source: schema.EventSource{Class: "twin", Principal: "engine"}, Path: e.M.Site,
+		Message: fmt.Sprintf("event log retention: removed %d segment(s) (%s); the log keeps %d MiB and %s", len(segs), strings.Join(segs, ", "), r.MaxBytes>>20, r.MaxAge),
+		Data:    map[string]any{"removed": segs}})
 }
 
 // AddHooks registers adapter hooks.
@@ -304,12 +323,10 @@ func (e *Engine) commit(ev schema.Event) uint64 {
 	if len(e.events) > e.retain {
 		e.events = append([]schema.Event{}, e.events[len(e.events)-e.retain/2:]...)
 	}
-	if e.logFile != nil {
+	if e.log != nil {
 		b, _ := json.Marshal(ev)
-		e.logFile.Write(b)
-		e.logFile.WriteByte('\n')
-		if ev.Kind != "request" {
-			e.logFile.Flush()
+		if removed := e.log.write(b, ev.Seq, ev.Kind != "request"); len(removed) > 0 {
+			defer e.logRemoved(removed)
 		}
 	}
 	if ev.Kind == "twin" && ev.Severity == "incident" {

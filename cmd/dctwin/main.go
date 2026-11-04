@@ -13,6 +13,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -20,6 +21,7 @@ import (
 	"github.com/BudEcosystem/dc-twin/internal/adapter/vm"
 	"github.com/BudEcosystem/dc-twin/internal/compile"
 	"github.com/BudEcosystem/dc-twin/internal/control"
+	"github.com/BudEcosystem/dc-twin/internal/engine"
 	"github.com/BudEcosystem/dc-twin/internal/report"
 	"github.com/BudEcosystem/dc-twin/internal/schema"
 	"github.com/BudEcosystem/dc-twin/internal/twin"
@@ -31,6 +33,7 @@ const usage = `dctwin — a datacenter twin
   dctwin check --stack <name> <estate.yaml>     capability verdicts for a stack (06)
   dctwin up <estate.yaml> [--state DIR] [--listen ADDR] [--adapters a,b] [--console DIR]
             [--token-file FILE] [--allow-remote-control]
+            [--log-max 2G] [--log-age 168h] [--log-segment 256M]   the event log on disk (D27)
   dctwin status | down | report [--json] | endpoints | domains | ui
   dctwin get <selector> [--json]
   dctwin events [--since N] [--select S] [--kind K] [--follow] [--no-reads]
@@ -149,6 +152,9 @@ func up(args []string) error {
 	gateway := fs.String("gateway", "", "site gateway address (default: an ephemeral loopback port)")
 	tokenFile := fs.String("token-file", "", "read the estate token from this file (default: a new one each start)")
 	remote := fs.Bool("allow-remote-control", false, "let --listen be an address beyond loopback, the token its only authentication (D54)")
+	logMax := fs.String("log-max", "2G", "the event log's size on disk, its segments and active file (D27)")
+	logAge := fs.Duration("log-age", 7*24*time.Hour, "remove event log segments older than this (D27)")
+	logSegment := fs.String("log-segment", "256M", "roll the event log into a new segment at this size")
 	var file string
 	var rest []string
 	for i := 0; i < len(args); i++ {
@@ -183,7 +189,16 @@ func up(args []string) error {
 	if *adapters != "" {
 		names = strings.Split(*adapters, ",")
 	}
-	opts := twin.Options{StateDir: *state, Adapters: names, AllowTCG: *allowTCG, GatewayAddr: *gateway}
+	maxBytes, err := parseBytes(*logMax)
+	if err != nil {
+		return fmt.Errorf("--log-max: %w", err)
+	}
+	segBytes, err := parseBytes(*logSegment)
+	if err != nil {
+		return fmt.Errorf("--log-segment: %w", err)
+	}
+	opts := twin.Options{StateDir: *state, Adapters: names, AllowTCG: *allowTCG, GatewayAddr: *gateway,
+		LogRetention: engine.LogRetention{SegmentBytes: segBytes, MaxBytes: maxBytes, MaxAge: *logAge}}
 	t, err := twin.Up(file, opts)
 	if err != nil {
 		return err
@@ -647,4 +662,27 @@ func printResult(b []byte) error {
 		fmt.Print(res.Report.Text())
 	}
 	return nil
+}
+
+// parseBytes reads a size: a number of bytes, or one with a K, M, G or T suffix (powers of 1024).
+func parseBytes(in string) (int64, error) {
+	s := strings.TrimSuffix(strings.TrimSuffix(strings.ToUpper(strings.TrimSpace(in)), "B"), "I")
+	mult := int64(1)
+	if n := len(s); n > 0 {
+		switch s[n-1] {
+		case 'K':
+			mult, s = 1<<10, s[:n-1]
+		case 'M':
+			mult, s = 1<<20, s[:n-1]
+		case 'G':
+			mult, s = 1<<30, s[:n-1]
+		case 'T':
+			mult, s = 1<<40, s[:n-1]
+		}
+	}
+	v, err := strconv.ParseFloat(s, 64)
+	if err != nil || v <= 0 {
+		return 0, fmt.Errorf("%q is not a size (e.g. 2G, 512M)", in)
+	}
+	return int64(v * float64(mult)), nil
 }
