@@ -665,8 +665,8 @@ func printResult(b []byte) error {
 }
 
 // parseBytes reads a size: a number of bytes, or one with a K, M, G or T suffix (powers of 1024).
-func parseBytes(s string) (int64, error) {
-	s = strings.TrimSpace(strings.ToUpper(strings.TrimSuffix(strings.TrimSuffix(s, "B"), "i")))
+func parseBytes(in string) (int64, error) {
+	s := strings.TrimSuffix(strings.TrimSuffix(strings.ToUpper(strings.TrimSpace(in)), "B"), "I")
 	mult := int64(1)
 	if n := len(s); n > 0 {
 		switch s[n-1] {
@@ -682,7 +682,7 @@ func parseBytes(s string) (int64, error) {
 	}
 	v, err := strconv.ParseFloat(s, 64)
 	if err != nil || v <= 0 {
-		return 0, fmt.Errorf("%q is not a size (e.g. 2G, 512M)", s)
+		return 0, fmt.Errorf("%q is not a size (e.g. 2G, 512M)", in)
 	}
 	return int64(v * float64(mult)), nil
 }

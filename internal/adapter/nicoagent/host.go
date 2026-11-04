@@ -44,8 +44,7 @@ type host struct {
 type nicDesc struct{ vendor, device, description string }
 
 func (h *host) runHost(ctx context.Context, why string) {
-	if err := h.prepare(); err != nil {
-		h.end("not booted: " + err.Error())
+	if !h.prepareRetrying(ctx, h.prepare) {
 		return
 	}
 	out := h.netbootRetrying(ctx)

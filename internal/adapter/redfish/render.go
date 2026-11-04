@@ -834,7 +834,14 @@ func (b *bmc) dpuHostMAC(s string) (string, bool) {
 		if norm(m) != norm(s) || i >= len(b.dpus) {
 			continue
 		}
-		db := b.a.bmcs[b.dpus[i].Path]
+		dp := b.dpus[i].Path
+		b.dpuMACMu.Lock()
+		cached, ok := b.dpuMACs[dp]
+		b.dpuMACMu.Unlock()
+		if ok {
+			return cached, true
+		}
+		db := b.a.bmcs[dp]
 		if db == nil || db.dialect.Spec.System == "" {
 			return "", false
 		}
@@ -844,7 +851,14 @@ func (b *bmc) dpuHostMAC(s string) (string, bool) {
 			return "", false
 		}
 		l := strings.ToLower(base)
-		return l[0:2] + ":" + l[2:4] + ":" + l[4:6] + ":" + l[6:8] + ":" + l[8:10] + ":" + l[10:12], true
+		mac := l[0:2] + ":" + l[2:4] + ":" + l[4:6] + ":" + l[6:8] + ":" + l[8:10] + ":" + l[10:12]
+		b.dpuMACMu.Lock()
+		if b.dpuMACs == nil {
+			b.dpuMACs = map[string]string{}
+		}
+		b.dpuMACs[dp] = mac
+		b.dpuMACMu.Unlock()
+		return mac, true
 	}
 	return "", false
 }

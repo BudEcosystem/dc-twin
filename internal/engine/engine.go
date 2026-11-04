@@ -323,7 +323,7 @@ func (e *Engine) commit(ev schema.Event) uint64 {
 	if len(e.events) > e.retain {
 		e.events = append([]schema.Event{}, e.events[len(e.events)-e.retain/2:]...)
 	}
-	if e.log != nil && e.log.w != nil {
+	if e.log != nil {
 		b, _ := json.Marshal(ev)
 		if removed := e.log.write(b, ev.Seq, ev.Kind != "request"); len(removed) > 0 {
 			defer e.logRemoved(removed)

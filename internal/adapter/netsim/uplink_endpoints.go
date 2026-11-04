@@ -5,7 +5,6 @@ import (
 	"io"
 	"net"
 	"net/netip"
-	"strings"
 	"sync"
 	"time"
 
@@ -51,6 +50,13 @@ type endpointRouter struct {
 	link   *channel.Endpoint
 	cancel context.CancelFunc
 	once   sync.Once
+
+	// the site routes as last read (at most a second old), and the addresses they serve: a
+	// frame's lookup does not copy the substrate's table
+	mu    sync.Mutex
+	at    time.Time
+	table map[string]string
+	addrs map[netip.Addr]bool
 }
 
 const endpointNIC tcpip.NICID = 1
@@ -74,15 +80,27 @@ func newEndpointRouter(u *Uplink) *endpointRouter {
 	return r
 }
 
+// snapshot is the site routes and the addresses they serve, read again when a second old.
+func (r *endpointRouter) snapshot() (map[string]string, map[netip.Addr]bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.table == nil || time.Since(r.at) > time.Second {
+		t := r.u.siteRoutes()
+		as := map[netip.Addr]bool{}
+		for k := range t {
+			if ap, err := netip.ParseAddrPort(k); err == nil {
+				as[ap.Addr()] = true
+			}
+		}
+		r.table, r.addrs, r.at = t, as, time.Now()
+	}
+	return r.table, r.addrs
+}
+
 // routes says whether an estate endpoint is served at dst (on any port).
 func (r *endpointRouter) routes(dst netip.Addr) bool {
-	prefix := dst.String() + ":"
-	for k := range r.u.siteRoutes() {
-		if strings.HasPrefix(k, prefix) {
-			return true
-		}
-	}
-	return false
+	_, as := r.snapshot()
+	return as[dst]
 }
 
 func (r *endpointRouter) inject(ip []byte) {
@@ -110,7 +128,8 @@ func (r *endpointRouter) out(ctx context.Context) {
 func (r *endpointRouter) forwardTCP(fr *tcp.ForwarderRequest) {
 	id := fr.ID()
 	dst := addrPort(id.LocalAddress, id.LocalPort)
-	local, ok := r.u.siteRoutes()[dst.String()]
+	table, _ := r.snapshot()
+	local, ok := table[dst.String()]
 	if !ok {
 		r.u.EndpointRefused.Add(1)
 		fr.Complete(true)
@@ -135,9 +154,12 @@ func (r *endpointRouter) forwardTCP(fr *tcp.ForwarderRequest) {
 	go func() {
 		defer up.Close()
 		defer g.Close()
+		// a side that finishes sending half-closes towards the other, whose answer still
+		// comes back; the connection ends when both have
 		done := make(chan struct{}, 2)
-		go func() { io.Copy(up, g); done <- struct{}{} }()
-		go func() { io.Copy(g, up); done <- struct{}{} }()
+		go func() { io.Copy(up, g); up.(*net.TCPConn).CloseWrite(); done <- struct{}{} }()
+		go func() { io.Copy(g, up); g.CloseWrite(); done <- struct{}{} }()
+		<-done
 		<-done
 	}()
 }

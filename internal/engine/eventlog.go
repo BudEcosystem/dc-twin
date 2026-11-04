@@ -65,6 +65,9 @@ func openEventLog(path string, ret LogRetention) (*eventLog, error) {
 
 // write appends one encoded event; it reports the segments removed when the active file rolled.
 func (l *eventLog) write(b []byte, seq uint64, flush bool) (removed []string) {
+	if l.w == nil && !l.open() {
+		return nil // the active file could not be reopened at the last roll; tried again next write
+	}
 	if l.firstSeq == 0 {
 		l.firstSeq = seq
 	}
@@ -82,18 +85,28 @@ func (l *eventLog) write(b []byte, seq uint64, flush bool) (removed []string) {
 }
 
 // roll closes the active file into a segment, starts a new one, and enforces the retention.
+// A rename that fails leaves the active file as it is, written on and rolled a segment later.
 func (l *eventLog) roll() []string {
 	l.w.Flush()
-	l.fh.Close()
 	seg := segmentName(l.path, l.firstSeq, l.lastSeq)
-	_ = os.Rename(l.path, seg)
-	fh, err := os.OpenFile(l.path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
-	if err != nil {
-		l.fh, l.w = nil, nil
+	if err := os.Rename(l.path, seg); err != nil {
+		l.size = 0
 		return nil
 	}
-	l.fh, l.w, l.size, l.firstSeq = fh, bufio.NewWriter(fh), 0, 0
+	l.fh.Close()
+	l.fh, l.w, l.size, l.firstSeq = nil, nil, 0, 0
+	l.open()
 	return l.prune()
+}
+
+// open starts the active file after a roll (the old one was renamed, so it appends to nothing).
+func (l *eventLog) open() bool {
+	fh, err := os.OpenFile(l.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		return false
+	}
+	l.fh, l.w = fh, bufio.NewWriter(fh)
+	return true
 }
 
 // segmentName is a closed segment's file, by the sequence numbers it holds (zero-padded, so the
@@ -130,7 +143,13 @@ func (l *eventLog) prune() []string {
 		segs = append(segs, seg{filepath.Join(filepath.Dir(l.path), n), info.Size(), info.ModTime()})
 		total += info.Size()
 	}
-	sort.Slice(segs, func(i, j int) bool { return segs[i].mod.Before(segs[j].mod) })
+	// oldest first; segments of one tick by name (their sequence numbers, zero-padded)
+	sort.Slice(segs, func(i, j int) bool {
+		if !segs[i].mod.Equal(segs[j].mod) {
+			return segs[i].mod.Before(segs[j].mod)
+		}
+		return segs[i].path < segs[j].path
+	})
 	var removed []string
 	cutoff := l.now().Add(-l.ret.MaxAge)
 	for _, s := range segs {

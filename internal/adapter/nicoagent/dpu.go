@@ -23,8 +23,7 @@ type dpu struct {
 
 // runDPU is one boot of the DPU: the network, then its disk.
 func (b *dpu) runDPU(ctx context.Context, why string) {
-	if err := b.prepare(); err != nil {
-		b.end("not booted: " + err.Error())
+	if !b.prepareRetrying(ctx, b.prepare) {
 		return
 	}
 	out := b.netbootRetrying(ctx)

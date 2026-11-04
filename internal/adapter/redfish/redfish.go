@@ -63,6 +63,9 @@ type bmc struct {
 	// dpus are the host's DPU sub-devices in component order, which the dialect's dpus patterns
 	// bind the captured DPU resources to (structure, so read once).
 	dpus []*model.Device
+	// dpuMACs are the host PF MACs read from the DPUs' BMCs, by DPU path (dpuHostMAC)
+	dpuMACMu sync.Mutex
+	dpuMACs  map[string]string
 }
 
 // New returns an unstarted adapter.

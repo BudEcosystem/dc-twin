@@ -256,9 +256,11 @@ func (a *Adapter) Stop() error {
 	}
 	for _, m := range a.machines {
 		m.stop()
-		m.closeNIC()
 	}
 	a.wg.Wait()
+	for _, m := range a.machines {
+		m.closeNIC()
+	}
 	if a.ownLink && a.uplink != nil {
 		a.uplink.Close()
 	}
@@ -345,7 +347,10 @@ func (a *Adapter) Report() adapter.Report {
 	}
 	sort.Strings(parts)
 	r.Lines = append([]string{"reached: " + strings.Join(parts, ", ")}, lines...)
-	if a.uplink == nil {
+	a.upMu.Lock()
+	routed := a.uplink != nil
+	a.upMu.Unlock()
+	if !routed {
 		r.Lines = append(r.Lines, "addressing: no routed site network; the machines' TCP reaches the stack's services from this host's loopback address, so a service that identifies a client by its source address (NICo's PXE service and DiscoverMachine) does not know them")
 	}
 	r.IsNot = []string{
@@ -387,10 +392,14 @@ type machine struct {
 	notes    []string
 }
 
-// boot starts the machine's boot, ending any that runs.
+// boot starts the machine's boot, ending any that runs: the new boot runs once the one it
+// replaces has unwound (they share the machine's NIC), and the caller does not wait for that.
 func (m *machine) boot(ctx context.Context, why string) {
-	m.stop()
 	m.mu.Lock()
+	if m.cancel != nil {
+		m.cancel()
+	}
+	prev := m.done
 	bctx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
 	m.cancel, m.done = cancel, done
@@ -400,18 +409,39 @@ func (m *machine) boot(ctx context.Context, why string) {
 	go func() {
 		defer m.a.wg.Done()
 		defer close(done)
-		m.run(bctx, why)
+		if prev != nil {
+			<-prev
+		}
+		if bctx.Err() == nil {
+			m.run(bctx, why)
+		}
 	}()
 }
 
+// stop ends the machine's boot; it does not wait for it to unwind (the adapter's Stop does).
 func (m *machine) stop() {
 	m.mu.Lock()
-	cancel, done := m.cancel, m.done
-	m.cancel, m.done = nil, nil
+	if m.cancel != nil {
+		m.cancel()
+	}
+	m.cancel = nil
 	m.mu.Unlock()
-	if cancel != nil {
-		cancel()
-		<-done
+}
+
+// prepareRetrying runs prepare until it succeeds or the boot ends: what it reads may not be
+// serving yet (the redfish adapter can start after this one).
+func (m *machine) prepareRetrying(ctx context.Context, prepare func() error) bool {
+	for {
+		err := prepare()
+		if err == nil {
+			return true
+		}
+		m.end("not booted: " + err.Error())
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(m.a.bootRetry):
+		}
 	}
 }
 
