@@ -658,6 +658,13 @@ func (a *Adapter) faultLines(g *guest, faultID, fid, target string, params map[s
 		if c.Path == target {
 			comp, index = c.Name, c.Index
 			uuid = "GPU-" + identity.New(a.rt.Engine.M.Seed).UUID(c.Path, g.d.Identity.ProfileMajor, c.Index)
+			if c.Drive != nil { // {bay}: the drive's slot, the guest's nvme<bay> (its NVMe controllers are in bay order)
+				p := map[string]any{"bay": c.Drive.Bay}
+				for k, v := range params {
+					p[k] = v
+				}
+				params = p
+			}
 		}
 	}
 	var out []line

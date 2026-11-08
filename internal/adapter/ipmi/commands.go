@@ -513,6 +513,9 @@ func getSensorReading(c *call) (byte, []byte) {
 		return ccNotPresent, nil
 	}
 	c.target = "sensor " + s.spec.Name
+	if s.drive != nil {
+		return ccOK, driveReading(c.b.a.e, s.drive)
+	}
 	v, state, ok := c.b.a.e.Sensor(c.b.d, s.spec.Name)
 	if !ok {
 		return ccOK, []byte{0x00, 0xE0, 0x00} // reading unavailable
@@ -520,12 +523,37 @@ func getSensorReading(c *call) (byte, []byte) {
 	return ccOK, []byte{s.raw(v), 0xC0, thresholdBits(state)}
 }
 
+// driveReading is a drive-slot sensor's state: present, faulted, predicting failure, rebuilding.
+func driveReading(e *engine.Engine, c *model.Component) []byte {
+	st := e.DriveStatus(c)
+	var bits uint16
+	if st.Present {
+		bits |= driveBitPresent
+	}
+	if st.Present && (st.Health == model.Critical || st.State == "UnavailableOffline") {
+		bits |= driveBitFault
+	}
+	if st.FailurePredicted {
+		bits |= driveBitPredictive
+	}
+	for _, v := range e.Volumes(c.Device) {
+		if v.Rebuild >= 0 {
+			for _, m := range v.Drives {
+				if m == c.Name {
+					bits |= driveBitRebuild
+				}
+			}
+		}
+	}
+	return []byte{0x00, 0xC0, byte(bits), byte(bits >> 8)}
+}
+
 func getSensorThresholds(c *call) (byte, []byte) {
 	if len(c.r.data) < 1 {
 		return ccReqDataLengthInvalid, nil
 	}
 	s := c.b.sensor(c.r.data[0])
-	if s == nil {
+	if s == nil || s.drive != nil {
 		return ccNotPresent, nil
 	}
 	c.target = "sensor " + s.spec.Name

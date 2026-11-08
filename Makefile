@@ -100,6 +100,22 @@ compat-maas-snap: ## MAAS itself, the 3.7 snap, in an Ubuntu 24.04 KVM guest wit
 compat-dpf: build ## NVIDIA DOCA Platform Framework (v26.8.0, zero-trust) discovering, taking over and provisioning the twin's BlueField-3 DPUs over Redfish (Linux; needs envtest, rootless Podman; downloads a 1.7 GB BFB unless BFB=test)
 	DCTWIN=$(abspath $(BIN))/dctwin compat/dpf/run.sh
 
+.PHONY: compat-storage-raid compat-storage-nvme compat-storage-swordfish compat-storage-datapath compat-storage-vast
+compat-storage-raid: build ## OpenStack sushy (Ironic's redfish RAID and inspection) and Ironic's interop profile on storage-lab's RAID controller and trees (needs python3.11+)
+	DCTWIN=$(abspath $(BIN))/dctwin compat/storage-raid/run.sh
+
+compat-storage-nvme: ## NICo's scout NVMe cleanup in a Debian KVM guest on drives configured as the twin configures them (Linux, KVM; QEMU_DIR=scripts/qemu/build.sh's bin, BASE=a Debian 13 genericcloud qcow2)
+	compat/storage-nvme/run.sh
+
+compat-storage-swordfish: build ## a storage system's Swordfish API: DMTF's python-redfish-library, Service Validator and Interop Validator with SNIA's profiles; promtool on its exporter
+	DCTWIN=$(abspath $(BIN))/dctwin compat/storage-swordfish/run.sh
+
+compat-storage-datapath: build ## a vm storage system's NFS, NVMe/TCP and S3 from a Debian KVM guest, and k3s with csi-driver-nfs on it (Linux, KVM; QEMU_DIR, BASE; dctwin assets fetch)
+	DCTWIN=$(abspath $(BIN))/dctwin compat/storage-datapath/run.sh
+
+compat-storage-vast: build ## VAST's CSI driver (vastdataorg/csi v2.7.2, unmodified) under csi-sanity (v5.5.0) against the twin's VMS dialect (needs Go, Docker or Podman)
+	DCTWIN=$(abspath $(BIN))/dctwin compat/storage-vast/run.sh
+
 .PHONY: compat-fleet-intelligence
 compat-fleet-intelligence: ## NVIDIA Fleet Intelligence agent (fleetint 1.5.0 from its .deb, offline mode) in a Debian KVM guest whose GPUs are the twin's through Mokka 0.5.0, with the twin's Xid 79 and 48 through NVML and the in-host agent's kernel lines (Linux, KVM; BASE=a Debian 13 genericcloud qcow2; Podman or Docker; builds its own dctwin and dctwin-mokka)
 	compat/fleet-intelligence/run.sh

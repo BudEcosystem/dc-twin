@@ -31,24 +31,27 @@ type FaultRef struct {
 }
 
 type Registry struct {
-	Packs      map[string]*Pack
-	Profiles   map[string]*schema.DeviceProfile
-	Formats    map[string]*schema.RackFormat
-	Templates  map[string]*schema.FabricTemplate
-	Catalogues map[string]*schema.FaultCatalogue
-	Faults     map[string]*FaultRef
-	Redfish    map[string]*schema.RedfishDialect
-	Topics     map[string]*schema.TopicDialect
-	MIBs       map[string]*schema.MibDialect
-	Stacks     map[string]*schema.Stack
-	Owner      map[string]string
+	Packs     map[string]*Pack
+	Profiles  map[string]*schema.DeviceProfile
+	Formats   map[string]*schema.RackFormat
+	Templates map[string]*schema.FabricTemplate
+	// StorageTemplates are the kinds of shared storage system (estate storageSystems).
+	StorageTemplates map[string]*schema.StorageTemplate
+	Catalogues       map[string]*schema.FaultCatalogue
+	Faults           map[string]*FaultRef
+	Redfish          map[string]*schema.RedfishDialect
+	Topics           map[string]*schema.TopicDialect
+	MIBs             map[string]*schema.MibDialect
+	Stacks           map[string]*schema.Stack
+	Owner            map[string]string
 }
 
 func newRegistry() *Registry {
 	return &Registry{
 		Packs: map[string]*Pack{}, Profiles: map[string]*schema.DeviceProfile{},
 		Formats: map[string]*schema.RackFormat{}, Templates: map[string]*schema.FabricTemplate{},
-		Catalogues: map[string]*schema.FaultCatalogue{}, Faults: map[string]*FaultRef{},
+		StorageTemplates: map[string]*schema.StorageTemplate{},
+		Catalogues:       map[string]*schema.FaultCatalogue{}, Faults: map[string]*FaultRef{},
 		Redfish: map[string]*schema.RedfishDialect{}, Topics: map[string]*schema.TopicDialect{},
 		MIBs: map[string]*schema.MibDialect{}, Stacks: map[string]*schema.Stack{}, Owner: map[string]string{},
 	}
@@ -194,6 +197,15 @@ func (r *Registry) loadObject(packID, file string, doc []byte) error {
 			return fmt.Errorf("%s: isNot is required", file)
 		}
 		r.Templates[name] = &o
+	case "StorageTemplate":
+		var o schema.StorageTemplate
+		if err := dec(&o); err != nil {
+			return err
+		}
+		if !o.Spec.IsNot.Declared() {
+			return fmt.Errorf("%s: isNot is required", file)
+		}
+		r.StorageTemplates[name] = &o
 	case "FaultCatalogue":
 		var o schema.FaultCatalogue
 		if err := dec(&o); err != nil {
@@ -254,6 +266,13 @@ func (r *Registry) crossCheck() error {
 				if _, ok := r.Profiles[c.Profile]; !ok {
 					errs = append(errs, fmt.Sprintf("profile %s: component profile %s unknown", name, c.Profile))
 				}
+			}
+		}
+	}
+	for name, t := range r.StorageTemplates {
+		for _, c := range t.Spec.Faults {
+			if _, ok := r.Catalogues[c]; !ok {
+				errs = append(errs, fmt.Sprintf("storage template %s: fault catalogue %s unknown", name, c))
 			}
 		}
 	}
@@ -393,6 +412,9 @@ func (r *Registry) Dialect(name string) (*schema.RedfishDialect, []string) {
 	}
 	if c.FirmwareFromProfile {
 		s.FirmwareFromProfile = true
+	}
+	if len(c.StorageControllers) > 0 {
+		s.StorageControllers = c.StorageControllers
 	}
 	if len(c.Bind) > 0 {
 		s.Bind = c.Bind

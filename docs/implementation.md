@@ -110,6 +110,22 @@ credentials` and `dctwin endpoints` print what an operator would hand a stack.
 | `TestVMFidelity` (`gb300-vm`: one GB300 tray at `vm`, `os: twin`) | the tray boots at `up`; Linux prints `DMI: NVIDIA NVIDIA GB300/NVIDIA GB300, BIOS …` and reads the serial and UUID Redfish serves; Redfish ForceOff → QEMU quits → observed Off; IPMI `chassis power on` → observed On; PowerCycle → quit, a new process; ForceRestart → QMP RESET, same process, rebooted; GracefulRestart and GracefulShutdown → ACPI power button → the guest powers itself off (`guest-shutdown`), and on again for the restart. After each step the engine, Redfish `PowerState`, IPMI chassis status and QEMU's `query-status` agree | **passed** in 26 s on an M-series Mac (six boots); skips naming QEMU or the guest image when absent |
 | `TestGuestFirmwareDHCPsThroughTheTwinRelay`, `TestBootOptionsAreTheFirmwares` (`internal/adapter/vm`: `gb300-vm` on aarch64, `dgx-nico-ready` on x86_64, with the stack's DHCP replaced by the twin's) | the firmware's PXE DHCP (vendor class `PXEClient:Arch:00007` on x86_64, `…00011` on aarch64) leaves the guest's NIC on the twin's switch port, enters the twin relay of its leaf and is answered with the segment's gateway (`10.40.N.1/24`), and the lease is an `observe` event on the port; the BMC's BootOptions are the firmware's (alias `UefiHttp`, a device path with the NIC's MAC, `IPv4(` and `Uri(`, an ETag) and its BootOrder is served on the System and its settings object; a BootOrder PATCH through Redfish puts HTTP boot first, the restart that follows is a cold start (a new QEMU process), NVRAM holds the order, and the firmware's first DHCP after it is HTTP boot's (`HTTPClient`) | **passed** under KVM on x86_64 Linux in 4.2 s and 8.5 s; skip under `-short` and without QEMU and its firmware for an accelerated guest |
 
+### Storage
+
+The storage deep dive's six phases ([reviews/2026-11-08-storage-deep-dive.md](reviews/2026-11-08-storage-deep-dive.md),
+section 11; D59 to D63): drives in hosts, controllers and RAID, storage networks and racks, shared
+storage systems with a Swordfish API and a `vm` data path, a BlueField's NVMe emulation, and the
+VAST VMS dialect. Run on a Linux KVM host with QEMU 11.1.2 patched by `scripts/qemu/build.sh`.
+
+| Run | What it shows | Result |
+|---|---|---|
+| `compat/storage-nvme` | NICo's scout NVMe cleanup, command for command, with Debian's nvme-cli on drives configured as a `vm` host's | **2 of 2 drives** cleaned at full size, zeros |
+| `compat/storage-raid` | OpenStack sushy 5.14 making Ironic's RAID (Immediate and OnReset with its task monitor, delete) and inspection calls; Ironic's interop profile with DMTF's Interop Validator | **7 PASS**; profile 258 PASS on the storage node, 128 on a generic server, each with the 2 expected FAILs of a RAID-less direct-attached set |
+| `compat/storage-swordfish` | DMTF python-redfish-library provisioning (file system, export, quota, volume, host, NVMe-oF connection, deletes) read back from the model; DMTF Service Validator; SNIA's Discovery, File and Block Provisioning profiles; promtool on the exporter | **14 PASS**; Service Validator **3185 PASS, 0 WARN, 0 FAIL**; profiles 25/0/0, 4/0/0, 1/0/0; exporter clean |
+| `compat/storage-vast` | VAST's published CSI driver (`vastdataorg/csi:v2.7.2`) under csi-sanity v5.5.0 against the twin's `vast/vms` | **21 Passed, 0 Failed**, 230 VMS requests, nothing left in the model |
+| `compat/storage-datapath` | a Debian KVM guest's NFS client, nvme-cli and SigV4 S3, and k3s with csi-driver-nfs, against a `vm` storage system's published targets | **PASS**: NFS mount written and read; the NVMe/TCP namespace is the volume (size, NGUID) and reads back, an unmapped host is refused; S3 put and get; csi-driver-nfs provisions and binds a claim and a pod writes 24 MB into it; the model observes what was written |
+| `TestVMHostDrives`, `TestVMStorageSystem`, `TestVMDPUEmulatedVolume` (`test/e2e`) | a `vm` host's drives; two Alpine storage nodes serving the model's objects (a real NFSv4.1 mount, S3, NVMe/TCP); a BlueField's emulated NVMe in its host's guest, written through to the volume on its storage node | **passed** |
+
 Measurements: [measurements/2026-10-18-model-scale.md](measurements/2026-10-18-model-scale.md).
 
 ## The reference stack

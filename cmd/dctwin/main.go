@@ -43,6 +43,14 @@ const usage = `dctwin — a datacenter twin
   dctwin fault list [selector]
   dctwin feed <name> up|down
   dctwin cable pull|replace <port-ref|link-id>
+  dctwin drive pull|insert|replace|erase <drive selector>
+  dctwin storage ls | get <system> | credentials
+  dctwin storage create filesystem|volume|bucket <system> <name> [--size N[K|M|G|T|P][i]] [--export clients[:ro][:root]]...
+  dctwin storage create snapshot <system> <of> [name]
+  dctwin storage delete filesystem|volume|bucket|snapshot <system> <name>
+  dctwin storage map|unmap <system> <volume> <host NQN>
+  dctwin storage fill <system> <object> <bytes|N%>    offline|online <system> <object>
+  dctwin dpu emulation <dpu> [on|off] | attach <dpu> <system> <volume> | detach <dpu> <function id>
   dctwin chaos <rate-per-device-hour> <fault>...
   dctwin clock advance <duration>
   dctwin scenario run <scenario.yaml>
@@ -546,6 +554,15 @@ func client(cmd string, args []string) error {
 			return fmt.Errorf("feed <name> up|down")
 		}
 		return print(a.do("POST", "/feeds", map[string]any{"feed": args[0], "up": args[1] == "up"}, ""))
+	case "drive":
+		if len(args) != 2 {
+			return fmt.Errorf("drive pull|insert|replace|erase <drive selector>")
+		}
+		return print(a.do("POST", "/drives", map[string]any{"act": args[0], "select": args[1]}, ""))
+	case "storage":
+		return storageCmd(a, args, jsonOut)
+	case "dpu":
+		return dpuCmd(a, args)
 	case "cable":
 		if len(args) != 2 {
 			return fmt.Errorf("cable pull|replace <port-ref|link-id>")

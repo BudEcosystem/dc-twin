@@ -38,7 +38,7 @@ TC.views = TC.views || {};
   function topBar(A, M) {
     const S = A.S, src = A.src;
     const nAct = src.active.length;
-    const rail = [['cockpit', 'Operate', ''], ['topology', 'Topology', src.pulled.size ? String(src.pulled.size) : ''], ['facility', 'Facility', ''], ['scenarios', 'Scenarios', src.kind === 'demo' ? '3' : ''], ['design', 'Design', S.draft.length ? String(S.draft.length) : '']];
+    const rail = [['cockpit', 'Operate', ''], ['topology', 'Topology', src.pulled.size ? String(src.pulled.size) : ''], ['facility', 'Facility', ''], ...((src.storage || []).length ? [['storage', 'Storage', (src.storage || []).filter((x) => x.Health !== 'OK').length ? String((src.storage || []).filter((x) => x.Health !== 'OK').length) : '']] : []), ['scenarios', 'Scenarios', src.kind === 'demo' ? '3' : ''], ['design', 'Design', S.draft.length ? String(S.draft.length) : '']];
     const lag = src.lag(); const inc = src.incidents(); const st = src.stackLabel();
     const devs = Object.keys(src.devs).length, vm = Object.values(src.devs).filter((d) => d.fid === 'vm').length;
     return h('div', { style: 'display:flex;align-items:center;gap:14px;padding:0 12px 0 14px;border-bottom:1px solid #1f1f1f;background:#101010;min-width:0' },

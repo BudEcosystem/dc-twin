@@ -134,12 +134,18 @@ func (r *renderer) render(path string) (map[string]any, bool) {
 	if dyn, ok := r.dynamic(path); ok {
 		return dyn, true
 	}
+	if doc, ok := r.storageDoc(path); ok { // the dialect's model-bound storage controllers
+		return doc, doc != nil
+	}
 	if fw, ok := r.firmwareBootDoc(path); ok { // a vm host's firmware's own (vmboot.go)
 		return fw, true
 	}
 	dpu, isDPU := b.dpuIndex(path)
 	if isDPU && dpu >= len(b.dpus) {
 		return nil, false // the capture's host has a DPU this model's does not
+	}
+	if k := b.capDriveIndex(path); k >= 0 && !b.driveServed(k) {
+		return nil, false // a captured drive the model's host does not have (or has pulled)
 	}
 	doc, ok := b.tree.get(path)
 	if !ok {
@@ -156,6 +162,9 @@ func (r *renderer) render(path string) (map[string]any, bool) {
 		deepMerge(doc, p)
 	}
 	r.bind(path, doc)
+	r.bindCapturedDrive(path, doc)
+	b.modelStorageCollection(path, doc)
+	b.dropAbsentDrives(doc)
 	r.firmwareBootOrder(path, doc) // a vm host's boot order: its firmware's (vmboot.go)
 	for _, o := range b.dialect.Spec.Overlays {
 		if ok, _ := matchPath(o.Path, path); !ok {
@@ -570,6 +579,7 @@ func (r *renderer) dynamic(path string) (map[string]any, bool) {
 				if !t.Ends.IsZero() {
 					doc["EndTime"] = t.Ends.Format(time.RFC3339)
 				}
+				doc["TaskMonitor"] = TaskMonitorPath + t.ID
 				return doc, true
 			}
 		}

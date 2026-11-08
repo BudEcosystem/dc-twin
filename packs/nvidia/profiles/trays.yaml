@@ -19,7 +19,8 @@ spec:
       ports: [{ name: nvl, kind: scale-up, technology: nvlink, lanes: 18 }]
     - { name: cx8, kind: nic, count: 4, model: "ConnectX-8 800G" }
     - { name: bf3, kind: dpu, count: 1, profile: nvidia/bluefield-3 }
-    - { name: nvme, kind: drive, count: 4, model: "NVMe 3.84 TB" }
+    - { name: os, kind: drive, count: 1, model: "NVMe 1.92 TB M.2", role: boot, formFactor: m.2 }
+    - { name: nvme, kind: drive, count: 4, model: "NVMe 3.84 TB E1.S", role: cache, formFactor: e1.s }
     - { name: tpm, kind: tpm, count: 1, model: "TPM 2.0" }
     - { name: bmc, kind: bmc, count: 1, model: "NVIDIA BMC + HMC" }
   bmc: { dialect: nvidia/gb300-bmc, ipmi: true, console: sol }
@@ -44,7 +45,7 @@ spec:
     power: { onSeconds: 40, offSeconds: 10, requires: "rack.power.sourcesOn >= rack.power.minSources" }
     boot: { postSeconds: 120 }
     bmc: { bootSeconds: 90 }
-  faults: [generic/power, generic/bmc, generic/thermal, generic/leak, generic/firmware, generic/link, nvidia/xid, nvidia/nvlink]
+  faults: [generic/power, generic/bmc, generic/thermal, generic/leak, generic/firmware, generic/link, nvidia/xid, nvidia/nvlink, generic/storage]
   fidelity:
     model: {}
     vm: { arch: aarch64, firmware: uefi, tpm: true, inHost: [nvidia/mokka], cost: { ramGB: 12, vcpu: 4 } }
@@ -69,6 +70,7 @@ spec:
     vm: ["Grace is QEMU aarch64; on an x86 host this profile is model-only (09).", "In os: stack mode the GPUs are PCI stubs with no driver behind them (D23)."]
   sources:
     - { what: "tray composition: 4 B300, 2 Grace, 4 ConnectX-8, 1 BlueField-3", url: "https://docs.nvidia.com/enterprise-reference-architectures/nvl72-ai-factory/latest/components.html", date: 2026-10-18 }
+    - { what: "drives: 4 x E1.S local cache (the NVL72 RA) and a 1.92 TB M.2 OS drive (the GB200 SuperPOD RA's tray)", url: "https://docs.nvidia.com/dgx-superpod/reference-architecture-scalable-infrastructure-gb200/latest/storage-architecture.html", date: 2026-11-08 }
     - { what: "Redfish tree", url: "https://github.com/dsx-ai-factory/libredfish/tree/a51ffb1ffeae15d8f9471224cb799d54007098a2/tests/mockups/nvidia_gb200", date: 2026-10-18 }
 ---
 apiVersion: dc-twin/v1alpha1
@@ -91,7 +93,8 @@ spec:
       ports: [{ name: nvl, kind: scale-up, technology: nvlink, lanes: 18 }]
     - { name: cx7, kind: nic, count: 4, model: "ConnectX-7 400G" }
     - { name: bf3, kind: dpu, count: 2, profile: nvidia/bluefield-3 }
-    - { name: nvme, kind: drive, count: 8, model: "NVMe 3.84 TB" }
+    - { name: os, kind: drive, count: 1, model: "NVMe 1.92 TB M.2", role: boot, formFactor: m.2 }
+    - { name: nvme, kind: drive, count: 4, model: "NVMe 3.84 TB E1.S", role: cache, formFactor: e1.s }
     - { name: tpm, kind: tpm, count: 1, model: "TPM 2.0" }
     - { name: bmc, kind: bmc, count: 1, model: "NVIDIA BMC + HMC" }
   bmc: { dialect: nvidia/gb-bmc, ipmi: true, console: sol }
@@ -117,7 +120,7 @@ spec:
     power: { onSeconds: 40, offSeconds: 10, requires: "rack.power.sourcesOn >= rack.power.minSources" }
     boot: { postSeconds: 120 }
     bmc: { bootSeconds: 90 }
-  faults: [generic/power, generic/bmc, generic/thermal, generic/leak, generic/firmware, generic/link, nvidia/xid, nvidia/nvlink]
+  faults: [generic/power, generic/bmc, generic/thermal, generic/leak, generic/firmware, generic/link, nvidia/xid, nvidia/nvlink, generic/storage]
   fidelity:
     model: {}
     vm: { arch: aarch64, firmware: uefi, tpm: true, inHost: [nvidia/mokka], cost: { ramGB: 12, vcpu: 4 } }
@@ -217,7 +220,9 @@ spec:
     - { component: uefi, baseline: "4.9.0-46-g7e3911bd4d", applyOn: reset }
     - { component: atf, baseline: "v2.2(release):4.9.0-25-g0ce57e322", applyOn: reset }
     - { component: bsp, baseline: "4.9.0.13378", applyOn: reset }
-  behaviours: { power: { onSeconds: 30, offSeconds: 5 }, bmc: { bootSeconds: 60 } }
+  # NVMe emulation (DOCA SNAP, nvconfig NVME_EMULATION_ENABLE): up to 16 functions presented to
+  # the host, each a storage system's volume (docs/reviews/2026-11-08-storage-deep-dive.md P5)
+  behaviours: { power: { onSeconds: 30, offSeconds: 5 }, bmc: { bootSeconds: 60 }, nvmeEmulation: { functions: 16 } }
   faults: [generic/bmc, generic/link, nvidia/dpu]
   # At vm the BMC is still the model's, fronted by the bluefield adapter, and the Arm is a QEMU
   # machine that a pushed BFB installs and boots (the bluefield adapter's substrate, D52). Its DPU
@@ -227,7 +232,9 @@ spec:
   provides:
     - { capability: "redfish/dialect:nvidia/bluefield", at: [model, vm] }
     - { capability: "dpu/bmc:nvidia/bluefield", at: [model, vm] }
+    - { capability: "dpu/nvme-emulation", at: [model, vm] }
   isNot:
+    all: ["NVMe emulation is the twin's, not DOCA SNAP: at model its functions are state; when the host is a vm host the twin's stand-in presents each as a QEMU NVMe controller backed through NBD by the twin's own NVMe/TCP host connection to the volume's target. Its PCI id is QEMU's, not NVIDIA's."]
     model: ["No DPU OS or BFB runs at model; HBN and the DPU agent are absent (Q1)."]
     vm: ["The Arm is QEMU's virt machine: no ConnectX-7 ports, representors or SFs, no rshim or tmfifo, no boot FIFO, no IPMI towards the BMC, no eMMC (D52)."]
   sources: [{ what: "Redfish tree", url: "https://github.com/dsx-ai-factory/libredfish/tree/a51ffb1ffeae15d8f9471224cb799d54007098a2/tests/mockups/nvidia_dpu", date: 2026-10-18 }]

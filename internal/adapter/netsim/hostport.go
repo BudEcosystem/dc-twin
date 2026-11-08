@@ -294,6 +294,44 @@ func (hp *HostPort) Gateway() netip.Prefix {
 	return hp.gw
 }
 
+// SetGateway makes the port answer as its segment's gateway when no relay names one (a network
+// without DHCP, whose guest's address is set statically: a storage node's data port). mac is the
+// gateway's MAC when the port has none yet. A port that has a gateway keeps it.
+func (hp *HostPort) SetGateway(gw netip.Prefix, mac net.HardwareAddr) error {
+	hp.mu.Lock()
+	defer hp.mu.Unlock()
+	if hp.gw.IsValid() {
+		return nil
+	}
+	if !gw.IsValid() || !gw.Addr().Is4() {
+		return fmt.Errorf("%s: gateway %v is not an IPv4 prefix", hp.cfg.Ref, gw)
+	}
+	awp := tcpip.AddressWithPrefix{Address: tcpip.AddrFrom4(gw.Addr().As4()), PrefixLen: gw.Bits()}
+	if terr := hp.st.AddProtocolAddress(hostNIC, tcpip.ProtocolAddress{Protocol: ipv4.ProtocolNumber, AddressWithPrefix: awp}, stack.AddressProperties{}); terr != nil {
+		return fmt.Errorf("%s: gateway %v: %s", hp.cfg.Ref, gw, terr)
+	}
+	hp.gw = gw
+	if len(hp.gwMAC) != 6 && len(mac) == 6 {
+		hp.gwMAC = mac
+		hp.link.SetLinkAddress(tcpip.LinkAddress(mac))
+	}
+	return nil
+}
+
+// Dial opens a TCP connection into the guest from the segment gateway's address: how the twin
+// reaches a service the guest serves (a storage node's NFS, NVMe/TCP and S3 targets).
+func (hp *HostPort) Dial(ctx context.Context, dst netip.AddrPort) (net.Conn, error) {
+	gw := hp.Gateway()
+	if !gw.IsValid() {
+		return nil, fmt.Errorf("%s: the port has no gateway to dial from", hp.cfg.Ref)
+	}
+	if !gw.Contains(dst.Addr()) {
+		return nil, fmt.Errorf("%s: %s is not on the segment %s", hp.cfg.Ref, dst, gw.Masked())
+	}
+	return gonet.DialTCPWithBind(ctx, hp.st, tcpip.FullAddress{NIC: hostNIC, Addr: tcpip.AddrFrom4(gw.Addr().As4())},
+		tcpip.FullAddress{NIC: hostNIC, Addr: tcpip.AddrFrom4(dst.Addr().As4()), Port: dst.Port()}, ipv4.ProtocolNumber)
+}
+
 // Relay says what serves the port's DHCP, or why nothing does.
 func (hp *HostPort) Relay() (server, why string) {
 	hp.mu.Lock()

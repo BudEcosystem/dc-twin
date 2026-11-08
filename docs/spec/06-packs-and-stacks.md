@@ -92,7 +92,8 @@ qualifier means ([D31](11-decisions.md#d31--capability-contract-semantics)):
 | `accelerator` | `accelerator/nvml`, `accelerator/dcgm`, `accelerator/amd-smi`, `accelerator/hlml`, `accelerator/pci-stub` | — |
 | `switch` | `switch/bgp-unnumbered`, `switch/evpn`, `switch/lldp`, `switch/nvue`, `switch/nvos-ssh`, `switch/gnmi` | — |
 | `fabric` | `fabric/ufm-rest`, `fabric/nmx-c`, `fabric/nmx-c-telemetry`, `fabric/rack-management`, `fabric/ualink` | — |
-| `dpu` | `dpu/bmc:<dialect>`, `dpu/os`, `dpu/hbn` | the DPU BMC dialect |
+| `dpu` | `dpu/bmc:<dialect>`, `dpu/os`, `dpu/hbn`, `dpu/nvme-emulation` | the DPU BMC dialect |
+| `storage` | `storage/drives:nvme`, `storage/secure-erase`, `storage/raid`, `storage/api:<dialect>`, `storage/exporter`, `storage/nfs`, `storage/s3`, `storage/nvme-tcp` | the management API's dialect (`generic/swordfish`, `vast/vms`) |
 | `facility` | `facility/bms:<dialect>`, `facility/grid:<dialect>`, `facility/pdu-snmp:<mib>`, `facility/isolation-request:<dialect>` | the topic or MIB dialect |
 | `kubernetes` | `kubernetes/nodes:vm`, `kubernetes/nodes:kwok` (impersonation), `kubernetes/cluster:<distro>` | — |
 | `host` | `host/os:twin`, `host/os:stack` | the in-host mode |
@@ -212,6 +213,7 @@ when those packs are written. They are not commitments.**
 | Validation and burn-in | AICR, DCGM diagnostics, nccl-tests | ROCm Validation Suite, AGFHC, rccl-tests | `hl_qual` | — |
 | Scheduling | KAI Scheduler, Run:ai | — | — | Kueue, Volcano, Slurm |
 | Facility | DSX Exchange, MaxLPS, DSX Flex | — | — | — |
+| Storage | DPF with DOCA SNAP (DPU-provided NVMe), the certified storage partners' CSI drivers (VAST, WEKA, DDN, NetApp, Pure, Dell) | the same storage partners | the same storage partners | SNIA Swordfish, csi-driver-nfs, spdk-csi, Ironic and Metal³ RAID |
 
 Workload-level slots (scheduling, serving, collective benchmarks) can be tested only for
 placement and control flow. No kernel runs ([non-goals](01-overview.md#non-goals)).

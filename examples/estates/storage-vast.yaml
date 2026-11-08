@@ -1,0 +1,34 @@
+# A VAST cluster (P6): two storage racks' nodes and enclosure as one system whose management API
+# is VAST's VMS, as VAST's CSI driver calls it. compat/storage-vast runs vast-csi's controller
+# against it under csi-sanity.
+#   bin/dctwin up examples/estates/storage-vast.yaml --adapters storage
+#   bin/dctwin storage credentials     # api is VMS at https://<api>/api/v1/
+apiVersion: dc-twin/v1alpha1
+kind: Estate
+metadata: { name: storage-vast }
+spec:
+  seed: 6161
+  clock: wall
+  packs: [generic@0.1.0, vast@0.1.0]
+  fidelity: { default: model }
+  sites:
+    - name: site-1
+      halls:
+        - name: hall-a
+          rows:
+            - name: v
+              positions: 4
+              racks:
+                - { name: v01, position: 1, format: generic/storage-rack, params: { nodes: 4, enclosures: 2 }, feeds: [A, B] }
+                - { name: n01, position: 4, format: generic/network-rack, feeds: [A, B] }
+  networks:
+    oob:     { role: management, dhcp: twin, cidr: 10.30.0.0/20, fabric: oob }
+    storage: { role: storage,    cidr: 10.50.0.0/16, dhcp: none, fabric: storage }
+  fabrics:
+    - { name: oob,     template: oob-flat,   nos: none }
+    - { name: storage, template: clos-2tier, nos: none, params: { leafsPerRack: 2, spines: 2, roles: storage }, select: "v01", placeIn: n01 }
+  storageSystems:
+    - { name: vast-1, template: vast/data-platform, select: "v01", networks: { data: storage, management: oob }, params: { protection: "8+2" } }
+  facility:
+    power: { feeds: [{ name: A, capacityW: 100000 }, { name: B, capacityW: 100000 }] }
+  stacks: []

@@ -127,6 +127,9 @@ func TestEveryExporterServesPerAcceleratorTemperature(t *testing.T) {
 	_, a := upLab(t)
 	seen := map[string]int{}
 	for _, ep := range a.Endpoints() {
+		if ep.storage {
+			continue
+		}
 		fams, _, err := Scrape(ep.Local)
 		if err != nil {
 			t.Fatalf("%s: %v", ep.Device.Path, err)
@@ -151,7 +154,7 @@ func TestEveryExporterServesPerAcceleratorTemperature(t *testing.T) {
 	}
 	t.Logf("endpoints scraped: %v", seen)
 	r := a.Report()
-	if len(r.Impersonated) != 3 {
+	if len(r.Impersonated) != 5 { // dcgm, amd, gaudi; node_exporter and smartctl_exporter for drives
 		t.Fatalf("report impersonates %v", r.Impersonated)
 	}
 	t.Logf("report: %+v", r.Lines)
@@ -265,5 +268,57 @@ func TestFaultsReachTheExporters(t *testing.T) {
 		t.Fatalf("a powered-off host's exporter answered")
 	} else {
 		t.Logf("scrape of powered-off %s: %v", off.Device.Path, err)
+	}
+}
+
+// The storage exporters serve the model's drives: node_exporter's nvme_info carries each drive's
+// serial and model, smartctl_exporter's critical warning follows a SMART fault, and a failed drive
+// leaves both.
+func TestStorageExportersServeTheModelsDrives(t *testing.T) {
+	tw, a := upLab(t)
+	var node, smart *Endpoint
+	for _, ep := range a.Endpoints() {
+		if ep.storage && strings.HasSuffix(ep.Device.Path, "/c02/server-01") {
+			if ep.Exporter.ID == "node" {
+				node = ep
+			} else {
+				smart = ep
+			}
+		}
+	}
+	if node == nil || smart == nil {
+		t.Fatal("no storage exporters on c02/server-01")
+	}
+	d := node.Device
+	fams, _, err := Scrape(node.Local)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info := fams["node_nvme_info"]
+	if info == nil || len(info.Metric) != len(d.Drives()) {
+		t.Fatalf("node_nvme_info: %v", info)
+	}
+	if m := find(info, "device", "nvme1"); m == nil || labelOf(m, "serial") != d.Drives()[1].Drive.Serial {
+		t.Fatalf("nvme1: %v (serial %s)", m, d.Drives()[1].Drive.Serial)
+	}
+	if fams["node_filesystem_avail_bytes"] == nil {
+		t.Fatal("no root file system")
+	}
+	if _, err := tw.Engine.Inject(d.Drives()[1].Path, "generic/storage/spare-low", nil, "", testSrc); err != nil {
+		t.Fatal(err)
+	}
+	fams, _, _ = Scrape(smart.Local)
+	if m := find(fams["smartctl_device_critical_warning"], "device", "nvme1"); m == nil || valueOf(m) != 1 {
+		t.Fatalf("critical warning after spare-low: %v", m)
+	}
+	if m := find(fams["smartctl_device_smart_status"], "device", "nvme1"); m == nil || valueOf(m) != 0 {
+		t.Fatalf("smart status after spare-low: %v", m)
+	}
+	if _, err := tw.Engine.Inject(d.Drives()[0].Path, "generic/storage/drive-failure", nil, "", testSrc); err != nil {
+		t.Fatal(err)
+	}
+	fams, _, _ = Scrape(node.Local)
+	if n := len(fams["node_nvme_info"].Metric); n != len(d.Drives())-1 {
+		t.Fatalf("after a drive failure node_nvme_info has %d drives", n)
 	}
 }

@@ -94,6 +94,9 @@ func FetchGuest(assets string, w io.Writer) error {
 		dir := GuestDir(assets, "", g)
 		if g.Present(dir) == nil {
 			fmt.Fprintf(w, "%s: present at %s\n", g.Name, dir)
+			if err := fetchStoragePackages(dir, arch, w); err != nil {
+				return fmt.Errorf("%s: %w", g.Name, err)
+			}
 			continue
 		}
 		if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -108,6 +111,9 @@ func FetchGuest(assets string, w io.Writer) error {
 			if err := download(f.URL, dst, f.SHA256); err != nil {
 				return fmt.Errorf("%s: %w", g.Name, err)
 			}
+		}
+		if err := fetchStoragePackages(dir, arch, w); err != nil {
+			return fmt.Errorf("%s: %w", g.Name, err)
 		}
 	}
 	return nil
@@ -183,7 +189,10 @@ mkdir -p /.modloop
 if mount -o loop,ro -t squashfs /modloop.sqfs /.modloop 2>/dev/null; then
 	rm -rf /usr/lib/modules && ln -s /.modloop/modules /usr/lib/modules
 fi
-for m in virtio_net gpio-pl061 button evdev; do modprobe $m 2>/dev/null; done
+for m in virtio_net gpio-pl061 button evdev nvme; do modprobe $m 2>/dev/null; done
+for c in /sys/class/nvme/nvme*; do
+	[ -e "$c" ] && say "nvme $(basename $c) $(cat $c/serial 2>/dev/null) $(cat $c/model 2>/dev/null)"
+done
 sleep 1
 for n in /sys/class/net/*; do
 	[ -e "$n/device" ] && say "nic $(basename $n) $(cat $n/address)"

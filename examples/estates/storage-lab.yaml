@@ -1,0 +1,52 @@
+# A hall with storage (docs/reviews/2026-11-08-storage-deep-dive.md): DGX H100 servers with their
+# storage ports, a CPU rack (a Dell R760 with its BOSS boot controller, a generic server), two
+# storage racks of generic storage nodes (a RAID controller in front of SAS drives, U.2 NVMe, an M.2
+# boot pair) and an NVMe JBOF, and a dedicated RoCE storage fabric beside the frontend: the
+# frontend fabric cables frontend and provisioning ports, the storage fabric the storage ports.
+#   bin/dctwin up examples/estates/storage-lab.yaml --adapters redfish,ipmi,metrics
+#   bin/dctwin get s01/node-01 --json | jq '.components[] | select(.kind=="drive")'
+#   bin/dctwin up examples/estates/storage-lab.yaml --adapters redfish,metrics,storage; bin/dctwin storage ls
+apiVersion: dc-twin/v1alpha1
+kind: Estate
+metadata: { name: storage-lab }
+spec:
+  seed: 7070
+  clock: wall
+  timeScale: 0.05
+  packs: [generic@0.1.0, nvidia@0.1.0, oem-dell@0.1.0]
+  fidelity: { default: model }
+  sites:
+    - name: site-1
+      halls:
+        - name: hall-a
+          rows:
+            - name: s
+              positions: 6
+              racks:
+                - { name: g01, position: 1, format: generic/hgx-8gpu, params: { server: nvidia/dgx-h100, servers: 2 }, feeds: [A, B] }
+                - { name: c01, position: 2, format: generic/cpu-rack, params: { server: oem-dell/r760, servers: 2 }, slots: { server-02: { profile: generic/server-2u } }, feeds: [A, B] }
+                - { name: s01, position: 3, format: generic/storage-rack, params: { nodes: 4, enclosures: 1 }, feeds: [A, B] }
+                - { name: s02, position: 4, format: generic/storage-rack, params: { nodes: 4 }, feeds: [A, B] }
+                - { name: n01, position: 6, format: generic/network-rack, feeds: [A, B] }
+  networks:
+    oob:          { role: management,   dhcp: twin, cidr: 10.30.0.0/20, fabric: oob }
+    provisioning: { role: provisioning, dhcp: twin, cidr: 10.40.0.0/20, fabric: frontend }
+    frontend:     { role: frontend,     fabric: frontend }
+    storage:      { role: storage,      cidr: 10.50.0.0/16, dhcp: none, fabric: storage }
+    service:      { role: service,      cidr: 10.90.0.0/24, dhcp: none }
+  fabrics:
+    - { name: oob,      template: oob-flat,   nos: none }
+    - { name: frontend, template: clos-2tier, nos: none, params: { leafsPerRack: 2, spines: 2, roles: "frontend provisioning" }, select: "g01 c01 s01 s02", placeIn: n01 }
+    - { name: storage,  template: clos-2tier, nos: none, technology: ethernet-roce, params: { leafsPerRack: 2, spines: 2, roles: storage }, select: "g01 s01 s02", placeIn: n01 }
+  # one shared system over both storage racks' NVMe: their eight nodes serve it, s01's JBOF adds
+  # its drives (P4); its management API is Swordfish on the OOB network
+  storageSystems:
+    - name: hall-a-fs
+      template: generic/storage-cluster
+      select: "s01 s02"
+      networks: { data: storage, management: oob }
+      protocols: [nfs, s3, nvme-tcp]
+      params: { protection: "8+2", poolFullPercent: 90 }
+  facility:
+    power: { feeds: [{ name: A, capacityW: 400000 }, { name: B, capacityW: 400000 }] }
+  stacks: []

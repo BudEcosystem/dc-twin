@@ -1,0 +1,7 @@
+apiVersion: dc-twin/v1alpha1
+kind: Pack
+metadata: { name: vast, version: 0.1.0 }
+spec:
+  title: "VAST Data: the VMS management API's dialect, scoped by VAST's CSI driver"
+  dependsOn: [generic@0.1.0]
+  isNot: ["The dialect is written from the calls VAST's own CSI driver (vast-csi, Apache-2.0) makes, not from a VMS capture: it answers those calls with the fields the driver reads. No VAST software or image is redistributed (D13)."]

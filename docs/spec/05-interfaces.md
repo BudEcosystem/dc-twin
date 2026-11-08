@@ -116,6 +116,17 @@ the twin registers Node objects in the stack's own cluster with a credential the
 | **Rack management (RMS)** | Rack power sequencing, firmware and image jobs, certificates, inventory | NVIDIA pack: the Rack Management Service API, bound to the rack format's behaviours, **plus the NVUE REST and SSH/SFTP surfaces on switch trays that RMS drives** (`switch/nvos-ssh`) |
 | **UALink** | Pod membership and health | AMD pack, later |
 
+## Storage
+
+| Interface | Projects | Implementation |
+|---|---|---|
+| **Drives in hosts** | Redfish Storage, Drives (with `SecureErase`), StorageControllers, Volumes with apply times; IPMI drive-slot sensors and SEL; node and smartctl exporter families; KWOK `DiskPressure` and `ephemeral-storage`; at `vm`, NVMe drives in the guest | The model's drives (D60); a captured dialect's drives bound to the model's; Dell's BOSS in the iDRAC dialect |
+| **A storage system's management API** | Pools, file systems with their exports, volumes with their NVMe-oF host mappings, snapshots, nodes, drives, alerts as Status conditions | The storage adapter at the system's management address (D63): SNIA Swordfish (`generic/swordfish`) or a vendor's dialect (`vast/vms`) |
+| **A storage system's exporter** | Capacity, use, provisioning, health, nodes, drives, objects, alerts | `storage_system_*` beside the API, port 9580 at the management address |
+| **Data path** | NFSv4, NVMe/TCP, S3 | At `vm` only: the nodes' own Linux targets, published at each node's storage address and on this machine (D61) |
+| **DPU NVMe emulation** | NVMe functions a BlueField presents to its host | Model state; at `vm` the twin's SNAP stand-in hot-plugs an NVMe drive backed by the volume (D62) |
+| **Operator** | `dctwin storage ls\|get\|credentials\|create\|delete\|map\|unmap\|fill\|offline\|online`, `dctwin dpu emulation\|attach\|detach`; `act.storage` in scenarios; the console's Storage screen | Control API `/v1/storage`, `/v1/storage/credentials`, `/v1/dpu/emulation` |
+
 ## Facility
 
 | Interface | Projects | Implementation |

@@ -1,0 +1,43 @@
+# An x86 server with one BlueField-3 (B3220-class) in front of its storage: the host of a DPU
+# that presents NVMe from a storage system (docs/reviews/2026-11-08-storage-deep-dive.md 5.3, P5).
+apiVersion: dc-twin/v1alpha1
+kind: DeviceProfile
+metadata: { name: nvidia/dpu-host-1u, version: 0.1.0 }
+spec:
+  class: server
+  form: { mounting: rack, units: 1 }
+  identity: { serialFormat: "DH{alnum:10}", macOUI: "02:dc:08", manufacturer: "dc-twin", model: "Generic 1U Server with BlueField-3" }
+  components:
+    - { name: cpu, kind: cpu, count: 1, model: "x86-64, 32 cores" }
+    - { name: dimm, kind: memory, count: 8, model: "DDR5 32 GB" }
+    - { name: bf3, kind: dpu, count: 1, profile: nvidia/bluefield-3 }
+    - { name: boot, kind: drive, count: 1, model: "M.2 NVMe 480 GB", role: boot, formFactor: m.2, firmware: "1.2.0" }
+    - { name: psu, kind: psu, count: 2, model: "800 W" }
+    - { name: fan, kind: fan, count: 4, model: "40 mm" }
+  bmc: { dialect: generic/dmtf, ipmi: true, console: none }
+  ports:
+    - { name: bmc0, kind: ethernet, speed: 1G, role: management }
+    - { name: eth0, kind: ethernet, speed: 25G, role: provisioning }
+    - { name: "psu-{0..1}", kind: power-in, source: pdu }
+  power: { standbyW: 20, idleW: 200, maxW: 600 }
+  cooling: { kind: air }
+  sensors:
+    - { name: inlet, quantity: temperature, unit: C, warn: 35, crit: 45, source: inlet }
+    - { name: power, quantity: power, unit: W, source: power }
+  firmware:
+    - { component: bmc, baseline: "1.12.0", applyOn: reset }
+    - { component: bios, baseline: "2.4.1", applyOn: reset }
+  behaviours:
+    power: { onSeconds: 20, offSeconds: 10 }
+    boot: { postSeconds: 60 }
+    storage: { eraseSeconds: 8, eraseSecondsPerTB: 60 }
+  faults: [generic/power, generic/bmc, generic/thermal, generic/link, generic/firmware, generic/storage]
+  fidelity:
+    model: {}
+    vm: { arch: x86_64, firmware: uefi, tpm: true, cost: { ramGB: 2, vcpu: 2 } }
+  provides:
+    - { capability: "redfish/dialect:generic/dmtf", at: [model, vm] }
+  isNot:
+    all: ["A generic archetype: an x86 1U server whose one BlueField-3 is its DPU; the generic DMTF tree, not a vendor's BMC."]
+  sources:
+    - { what: "archetype: a server with a BlueField-3 B3220 DPU (NVIDIA DPF storage use cases, DOCA SNAP)", url: "https://docs.nvidia.com/doca/sdk/doca+snap-4/index.html", date: 2026-11-08 }

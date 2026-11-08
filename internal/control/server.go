@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/BudEcosystem/dc-twin/internal/adapter"
+	"github.com/BudEcosystem/dc-twin/internal/adapter/storage"
 	"github.com/BudEcosystem/dc-twin/internal/engine"
 	"github.com/BudEcosystem/dc-twin/internal/model"
 	"github.com/BudEcosystem/dc-twin/internal/report"
@@ -344,6 +345,42 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, map[string]any{"link": str("link"), "state": str("state")})
+	case p == "/drives" && r.Method == http.MethodPost:
+		n, err := eng.DriveAct(str("select"), str("act"), user)
+		if err != nil {
+			jsonErr(w, 400, err.Error())
+			return
+		}
+		writeJSON(w, map[string]any{"drives": n, "act": str("act")})
+	case p == "/storage" && r.Method == http.MethodGet:
+		if sys := q.Get("system"); sys != "" {
+			v, err := eng.StorageSystem(sys)
+			if err != nil {
+				jsonErr(w, 404, err.Error())
+				return
+			}
+			writeJSON(w, v)
+			return
+		}
+		writeJSON(w, eng.StorageSystems())
+	case p == "/storage/credentials" && r.Method == http.MethodGet:
+		a, ok := s.T.Adapter(storage.Name).(*storage.Adapter)
+		if !ok {
+			jsonErr(w, 400, "the storage adapter is not running (--adapters storage)")
+			return
+		}
+		writeJSON(w, a.Credentials())
+	case p == "/storage" && r.Method == http.MethodPost:
+		s.storageOp(w, r, body, user)
+	case p == "/dpu/emulation" && r.Method == http.MethodGet:
+		v, err := eng.Emulation(q.Get("device"))
+		if err != nil {
+			jsonErr(w, 400, err.Error())
+			return
+		}
+		writeJSON(w, v)
+	case p == "/dpu/emulation" && r.Method == http.MethodPost:
+		s.emulationOp(w, body, user)
 	case p == "/reseat" && r.Method == http.MethodPost:
 		ds, _ := eng.SelectDevices(str("select"))
 		for _, d := range ds {

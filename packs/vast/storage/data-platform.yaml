@@ -1,0 +1,30 @@
+# A VAST Data cluster as a storage system (docs/reviews/2026-11-08-storage-deep-dive.md P6, S-Q6):
+# its CNodes are the selected racks' storage nodes and its DBoxes their enclosures; its management
+# API is VMS (manager vast/vms), the subset VAST's CSI driver calls: views, quotas, view policies,
+# VIP pools, the trash folder API, snapshots.
+apiVersion: dc-twin/v1alpha1
+kind: StorageTemplate
+metadata: { name: vast/data-platform, version: 0.1.0 }
+spec:
+  nodes: server
+  enclosures: appliance
+  media: [ssd]
+  protocols: [nfs, s3]
+  managers: [vast/vms]
+  params:
+    protection:      { type: string, default: "8+2", label: "Protection (data+parity)" }
+    poolFullPercent: { type: int, default: 90, range: [50, 99], label: "Pool-full alert at (%)" }
+    minNodes:        { type: int, default: 1, range: [1, 1024], label: Minimum CNodes }
+    failoverSeconds: { type: int, default: 10, range: [0, 600], label: "Failover (s)" }
+  faults: [generic/storage-system]
+  provides:
+    model: ["storage/api:vast/vms", storage/exporter]
+    vm: ["storage/api:vast/vms", storage/exporter, storage/nfs, storage/s3]
+  isNot:
+    all:
+      - "VMS answers only what vast-csi's NFS controller calls (token, versions, tenants, viewpolicies, qospolicies, vippools, views, quotas, folders/delete_folder, snapshots, globalsnapstreams); one tenant and two view policies (default, s3_default_policy) are fixed, and the VIP pool is the system's data addresses."
+      - "A view is a file system at its path with an export to every client, a quota that file system's limit, the trash API's delete its deletion: VAST's element store, similarity reduction, QoS, replication and protected paths are not modelled."
+    model: ["No data path at model: views exist in the model and the API; nothing mounts."]
+    vm: ["At vm a view is exported by the node it is homed on (the kernel NFS server), at its own path."]
+  sources:
+    - { what: "vast-csi (the calls: vast_csi/session/resources.py, plugins/nfs.py)", url: "https://github.com/vast-data/vast-csi/tree/vastcsi-2.7.2", date: 2026-11-08 }

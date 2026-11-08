@@ -44,6 +44,10 @@ type Config struct {
 	Kernel, Initrd, Append string
 	// Disks are extra block devices (path, format); none by default.
 	Disks []Disk
+	// Drives are the host's NVMe drives, one bay each (nvme.go); NVMeProps the properties this
+	// QEMU's nvme device takes (Installation.NVMeProps).
+	Drives    []Drive
+	NVMeProps map[string]bool
 	// RunDir holds the sockets (kept short: a unix socket path is limited to ~104 bytes).
 	RunDir string
 	// Console is the serial console's log file (appended to across power cycles).
@@ -126,6 +130,7 @@ func (c Config) Args() []string {
 		a = append(a, "-drive", fmt.Sprintf("if=none,id=disk%d,format=%s,file=%s", i, f, esc(d.Path)),
 			"-device", fmt.Sprintf("nvme,drive=disk%d,serial=%s", i, esc(d.Serial)))
 	}
+	a = append(a, c.driveArgs()...)
 	if c.TPM != "" {
 		// the sysbus TIS on aarch64 virt, without the physical-presence RAM page: its 1 KiB
 		// mapping is refused by Hypervisor.framework (16 KiB pages) with HV_BAD_ARGUMENT

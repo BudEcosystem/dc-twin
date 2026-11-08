@@ -18,7 +18,9 @@ spec:
     - { name: nic, kind: nic, count: 8, model: "400G scale-out NIC" }
     - { name: psu, kind: psu, count: 6, model: "3000 W" }
     - { name: fan, kind: fan, count: 10, model: "fan module" }
-    - { name: nvme, kind: drive, count: 8, model: "NVMe 3.84 TB" }
+    - { name: nvme, kind: drive, role: data, formFactor: u.2, count: 8, model: "NVMe 3.84 TB" }
+    - { name: boss, kind: storage-controller, count: 1, model: "Dell BOSS-N1", raidTypes: [RAID0, RAID1] }
+    - { name: m2, kind: drive, count: 2, model: "M.2 NVMe 480 GB", vendor: "Dell", controller: boss, role: boot, formFactor: m.2 }
     - { name: tpm, kind: tpm, count: 1, model: "TPM 2.0" }
   bmc: { dialect: oem-dell/idrac, ipmi: true }
   ports:
@@ -38,7 +40,7 @@ spec:
     - { component: bmc, baseline: "7.10.30.00", applyOn: reset }
     - { component: bios, baseline: "2.3.5", applyOn: reset }
   behaviours: { power: { onSeconds: 45, offSeconds: 12 }, boot: { postSeconds: 150 }, bmc: { bootSeconds: 90 } }
-  faults: [generic/power, generic/bmc, generic/thermal, generic/link, generic/firmware, nvidia/xid]
+  faults: [generic/power, generic/bmc, generic/thermal, generic/link, generic/firmware, nvidia/xid, generic/storage]
   fidelity: { model: {}, vm: { arch: x86_64, firmware: uefi, tpm: true, cost: { ramGB: 8, vcpu: 4 } } }
   kubernetes: { resources: { "nvidia.com/gpu": 8 } }
   metrics: { exporter: dcgm }

@@ -16,7 +16,11 @@ import (
 const (
 	sdrVersion       = 0x51
 	sdrFullSensor    = 0x01
+	sdrCompact       = 0x02
 	sensorTypeTemp   = 0x01
+	sensorTypeDrive  = 0x0D // drive slot (bay)
+	entityDiskBay    = 0x04 // disk or disk bay
+	readingSpecific  = 0x6F
 	sensorTypeOther  = 0x0B // other units-based sensor: power in watts
 	unitDegreesC     = 0x01
 	unitWatts        = 0x06
@@ -35,6 +39,60 @@ type sensor struct {
 	ucr    byte // upper critical (the profile's crit), raw
 	read   byte // readable threshold mask
 	record []byte
+	// drive is the drive a drive-slot sensor reports (its bay's presence, fault, predictive
+	// failure and rebuild), nil for a threshold sensor
+	drive *model.Component
+}
+
+// Drive-slot sensor-specific offsets (IPMI v2.0 Table 42-3, sensor type 0Dh).
+const (
+	driveBitPresent    = 1 << 0
+	driveBitFault      = 1 << 1
+	driveBitPredictive = 1 << 2
+	driveBitRebuild    = 1 << 7
+	driveBits          = driveBitPresent | driveBitFault | driveBitPredictive | driveBitRebuild
+)
+
+// driveSensors are one drive-slot sensor per drive bay, numbered after the profile's sensors.
+func driveSensors(d *model.Device, first int) []*sensor {
+	var out []*sensor
+	for _, c := range d.Drives() {
+		x := &sensor{num: byte(first + len(out)), spec: schema.SensorSpec{Name: "Drive " + itoa(c.Drive.Bay)}, drive: c}
+		x.record = x.compact(uint16(x.num), byte(c.Drive.Bay+1))
+		out = append(out, x)
+	}
+	return out
+}
+
+func itoa(n int) string {
+	if n < 10 {
+		return string(rune('0' + n))
+	}
+	return itoa(n/10) + string(rune('0'+n%10))
+}
+
+// compact encodes a discrete sensor's Compact Sensor Record (Table 43-2).
+func (x *sensor) compact(id uint16, instance byte) []byte {
+	name := x.spec.Name
+	if len(name) > 16 {
+		name = name[:16]
+	}
+	b := []byte{0, 0, sdrVersion, sdrCompact, 0,
+		bmcSlaveAddr, 0x00, x.num,
+		entityDiskBay, instance,
+		0x7F, 0x40, sensorTypeDrive, readingSpecific}
+	b = append(b, put16(driveBits)...) // assertion events
+	b = append(b, put16(driveBits)...) // deassertion events
+	b = append(b, put16(driveBits)...) // discrete reading mask
+	b = append(b, 0xC0, 0x00, 0x00,    // units: no analog reading
+		0x00, 0x00, // record sharing: none
+		0x00, 0x00, // hysteresis
+		0x00, 0x00, 0x00, 0x00, // reserved, OEM
+		0xC0|byte(len(name)))
+	b = append(b, name...)
+	copy(b[0:2], put16(id))
+	b[4] = byte(len(b) - 5)
+	return b
 }
 
 // sensorsFor builds the SDR repository for a profile: its temperature and power sensors, in
@@ -168,6 +226,14 @@ func selRecord(id uint16, l model.LogEntry) []byte {
 		stype, offset = 0x08, 0x03 // power supply: input lost
 	case "LeakDetected":
 		stype, offset = 0x12, 0x02
+	case "DriveFailure":
+		stype, offset = sensorTypeDrive, 0x01 // drive slot: drive fault
+	case "DrivePredictiveFailure":
+		stype, offset = sensorTypeDrive, 0x02
+	case "DriveInserted":
+		stype, offset = sensorTypeDrive, 0x00 // drive presence asserted
+	case "DriveRemoved":
+		stype, offset = sensorTypeDrive, 0x80 // drive presence deasserted (event direction)
 	default:
 		if l.Severity == model.OK || l.Severity == "" {
 			stype, offset = 0x12, 0x03 // System Event: entry added to auxiliary log
@@ -178,7 +244,12 @@ func selRecord(id uint16, l model.LogEntry) []byte {
 	b = append(b, 0x02) // system event record
 	b = append(b, put32(ts)...)
 	b = append(b, put16(bmcSlaveAddr)...) // generator: the BMC
-	b = append(b, 0x04, stype, 0x00, 0x6F, offset, 0xFF, 0xFF)
+	dir := byte(readingSpecific)
+	if offset&0x80 != 0 { // a deassertion
+		dir |= 0x80
+		offset &= 0x7F
+	}
+	b = append(b, 0x04, stype, 0x00, dir, offset, 0xFF, 0xFF)
 	return b
 }
 

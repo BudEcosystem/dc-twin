@@ -159,3 +159,90 @@ func TestPowerChainIsChecked(t *testing.T) {
 		t.Fatalf("a panel below its racks' max draw is warned about: %v", res.Warnings)
 	}
 }
+
+// A dedicated storage fabric cables the storage-role ports, the frontend the rest; a storage
+// overlay rides the frontend's ports; storage racks hold storage nodes and a JBOF.
+func TestStorageFabricOverlayAndRack(t *testing.T) {
+	reg, err := Registry()
+	if err != nil {
+		t.Fatal(err)
+	}
+	est, _, err := LoadEstate("../../examples/estates/storage-lab.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	est.Spec.Networks["tenant-storage"] = schema.Network{Role: "storage", CIDR: "10.60.0.0/16", Overlay: &schema.NetworkOverlay{On: "frontend", Encap: "vxlan", ID: 5001}}
+	res, err := Compile(est, reg, Options{HostArch: "x86_64"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := res.Model
+	node := m.DeviceBy["site-1/hall-a/s01/node-01"]
+	if node == nil || len(node.Drives()) != 22 || len(node.Controllers()) != 1 {
+		t.Fatalf("storage node: %v", node)
+	}
+	for _, p := range node.Ports {
+		if p.Role == "storage" && (p.Link == nil || p.Link.Fabric != "storage" || p.Network != "storage") {
+			t.Fatalf("%s: link %v network %q, want the storage fabric and network", p.Ref, p.Link, p.Network)
+		}
+		if p.Role == "provisioning" && (p.Link == nil || p.Link.Fabric != "frontend") {
+			t.Fatalf("%s: link %v, want the frontend fabric", p.Ref, p.Link)
+		}
+	}
+	if m.DeviceBy["site-1/hall-a/s01/jbof-01"] == nil || m.DeviceBy["site-1/hall-a/s02/jbof-01"] != nil {
+		t.Fatal("s01 has one JBOF, s02 none")
+	}
+	if m.DeviceBy["site-1/hall-a/n01/storage-spine-1"] == nil || m.DeviceBy["site-1/hall-a/n01/spine-1"] == nil {
+		t.Fatal("each fabric has its own spines")
+	}
+	ov := m.Networks["tenant-storage"]
+	if ov == nil || ov.Overlay != "frontend" || ov.Encap != "vxlan" || ov.OverlayID != 5001 || len(ov.Ports) != len(m.Networks["frontend"].Ports) {
+		t.Fatalf("overlay: %+v", ov)
+	}
+	// a bad overlay is refused
+	est.Spec.Networks["bad"] = schema.Network{Role: "storage", Overlay: &schema.NetworkOverlay{On: "nowhere", Encap: "vlan", ID: 9}}
+	_, err = Compile(est, reg, Options{HostArch: "x86_64"})
+	wantProblem(t, err, "overlay on \"nowhere\"")
+}
+
+func TestStorageSystems(t *testing.T) {
+	reg, err := Registry()
+	if err != nil {
+		t.Fatal(err)
+	}
+	est, _, err := LoadEstate("../../examples/estates/storage-lab.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := Compile(est, reg, Options{HostArch: "x86_64"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sys := res.Model.StorageBy["site-1/storage/hall-a-fs"]
+	if sys == nil || len(sys.Nodes) != 8 || len(sys.Enclosures) != 1 {
+		t.Fatalf("storage system: %+v", sys)
+	}
+	// eight nodes' 12 NVMe and the JBOF's 24; the boot M.2 and the SAS HDDs behind the RAID card are not the pool's
+	if len(sys.Drives) != 8*12+24 {
+		t.Fatalf("pool drives: %d", len(sys.Drives))
+	}
+	raw := int64(8*12)*15_360_000_000_000 + 24*30_720_000_000_000
+	if sys.RawBytes != raw || sys.UsableBytes != raw/10*8 || sys.DataUnits != 8 || sys.ParityUnits != 2 {
+		t.Fatalf("capacity: raw %d usable %d (%d+%d)", sys.RawBytes, sys.UsableBytes, sys.DataUnits, sys.ParityUnits)
+	}
+	if sys.Manager != "generic/swordfish" || sys.Fidelity != "model" || len(sys.Protocols) != 3 || sys.FullPercent != 90 {
+		t.Fatalf("system: %+v", sys)
+	}
+	bad := func(mut func(*schema.StorageSystem), want string) {
+		t.Helper()
+		est, _, _ := LoadEstate("../../examples/estates/storage-lab.yaml")
+		mut(&est.Spec.StorageSystems[0])
+		_, err := Compile(est, reg, Options{HostArch: "x86_64"})
+		wantProblem(t, err, want)
+	}
+	bad(func(s *schema.StorageSystem) { s.Params["protection"] = "200+2" }, "protection 200+2 needs 202 drives")
+	bad(func(s *schema.StorageSystem) { s.Networks.Data = "oob" }, "network oob has role management, not storage")
+	bad(func(s *schema.StorageSystem) { s.Select = "n01" }, "hold no server")
+	bad(func(s *schema.StorageSystem) { s.Protocols = []string{"smb"} }, `protocol "smb"`)
+	bad(func(s *schema.StorageSystem) { s.Fidelity = "vm" }, "its nodes must be vm hosts with os twin")
+}

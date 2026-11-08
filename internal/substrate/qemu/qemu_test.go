@@ -108,3 +108,24 @@ func TestReadNVRAM(t *testing.T) {
 		t.Fatalf("variables in the added state: %d, want 5", nv.Variables)
 	}
 }
+
+// An emptied backing keeps the drive's size, every block reading zero.
+func TestZeroBackingKeepsTheSize(t *testing.T) {
+	p := t.TempDir() + "/d.raw"
+	if _, err := CreateBacking(p, 1<<20); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, []byte("DCTWIN-MARKER"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Truncate(p, 1<<20); err != nil {
+		t.Fatal(err)
+	}
+	if err := ZeroBacking(p, 1<<20); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(p)
+	if err != nil || len(b) != 1<<20 || strings.Contains(string(b), "DCTWIN") {
+		t.Fatalf("after ZeroBacking: %d bytes, err %v", len(b), err)
+	}
+}

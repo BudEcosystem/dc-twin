@@ -35,12 +35,14 @@ type Adapter struct {
 	servers      []*http.Server
 	authOptional bool
 	captureDPUs  bool
-	mu           sync.Mutex
-	dialects     map[string]int
-	missing      map[string]string
-	subID        int
-	isNot        []string
-	pushClient   *http.Client
+	// captureDrives serves captured trees' drives as captured (spec.adapters.redfish.drives: capture)
+	captureDrives bool
+	mu            sync.Mutex
+	dialects      map[string]int
+	missing       map[string]string
+	subID         int
+	isNot         []string
+	pushClient    *http.Client
 }
 
 type backend interface {
@@ -66,6 +68,9 @@ type bmc struct {
 	// dpuMACs are the host PF MACs read from the DPUs' BMCs, by DPU path (dpuHostMAC)
 	dpuMACMu sync.Mutex
 	dpuMACs  map[string]string
+	// capStorage and capChassis are the captured tree's drive resources in bay order (capDrives)
+	capOnce                sync.Once
+	capStorage, capChassis []string
 }
 
 // New returns an unstarted adapter.
@@ -93,6 +98,7 @@ func (a *Adapter) Start(ctx context.Context, rt *adapter.Runtime) error {
 	a.id = identity.New(rt.Engine.M.Seed)
 	a.authOptional = rt.Engine.M.Estate.Spec.Adapters.Redfish.Auth == "optional"
 	a.captureDPUs = rt.Engine.M.Estate.Spec.Adapters.Redfish.DPUs == "capture"
+	a.captureDrives = rt.Engine.M.Estate.Spec.Adapters.Redfish.Drives == "capture"
 	var devices []*model.Device
 	rt.Engine.Read(func(m *model.Model) {
 		for _, d := range m.Devices {

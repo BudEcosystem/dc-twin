@@ -1,0 +1,77 @@
+# Shared storage systems (docs/reviews/2026-11-08-storage-deep-dive.md 5.4, S-Q1 to S-Q4): a template
+# says which devices of the racks a storageSystems entry selects make the system, what it can
+# serve and which management APIs it has; the engine owns what it holds.
+apiVersion: dc-twin/v1alpha1
+kind: StorageTemplate
+metadata: { name: generic/storage-cluster, version: 0.1.0 }
+spec:
+  nodes: server
+  enclosures: appliance
+  media: [ssd]
+  protocols: [nfs, s3, nvme-tcp]
+  managers: [generic/swordfish]
+  params:
+    protection:      { type: string, default: "4+2", label: "Protection (data+parity)" }
+    poolFullPercent: { type: int, default: 90, range: [50, 99], label: "Pool-full alert at (%)" }
+    minNodes:        { type: int, default: 1, range: [1, 64], label: Minimum storage nodes }
+    failoverSeconds: { type: int, default: 10, range: [0, 600], label: "Failover (s)" }
+  faults: [generic/storage-system]
+  provides:
+    model: ["storage/api:generic/swordfish", storage/exporter]
+    vm: ["storage/api:generic/swordfish", storage/exporter, storage/nfs, storage/s3, storage/nvme-tcp]
+  isNot:
+    all:
+      - "A generic scale-out system: one pool over every node's and enclosure's data drives, its usable capacity the raw capacity times data/(data+parity); no vendor's data services (deduplication, compression, tiering, erasure-coding mathematics)."
+      - "Nothing is measured: latency, throughput and IOPS are never reported, and a failover's timing is the template's failoverSeconds, not a real system's."
+    model:
+      - "No data path: file systems, volumes and buckets exist in the model and its management API, their addresses are modelled, and nothing mounts or connects (fidelity vm runs real targets on the nodes)."
+    vm:
+      - "Each object lives on one node's first data drive (its home): the kernel NFS server exports file systems, Linux nvmet serves volumes over NVMe/TCP from files, rclone serves buckets over S3. A node's loss moves an object's service in the model, but its data stay on that node: no replication runs."
+  sources:
+    - { what: "SNIA Swordfish 1.2.9 (StorageService, StoragePool, FileSystem, FileShare, Volume, NVMe-oF Endpoint and Connection)", url: "https://www.snia.org/forums/smi/swordfish", date: 2026-11-08 }
+---
+apiVersion: dc-twin/v1alpha1
+kind: FaultCatalogue
+metadata: { name: generic/storage-system, version: 0.1.0 }
+spec:
+  isNot: ["A storage system's faults change what its management API, exporter and events report, and at vm what its nodes serve; nothing is measured."]
+  faults:
+    - name: pool-near-full
+      title: "Storage pool nearly full"
+      target: { storageSystem: true }
+      params: { percent: { type: int, default: 95, range: [1, 100] } }
+      effects:
+        - storage: { usedPercent: "{percent}" }
+      clears: { manual: true }
+      isNot: ["The pool reports the use; no client's writes fail with ENOSPC until the pool is really full at vm."]
+    - name: object-offline
+      title: "File system, volume or bucket offline"
+      target: { storageSystem: true }
+      params: { object: { type: string, default: "" } }
+      effects:
+        - storage: { offline: "{object}" }
+      clears: { manual: true }
+      isNot: []
+    - name: node-service-failure
+      title: "A storage node's storage service failed"
+      target: { storageSystem: true }
+      params: { node: { type: string, default: "" } }
+      effects:
+        - storage: { nodeDown: "{node}" }
+      clears: { manual: true }
+      isNot: ["The node's BMC and power are untouched: its storage service is down, and its objects fail over to another node after failoverSeconds."]
+    - name: degraded-performance
+      title: "Storage system reports degraded performance"
+      target: { storageSystem: true }
+      effects:
+        - storage: { alert: "Performance degraded: latency above its threshold", severity: Warning }
+      clears: { manual: true }
+      isNot: ["Reported only: nothing is slower."]
+    - name: certificate-expiring
+      title: "Management certificate expiring"
+      target: { storageSystem: true }
+      params: { days: { type: int, default: 7, range: [0, 365] } }
+      effects:
+        - storage: { alert: "The management API's certificate expires in {days} days", severity: Warning }
+      clears: { manual: true }
+      isNot: ["The certificate served is unchanged."]

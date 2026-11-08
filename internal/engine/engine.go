@@ -64,6 +64,8 @@ type Engine struct {
 	// fwTasks are the firmware update tasks each device's BMC is running; a BMC that goes down
 	// aborts them (abortFirmwareTasks, D53).
 	fwTasks map[string][]fwTask
+	// storageDown is when each storage system node went down (storagesys.go).
+	storageDown map[string]*storageNodeDown
 }
 
 // Hooks let adapters react to behaviour without the engine knowing protocols.
@@ -86,7 +88,8 @@ func New(m *model.Model, reg *pack.Registry, logPath string) (*Engine, error) {
 		cancelled: map[uint64]bool{}, retain: 200000, subs: map[int]chan schema.Event{},
 		health: map[string]string{}, sensorSt: map[string]string{}, anchors: map[string]anchor{},
 		domains: map[string]string{}, flowLost: map[string]time.Time{}, rng: rand.New(rand.NewSource(m.Seed)),
-		stop: make(chan struct{}), transition: map[string]uint64{}, fwTasks: map[string][]fwTask{}}
+		stop: make(chan struct{}), transition: map[string]uint64{}, fwTasks: map[string][]fwTask{},
+		storageDown: map[string]*storageNodeDown{}}
 	if e.scale <= 0 {
 		e.scale = 1
 	}
@@ -447,6 +450,7 @@ func (e *Engine) tick() {
 	e.rollup(0)
 	e.evalDomains(0)
 	e.tickChain()
+	e.storageTick()
 	e.chaos()
 }
 

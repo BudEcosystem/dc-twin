@@ -153,19 +153,29 @@ func TestResponsesAreCompressedForAClientThatAcceptsIt(t *testing.T) {
 		b, _ := io.ReadAll(resp.Body)
 		return resp, b
 	}
-	plain, want := fetch("/v1/devices?select=**", "", nil)
-	if plain.Header.Get("Content-Encoding") != "" {
-		t.Fatal("compressed for a client that does not accept it")
+	// the estate is still converging just after up (BMCs take their DHCP leases), so the plain and
+	// the compressed list are compared as a pair fetched while it holds still
+	var want, got, body []byte
+	for try := 0; try < 40; try++ {
+		var plain, resp *http.Response
+		plain, want = fetch("/v1/devices?select=**", "", nil)
+		if plain.Header.Get("Content-Encoding") != "" {
+			t.Fatal("compressed for a client that does not accept it")
+		}
+		resp, body = fetch("/v1/devices?select=**", "gzip, deflate, br", nil)
+		if resp.Header.Get("Content-Encoding") != "gzip" || resp.Header.Get("Content-Type") != "application/json" {
+			t.Fatalf("encoding %q, type %q", resp.Header.Get("Content-Encoding"), resp.Header.Get("Content-Type"))
+		}
+		zr, err := gzip.NewReader(strings.NewReader(string(body)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, _ = io.ReadAll(zr)
+		if string(got) == string(want) {
+			break
+		}
+		time.Sleep(250 * time.Millisecond)
 	}
-	resp, body := fetch("/v1/devices?select=**", "gzip, deflate, br", nil)
-	if resp.Header.Get("Content-Encoding") != "gzip" || resp.Header.Get("Content-Type") != "application/json" {
-		t.Fatalf("encoding %q, type %q", resp.Header.Get("Content-Encoding"), resp.Header.Get("Content-Type"))
-	}
-	zr, err := gzip.NewReader(strings.NewReader(string(body)))
-	if err != nil {
-		t.Fatal(err)
-	}
-	got, _ := io.ReadAll(zr)
 	if string(got) != string(want) || !json.Valid(got) {
 		t.Fatal("the compressed device list is not the plain one")
 	}

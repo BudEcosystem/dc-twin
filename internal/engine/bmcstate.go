@@ -568,6 +568,7 @@ func (e *Engine) applyPendingOnBoot(d *model.Device, cause uint64) {
 		d.State.BiosPending = map[string]any{}
 	}
 	e.applyStaged(d, "reset", cause)
+	e.applyVolumes(d, cause) // a RAID controller applies its pending configuration on reset
 }
 
 // boot decides how a powered-on host boots: a network boot at model fidelity is walked by
@@ -586,7 +587,14 @@ func (e *Engine) boot(d *model.Device, cause uint64) {
 		}
 	}
 	d.State.BootedSince = e.now
-	if target == "" || target == "None" {
+	if target == "" || target == "None" || target == "Hdd" {
+		// from disk: the boot drive must hold an operating system (an erased host stops in its
+		// firmware, as a real one finds no boot device)
+		if ok, why := e.bootable(d); !ok {
+			d.State.Booted = "firmware (no bootable device: " + why + ")"
+			e.stateEvent(d.Path, "boot", nil, d.State.Booted, behaviourSrc, cause, "Warning")
+			return
+		}
 		d.State.Booted = "os"
 		return
 	}
@@ -737,6 +745,9 @@ func (e *Engine) ReplaceComponent(path string, src schema.EventSource) error {
 	}
 	cause := e.commit(schema.Event{Kind: "act", Source: src, Path: path, Message: "replace component"})
 	c.State.Replaced++
+	if c.Kind == "drive" {
+		e.replacedDrive(c, cause)
+	}
 	for _, f := range append([]*ActiveFault{}, e.faults...) {
 		if f.Component == c {
 			for _, t := range f.Spec.Clears.Triggers() {

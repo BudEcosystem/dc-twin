@@ -19,6 +19,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/BudEcosystem/dc-twin/internal/adapter"
 	"github.com/BudEcosystem/dc-twin/internal/engine"
@@ -56,6 +57,7 @@ type Endpoint struct {
 	tempSensor string
 	idleFrac   float64
 	accels     []*accelID
+	storage    bool // a storage exporter (node_exporter, smartctl_exporter): drives, not accelerators
 }
 
 // accelID is an accelerator's fixed identity, derived once (identity/v1 material for the
@@ -150,9 +152,41 @@ func (a *Adapter) Start(ctx context.Context, rt *adapter.Runtime) error {
 		a.servers = append(a.servers, srv)
 		a.endpoints = append(a.endpoints, ep)
 	}
+	// the storage exporters, on every model host with drives
+	var storageHosts []*model.Device
+	rt.Engine.Read(func(m *model.Model) {
+		for _, d := range m.Devices {
+			if d.IsHost() && d.Fidelity == "model" && len(d.Drives()) > 0 {
+				storageHosts = append(storageHosts, d)
+			}
+		}
+	})
+	for _, d := range storageHosts {
+		for _, x := range StorageExporters {
+			ep := &Endpoint{Device: d, Exporter: x, Node: NodeName(d), storage: true}
+			l, err := rt.Net.Listen(d.Path, x.ID+"-exporter")
+			if err != nil {
+				a.Stop()
+				return fmt.Errorf("metrics: %s: %w", d.Path, err)
+			}
+			ep.Local = l.Addr().String()
+			ep.Site = fmt.Sprintf("%s:%d", ep.Node, x.Port)
+			rt.Net.Route(ep.Site, ep.Local)
+			a.routes = append(a.routes, ep.Site)
+			mux := http.NewServeMux()
+			mux.HandleFunc("/metrics", a.handler(ep))
+			srv := &http.Server{Handler: mux}
+			go srv.Serve(l)
+			a.servers = append(a.servers, srv)
+			a.endpoints = append(a.endpoints, ep)
+		}
+	}
 	rt.Log.Info("metrics: exporter endpoints up", "endpoints", len(a.endpoints))
 	return nil
 }
+
+// Storage reports whether the endpoint is a storage exporter (node_exporter, smartctl_exporter).
+func (ep *Endpoint) Storage() bool { return ep.storage }
 
 // Endpoints lists the served endpoints, in model path order.
 func (a *Adapter) Endpoints() []*Endpoint { return append([]*Endpoint{}, a.endpoints...) }
@@ -175,8 +209,12 @@ func (a *Adapter) Stop() error {
 func (a *Adapter) Report() adapter.Report {
 	r := adapter.Report{Adapter: Name, Served: len(a.endpoints)}
 	count := map[string]int{}
+	byID := map[string]*Exporter{}
+	storage := false
 	for _, ep := range a.endpoints {
 		count[ep.Exporter.ID]++
+		byID[ep.Exporter.ID] = ep.Exporter
+		storage = storage || ep.storage
 	}
 	ids := make([]string, 0, len(count))
 	for k := range count {
@@ -184,7 +222,7 @@ func (a *Adapter) Report() adapter.Report {
 	}
 	sort.Strings(ids)
 	for _, k := range ids {
-		x := Exporters[k]
+		x := byID[k]
 		r.Impersonated = append(r.Impersonated, x.Impersonator)
 		r.Lines = append(r.Lines, fmt.Sprintf("metrics: %d %s endpoints (names and labels of %s %s); site names <node>:%d through the gateway",
 			count[k], x.Impersonator, x.Upstream, x.Version, x.Port))
@@ -204,6 +242,11 @@ func (a *Adapter) Report() adapter.Report {
 		"ECC volatile counters are served although dcgm-exporter's default counters file comments them out.",
 		"An accelerator the model holds offline (fallen off the bus) keeps only its error series, as DCGM's blank fields are skipped; the exporter answers only while its host is powered and booted, and otherwise drops the connection.",
 		"HELP text for the Gaudi exporter is the twin's; its names and labels follow the exporter's source.",
+	}
+	if storage {
+		r.IsNot = append(r.IsNot,
+			"node_exporter and smartctl_exporter serve the model's drives: disk I/O counters are a rate the host's utilisation implies, not traffic; the root file system's size is the boot drive's and its free space the model's (filesystem-full).",
+			"A RAID controller's member drives are not the host's devices: its volumes are (sd*), and smartctl_exporter lists the members as a pass-through would, by protocol.")
 	}
 	return r
 }
@@ -248,6 +291,10 @@ type snapshot struct {
 	warn    *float64
 	crit    *float64
 	accels  []accelSnap
+	// a storage exporter's: the host's drives, its root file system's free share, its uptime
+	drives   []driveSnap
+	availPct float64
+	uptimeS  float64
 }
 
 type accelSnap struct {
@@ -286,9 +333,11 @@ func (ep *Endpoint) snapshot(e *engine.Engine) *snapshot {
 	s := &snapshot{ep: ep}
 	var power, booted string
 	var ac bool
+	var since time.Time
 	counters := make([]map[string]float64, len(ep.accels))
 	e.Read(func(*model.Model) {
 		power, booted, ac, s.util = d.State.Power, d.State.Booted, d.State.AC, d.State.Utilisation
+		since = d.State.BootedSince
 		for i, ai := range ep.accels {
 			cp := make(map[string]float64, len(ai.c.State.Counters))
 			for k, v := range ai.c.State.Counters {
@@ -299,6 +348,13 @@ func (ep *Endpoint) snapshot(e *engine.Engine) *snapshot {
 	})
 	s.up = ac && power == model.On && booted == "os"
 	if !s.up {
+		return s
+	}
+	if ep.storage {
+		if !since.IsZero() {
+			s.uptimeS = e.Now().Sub(since).Seconds()
+		}
+		s.drives, s.availPct = storageSnap(e, d, s.uptimeS)
 		return s
 	}
 	if ep.tempSensor != "" {

@@ -221,3 +221,22 @@ func TestConditionsFollowTheModel(t *testing.T) {
 		t.Fatalf("powered off: GpuHealthy %+v", c)
 	}
 }
+
+// A full root file system is the node's DiskPressure; ephemeral-storage is the boot drive.
+func TestDiskPressureAndEphemeralStorage(t *testing.T) {
+	e := labEngine(t)
+	srv := device(t, e, "c01/server-01") // a Dell R760: the BOSS M.2 drives are its boot drives
+	s := static(e, srv)
+	if q := s.capacity[corev1.ResourceEphemeralStorage]; q.Value() != 480e9 {
+		t.Fatalf("ephemeral-storage %s, want the 480 GB boot drive", q.String())
+	}
+	if c := cond(desire(s, srv.Path, observe(e, srv)), corev1.NodeDiskPressure); c.Status != corev1.ConditionFalse {
+		t.Fatalf("DiskPressure before: %+v", c)
+	}
+	if _, err := e.Inject(srv.Path, "generic/storage/filesystem-full", nil, "", src); err != nil {
+		t.Fatal(err)
+	}
+	if c := cond(desire(s, srv.Path, observe(e, srv)), corev1.NodeDiskPressure); c.Status != corev1.ConditionTrue || c.Reason != "KubeletHasDiskPressure" {
+		t.Fatalf("DiskPressure after filesystem-full: %+v", c)
+	}
+}

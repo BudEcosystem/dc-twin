@@ -16,6 +16,13 @@ hardware.
 `nos: none` is a model switch (cabling, port state, LLDP, the twin relay, no routing protocol), a
 real NOS in containerlab is `vm`, and a real switch on the hardware bridge is `hardware`.
 
+**Storage systems take a level of their own** (`storageSystems[].fidelity`, D59, D61): at
+`model` their management API, exporter, events and faults come from the model and nothing mounts;
+at `vm` their nodes are `vm` hosts with `os: twin` that serve the model's objects with Linux's own
+NFS server, nvmet and an S3 server, which clients really mount and connect to. Neither level
+measures latency, throughput or IOPS, runs a vendor's data services, or replicates data between
+nodes. A `vm` host's drives are real NVMe devices on sparse backings (D60).
+
 **Mixing is the point.** A typical estate puts one rack at `vm` and the rest at `model`, plus,
 when available, one real server at `hardware`. Every device answers through the same protocols on
 its own port, so the software under test cannot tell which is which by anything a lifecycle

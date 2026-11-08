@@ -7,6 +7,38 @@ window.TC = window.TC || {};
   const CARD = 'background:#101010;border:1px solid #1f1f1f;border-radius:8px';
   const title = (t, sub) => h('div', { style: 'display:flex;align-items:baseline;gap:12px' }, h('span', { style: 'font-size:18px;font-weight:600;color:#edeef0' }, t), h('span', { style: 'font-size:12px;color:#757575' }, sub));
 
+  // ------------------------------------------------------------------ storage
+  // The estate's shared storage systems (GET /v1/storage): state, the pool's use against its
+  // pool-full line, nodes, what each holds, alerts and where its APIs are.
+  function storage(A, M) {
+    const src = A.src, list = src.storage || [];
+    const tb = (b) => (b >= 1e15 ? (b / 1e15).toFixed(2) + ' PB' : b >= 1e12 ? (b / 1e12).toFixed(2) + ' TB' : (b / 1e9).toFixed(1) + ' GB');
+    const HC = { OK: '#59d499', Warning: '#d1b854', Critical: '#ec7575' };
+    const card = (v) => {
+      const pct = Math.min(100, v.UsedPercent || 0), full = v.FullPercent || 0;
+      const objs = [['file systems', v.FileSystems], ['volumes', v.Volumes], ['buckets', v.Buckets], ['snapshots', v.Snapshots]];
+      return h('div', { key: v.Path, style: `${CARD};padding:14px;display:flex;flex-direction:column;gap:10px` },
+        h('div', { style: 'display:flex;align-items:baseline;gap:10px' },
+          h('span', { style: 'font-weight:600;color:#edeef0;font-size:15px' }, v.Name),
+          h('span', { style: `font:11px ${MONO};color:#757575` }, `${v.Template} · ${v.Manager} · fidelity ${v.Fidelity} · ${(v.Protocols || []).join(', ')}`),
+          h('span', { style: `margin-left:auto;font:600 12px ${MONO};color:${HC[v.Health] || '#b3b3b3'}` }, `${v.State} · ${v.Health}`)),
+        h('div', { style: 'display:flex;flex-direction:column;gap:4px' },
+          h('div', { style: 'position:relative;height:8px;background:#1f1f1f;border-radius:4px;overflow:hidden' },
+            h('div', { style: `height:100%;width:${pct.toFixed(1)}%;background:${pct >= full && full ? '#d1b854' : '#965cde'}` }),
+            full ? h('div', { title: `pool-full alert at ${full} %`, style: `position:absolute;top:0;bottom:0;left:${full}%;width:2px;background:#ec757588` }) : null),
+          h('span', { style: `font:11px ${MONO};color:#b3b3b3` }, `${tb(v.UsedBytes || 0)} used of ${tb(v.UsableBytes || 0)} usable (${pct.toFixed(1)} %) · ${tb(v.RawBytes || 0)} raw, ${v.DataUnits}+${v.ParityUnits} · ${tb(v.ProvisionedBytes || 0)} provisioned · drives ${v.Drives - v.DrivesFailed}/${v.Drives}`)),
+        h('div', { style: 'display:flex;flex-wrap:wrap;gap:6px' }, [...(v.Nodes || []), ...(v.Enclosures || [])].map((n) =>
+          h('span', { key: n.Path, title: n.Up ? `${n.Path} · serving ${n.Serving || 0}` : `${n.Path} · ${n.Why}`, style: `font:11px ${MONO};padding:2px 6px;border-radius:4px;border:1px solid ${n.Up ? '#2a2a2a' : '#ec757588'};color:${n.Up ? '#b3b3b3' : '#ec7575'}` }, `${n.Path.split('/').slice(-2).join('/')}${n.Serving ? ' · ' + n.Serving : ''}`))),
+        h('div', { style: `font:11px ${MONO};color:#757575` }, objs.map(([k, l]) => `${(l || []).length} ${k}`).join(' · ') + ((v.Hosts || []).length ? ` · ${(v.Hosts || []).length} NVMe hosts` : '')),
+        (v.Alerts || []).length ? h('div', { style: 'display:flex;flex-direction:column;gap:3px' }, v.Alerts.map((a, i) =>
+          h('span', { key: i, style: `font-size:12px;color:${HC[a.Severity] || '#b3b3b3'}` }, `${a.Severity} · ${a.Message}`))) : null,
+        h('span', { style: `font:11px ${MONO};color:#4d4d4d` }, `management ${(v.Addresses || {}).management || '—'} · data ${(v.Addresses || {}).data || '—'} · API ${(v.Endpoints || {}).api || '—'} · metrics ${(v.Endpoints || {}).metrics || '—'}`));
+    };
+    return h('div', { style: 'overflow:auto;padding:16px;display:flex;flex-direction:column;gap:14px;min-width:0' },
+      title('Storage', 'shared storage systems · pools, nodes, objects and alerts (GET /v1/storage)'),
+      list.length ? list.map(card) : h('span', { style: 'color:#757575' }, 'This estate has no storage systems (spec.storageSystems).'));
+  }
+
   // ------------------------------------------------------------------ topology
   function topology(A, M) {
     const src = A.src, tm = src.topoModel(A.S.fabric);
@@ -294,5 +326,5 @@ window.TC = window.TC || {};
         h('span', { style: 'font-size:11px;color:#757575' }, rm ? 'marked for removal in this draft' : 'adds its removal to the draft; nothing changes until Apply')));
   }
 
-  Object.assign(TC.views, { topology, facility, scenarios, design });
+  Object.assign(TC.views, { topology, facility, storage, scenarios, design });
 })();

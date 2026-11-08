@@ -279,6 +279,9 @@ func TestIdentityAgreesWithTheDCGMImpersonation(t *testing.T) {
 	t.Cleanup(tw.Down)
 	eps := map[string]*metrics.Endpoint{}
 	for _, ep := range tw.Adapter(metrics.Name).(*metrics.Adapter).Endpoints() {
+		if ep.Storage() {
+			continue // a host's node and smartctl exporters, beside its accelerator's
+		}
 		eps[ep.Device.Path] = ep
 	}
 	for _, path := range []string{gb300, gb200, h100} {

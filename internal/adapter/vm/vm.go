@@ -52,6 +52,9 @@ type Adapter struct {
 	log      *slog.Logger
 	opts     schema.VMOptions
 	machines map[string]*machine
+	// capped are the drives whose backing the host's file system could not make full size
+	capped   []string
+	cappedMu sync.Mutex
 	order    []string
 	uplink   *netsim.Uplink // the router's interface on the stack's routed site network, if any (D48)
 	workers  sync.WaitGroup // one per machine: carries out requests in order
@@ -138,6 +141,10 @@ type machine struct {
 	inst   *qemu.Installation
 	guest  *GuestImage
 	initrd string
+	// emu are the DPU's emulated NVMe functions plugged into the running machine, by spare port
+	// (emulation.go); a power-on starts with none
+	emu    map[int]string
+	dpuEmu bool   // the host has an NVMe-emulating DPU: spare ports at power-on
 	dir    string // persistent state: NVRAM, console log, TPM state
 	run    string // sockets
 	reqs   chan request
@@ -159,6 +166,9 @@ type machine struct {
 	links     map[int]bool // each NIC's carrier as last set through QMP (syncLinks)
 	tpmCerts  string       // what manufacturing the TPM gave it (tpm.go), or why it has no certificates
 	nv        nvramState
+	// drives are the host's drives in bay order (drives.go)
+	driveMu sync.Mutex
+	drives  []*vmDrive
 }
 
 type request struct {
@@ -223,6 +233,8 @@ func (a *Adapter) Start(ctx context.Context, rt *adapter.Runtime) error {
 	if len(a.order) > 0 {
 		a.wg.Add(1)
 		go a.followLinks()
+		a.wg.Add(1)
+		go a.followDrives(ctx)
 	}
 	for _, path := range a.order {
 		if initialOn[path] {
@@ -252,6 +264,10 @@ func (a *Adapter) plan(d *model.Device) (*machine, error) {
 	if err := os.MkdirAll(m.run, 0o700); err != nil {
 		return nil, err
 	}
+	if err := m.planDrives(d); err != nil {
+		return nil, err
+	}
+	m.dpuEmu = emulatingDPU(d)
 	if d.OS == "twin" {
 		g, ok := Guests[p.arch]
 		if !ok {
@@ -261,7 +277,11 @@ func (a *Adapter) plan(d *model.Device) (*machine, error) {
 		if err := g.Present(gdir); err != nil {
 			return nil, err
 		}
-		initrd, err := BuildInitrd(g, gdir)
+		build := BuildInitrd
+		if storageNode(a.rt, d) {
+			build = BuildStorageInitrd // its targets' userspace (storagenode.go)
+		}
+		initrd, err := build(g, gdir)
 		if err != nil {
 			return nil, err
 		}
@@ -453,6 +473,10 @@ func (m *machine) config() qemu.Config {
 			{Type: 3, Fields: [][2]string{{"manufacturer", manuf}, {"serial", d.Identity.Serial}, {"sku", part}}},
 		}
 	})
+	c.Drives, c.NVMeProps = m.driveConfig(), m.inst.NVMeProps()
+	if m.dpuEmu {
+		c.Extra = append(c.Extra, emulationArgs()...)
+	}
 	// each NIC's cable is the twin's switch port for it (D48)
 	for _, n := range m.nics {
 		c.NICs = append(c.NICs, qemu.NIC{MAC: n.port.MAC, Netdev: n.netdev()})
@@ -487,6 +511,9 @@ func (m *machine) start(reset bool) error {
 	}
 	m.mu.Lock()
 	m.cur, m.reset, m.exited = pm, reset, make(chan struct{})
+	m.driveMu.Lock()
+	m.emu = nil // hot-plugged functions do not survive a power-on
+	m.driveMu.Unlock()
 	m.starts++
 	m.lastArgs = cfg.CommandLine()
 	if st, err := os.Stat(cfg.Console); err == nil {
@@ -531,6 +558,7 @@ func (m *machine) watch(pm *qemu.Machine) {
 			m.mu.Unlock()
 			data["reset"] = reset
 			m.observe("power", model.On, "QEMU: the machine is running (QMP RESUME)", cause, data)
+			go m.syncDrives() // the drives' SMART bits, and anything that changed while it was off
 		case "POWERDOWN":
 			m.observe("acpi.powerButton", "pressed", "QEMU: the ACPI power button was pressed (QMP POWERDOWN); the guest decides", cause, data)
 		case "RESET":
@@ -541,6 +569,10 @@ func (m *machine) watch(pm *qemu.Machine) {
 			}
 			why := fmt.Sprint(ev.Data["reason"])
 			m.observe("reset", why, "QEMU: the machine was reset (QMP RESET, "+why+")", cause, data)
+		case "DEVICE_DELETED":
+			if dev, _ := ev.Data["device"].(string); dev != "" {
+				go m.driveDeleted(pm, dev)
+			}
 		case "SHUTDOWN":
 			shutdown = ev.Data
 			m.observe("qemu.shutdown", fmt.Sprint(ev.Data["reason"]), fmt.Sprintf("QEMU: shutdown (QMP SHUTDOWN, %v)", ev.Data["reason"]), cause, data)
@@ -584,6 +616,7 @@ func (m *machine) watch(pm *qemu.Machine) {
 	if exited != nil {
 		close(exited)
 	}
+	m.drivesOff()
 	if restart {
 		select {
 		case m.reqs <- request{"power.on", cause}:
@@ -938,7 +971,7 @@ func (a *Adapter) Report() adapter.Report {
 	r.IsNot = []string{
 		"vm NICs are QEMU stream netdevs to the twin's switch port for each (D48), not TAPs on a bridge: the guest's DHCP enters its segment's twin relay at its port, and the segment gateway is a userspace router that terminates the guest's TCP and opens its own connection to the service (a service sees this host's loopback address, not the guest's lease); only stack services named by the stack's siteServices output and estate endpoints at their site addresses are reachable; the guest's unicast DHCP renewals are relayed like its broadcasts; the segment has no other host on it; IPv6, multicast and ICMP other than echo to the gateway are dropped.",
 		"Redfish and IPMI are still the model's BMC: power, boot stage and the firmware's boot options are observed from QEMU and its NVRAM, and a boot order set through Redfish is written to NVRAM before the next start (a restart with one pending is a cold start); boot overrides (BootSourceOverride), BIOS settings and Secure Boot set through Redfish are recorded in the model and not written to the guest's firmware.",
-		"os: twin boots the twin's pinned Alpine Linux image through the firmware's QEMU kernel loader (fw_cfg), not over PXE; no in-host agent or accelerator shim (Mokka) runs, and accelerators, InfiniBand ports and drives are absent from the guest's PCI tree.",
+		"os: twin boots the twin's pinned Alpine Linux image through the firmware's QEMU kernel loader (fw_cfg), not over PXE; no in-host agent or accelerator shim (Mokka) runs, and accelerators and InfiniBand ports are absent from the guest's PCI tree.",
 		"os: stack hosts boot from their firmware's boot order: a network boot is the firmware's own PXE or HTTP boot through the twin's segment, to whatever the stack serves; Redfish boot overrides are not applied to the firmware (above).",
 		"The serial console is a stand-in for Serial over LAN: the guest's serial port logged to a file and served by the control API; IPMI SOL is not served.",
 		"SMBIOS type 0 carries the profile's manufacturer and the model's uefi firmware version, but the firmware that runs is QEMU's edk2 build; the type 1 version string is QEMU's machine type (virt-<version>), which a guest can read.",
@@ -949,6 +982,9 @@ func (a *Adapter) Report() adapter.Report {
 	} else {
 		r.IsNot = append(r.IsNot, "The TPM is swtpm with persisted state, manufactured on first use with EK and platform certificates signed by the estate CA (swtpm_setup, swtpm_localca), not by a TPM vendor's CA; the twin guest's kernel (Alpine virt) has no TPM driver, so in os: twin only the firmware measures into it.")
 	}
+	dl, dn := a.driveReport()
+	r.Lines = append(r.Lines, dl...)
+	r.IsNot = append(r.IsNot, dn...)
 	sort.Strings(r.TCG)
 	return r
 }

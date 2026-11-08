@@ -1,0 +1,55 @@
+# A shared storage system at fidelity vm (docs/reviews/2026-11-08-storage-deep-dive.md P4, S-Q2): a
+# storage rack's two generic storage nodes are `os: twin` guests under KVM whose image carries
+# Linux's NFS server and nvmet and an S3 server (rclone); the storage adapter makes each node serve
+# the file systems, volumes and buckets the model homes on it, observes what they hold, and
+# publishes each node's NFS, NVMe/TCP and S3 on this machine (`dctwin storage credentials`).
+#
+# Needs Linux with KVM and OVMF, and the guest image with its storage packages:
+#   bin/dctwin assets fetch
+#   bin/dctwin up examples/estates/storage-vm-system.yaml --adapters vm,inhost,storage
+#   bin/dctwin storage create filesystem lab-fs models --size 100G --export 10.50.0.0/16:root
+#   bin/dctwin storage credentials        # each node's published nfs, nvme-tcp and s3
+apiVersion: dc-twin/v1alpha1
+kind: Estate
+metadata: { name: storage-vm-system }
+spec:
+  seed: 5151
+  clock: wall
+  timeScale: 0.05
+  packs: [generic@0.1.0]
+  fidelity:
+    default: model
+    overrides:
+      - { select: "s01/node-01", level: vm, os: twin }
+      - { select: "s01/node-02", level: vm, os: twin }
+  adapters:
+    vm: { memoryMB: 1536, cpus: 2 }
+  sites:
+    - name: site-1
+      halls:
+        - name: hall-a
+          rows:
+            - name: s
+              positions: 4
+              racks:
+                - { name: s01, position: 1, format: generic/storage-rack, params: { nodes: 2 }, feeds: [A, B] }
+                - { name: n01, position: 4, format: generic/network-rack, feeds: [A, B] }
+  networks:
+    oob:          { role: management,   dhcp: twin, cidr: 10.30.0.0/20, fabric: oob }
+    provisioning: { role: provisioning, dhcp: twin, cidr: 10.40.0.0/20, fabric: frontend }
+    storage:      { role: storage,      cidr: 10.50.0.0/16, dhcp: none, fabric: storage }
+  fabrics:
+    - { name: oob,      template: oob-flat,   nos: none }
+    - { name: frontend, template: clos-2tier, nos: none, params: { leafsPerRack: 1, spines: 1, roles: "frontend provisioning" }, placeIn: n01 }
+    - { name: storage,  template: clos-2tier, nos: none, params: { leafsPerRack: 1, spines: 1, roles: storage }, placeIn: n01 }
+  storageSystems:
+    - name: lab-fs
+      template: generic/storage-cluster
+      select: "s01"
+      networks: { data: storage, management: oob }
+      protocols: [nfs, s3, nvme-tcp]
+      params: { protection: "4+2", failoverSeconds: 30 }
+      fidelity: vm
+  facility:
+    power: { feeds: [{ name: A, capacityW: 100000 }, { name: B, capacityW: 100000 }] }
+  stacks: []

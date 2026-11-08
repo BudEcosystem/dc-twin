@@ -89,8 +89,9 @@ TC.Live = (() => {
     async load() {
       this.caps.design = !!this.status.canApply;
       const get = (p) => this.api('GET', p);
-      const [layout, cat, doms, faults, devs, fac, links, report, full, host, tree] = await Promise.allSettled([get('/layout'), get('/catalogue'), get('/domains'), get('/faults'), get('/devices?select=**'), get('/facility'), get('/links'), get('/report'),
-        get('/catalogue?detail=full'), get('/host'), get('/estate?format=json')]);
+      const [layout, cat, doms, faults, devs, fac, links, report, full, host, tree, storage] = await Promise.allSettled([get('/layout'), get('/catalogue'), get('/domains'), get('/faults'), get('/devices?select=**'), get('/facility'), get('/links'), get('/report'),
+        get('/catalogue?detail=full'), get('/host'), get('/estate?format=json'), get('/storage')]);
+      this.storage = (storage.value || []);
       for (const r of [layout, cat, doms, faults, devs, fac, links]) if (r.status === 'rejected') this.toast('live mode: ' + r.reason.message, true);
       // the designer's: every format, profile and template of the packs, this host, and the
       // estate file as a tree with the etag a draft is planned against
@@ -204,7 +205,7 @@ TC.Live = (() => {
     schedule() { if (!this.flushT) this.flushT = setTimeout(() => this.flush(), 300); }
     async flush() {
       this.flushT = null;
-      const d = this.dirty; const devs = [...d.devs]; this.dirty = { devs: new Set(), all: false, faults: false, domains: false, facility: false, links: false };
+      const d = this.dirty; const devs = [...d.devs]; this.dirty = { devs: new Set(), all: false, faults: false, domains: false, facility: false, links: false, storage: false };
       const jobs = [];
       const put = (list) => { for (const v of list || []) this.views[v.path] = v; };
       if (d.all || devs.length > 40) jobs.push(this.api('GET', '/devices?select=**').then((l) => { this.views = {}; put(l); }));
@@ -213,6 +214,7 @@ TC.Live = (() => {
       if (d.domains) jobs.push(this.api('GET', '/domains').then((x) => { this.domains = x || []; }));
       if (d.facility) jobs.push(this.api('GET', '/facility').then((x) => { this.fac = x || this.fac; }));
       if (d.links) jobs.push(this.api('GET', '/links').then((x) => { this.links = x || []; }));
+      if (d.storage || d.all) jobs.push(this.api('GET', '/storage').then((x) => { this.storage = x || []; }));
       await Promise.allSettled(jobs);
       if (d.facility) this.index(); else { this.indexDevices(); if (d.links) this.indexLinks(); }
       this.changed();
@@ -244,6 +246,7 @@ TC.Live = (() => {
         if (e.state && e.state.field === 'domain') this.dirty.domains = true;
         if (e.state && e.state.field === 'link' || /~/.test(e.path || '')) this.dirty.links = true;
         if (/facility/.test(e.path || '') || (e.state && /^(up|isolation\.)/.test(e.state.field))) this.dirty.facility = true;
+        if (/\/storage\//.test(e.path || '')) this.dirty.storage = true;
         if (e.kind === 'request') { const p = this.devicesOf(e.path)[0]; if (p && this.reqs[p]) this.reqs[p].push(this.reqRow(e)); }
         this.schedule();
       }

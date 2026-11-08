@@ -1,0 +1,57 @@
+# DPU storage (docs/reviews/2026-11-08-storage-deep-dive.md P5): the storage-vm-system estate's
+# system, and a host whose BlueField-3 emulates NVMe. The host is a vm host; its DPU stays at
+# model. A volume attached to the DPU appears in the host's guest as an NVMe drive, through the
+# twin's stand-in for DOCA SNAP: an NVMe/TCP connection to the volume's target as the DPU, served
+# to the host's hot-plugged NVMe controller over NBD.
+#   bin/dctwin up examples/estates/storage-dpu-vm.yaml --adapters vm,inhost,storage
+#   bin/dctwin storage create volume lab-fs vol1 --size 1G
+#   bin/dctwin dpu emulation c01/server-01/bf3-0 on
+#   bin/dctwin dpu attach c01/server-01/bf3-0 lab-fs vol1
+apiVersion: dc-twin/v1alpha1
+kind: Estate
+metadata: { name: storage-dpu-vm }
+spec:
+  seed: 5252
+  clock: wall
+  timeScale: 0.05
+  packs: [generic@0.1.0, nvidia@0.1.0]
+  fidelity:
+    default: model
+    overrides:
+      - { select: "s01/node-01", level: vm, os: twin }
+      - { select: "s01/node-02", level: vm, os: twin }
+      - { select: "c01/server-01", level: vm, os: twin }
+      - { select: "c01/server-01/bf3-*", level: model }   # the DPU stays at model: its NVMe emulation is the stand-in
+  adapters:
+    vm: { memoryMB: 1536, cpus: 2 }
+  sites:
+    - name: site-1
+      halls:
+        - name: hall-a
+          rows:
+            - name: s
+              positions: 4
+              racks:
+                - { name: s01, position: 1, format: generic/storage-rack, params: { nodes: 2 }, feeds: [A, B] }
+                - { name: c01, position: 2, format: generic/cpu-rack, params: { servers: 1 }, slots: { server-01: { profile: nvidia/dpu-host-1u } }, feeds: [A, B] }
+                - { name: n01, position: 4, format: generic/network-rack, feeds: [A, B] }
+  networks:
+    oob:          { role: management,   dhcp: twin, cidr: 10.30.0.0/20, fabric: oob }
+    provisioning: { role: provisioning, dhcp: twin, cidr: 10.40.0.0/20, fabric: frontend }
+    frontend:     { role: frontend,     fabric: frontend }
+    storage:      { role: storage,      cidr: 10.50.0.0/16, dhcp: none, fabric: storage }
+  fabrics:
+    - { name: oob,      template: oob-flat,   nos: none }
+    - { name: frontend, template: clos-2tier, nos: none, params: { leafsPerRack: 1, spines: 1, roles: "frontend provisioning" }, placeIn: n01 }
+    - { name: storage,  template: clos-2tier, nos: none, params: { leafsPerRack: 1, spines: 1, roles: storage }, select: "s01", placeIn: n01 }
+  storageSystems:
+    - name: lab-fs
+      template: generic/storage-cluster
+      select: "s01"
+      networks: { data: storage, management: oob }
+      protocols: [nfs, s3, nvme-tcp]
+      params: { protection: "4+2", failoverSeconds: 30 }
+      fidelity: vm
+  facility:
+    power: { feeds: [{ name: A, capacityW: 100000 }, { name: B, capacityW: 100000 }] }
+  stacks: []

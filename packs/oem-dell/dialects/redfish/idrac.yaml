@@ -15,6 +15,9 @@ spec:
   identity: { dhcpVendorClass: "iDRAC" }
   # iDRAC answers every Bios/Settings PATCH 202 with a JID_ job (the capture records one body's)
   settingsJobs: "/redfish/v1/TaskService/Tasks/JID_{n}"
+  # the BOSS-N1 boot controller and its M.2 drives are the model's, under the id iDRAC9 gives a
+  # BOSS-N1 (none is in the capture); NICo finds it by "BOSS" in the id (libredfish dell.rs)
+  storageControllers: { boss: BOSS.SL.14-1 }
   overlays:
     - { path: "/redfish/v1/Systems/System.Embedded.1", set: Model, from: model }
     - { path: "/redfish/v1/Systems/System.Embedded.1", set: Status.HealthRollup, from: health }
