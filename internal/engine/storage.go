@@ -2,6 +2,7 @@ package engine
 
 import (
 	"fmt"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -472,6 +473,9 @@ func (e *Engine) createVolume(r Request, spec VolumeSpec) (model.Volume, error) 
 		c := e.driveOf(d, dn)
 		if c == nil {
 			return model.Volume{}, fmt.Errorf("%w: no drive %s", ErrPrecondition, dn)
+		}
+		if slices.Contains(names, c.Name) {
+			return model.Volume{}, fmt.Errorf("%w: drive %s is named twice", ErrPrecondition, c.Name)
 		}
 		if c.Drive.Controller != ctl {
 			return model.Volume{}, fmt.Errorf("%w: drive %s is not behind controller %s", ErrPrecondition, c.Name, ctl.Name)

@@ -128,6 +128,19 @@ func TestVMDPUEmulatedVolume(t *testing.T) {
 	if err != nil || strings.Fields(back)[0] != strings.Fields(sum)[0] {
 		t.Fatalf("read back in the host: %q %v", back, err)
 	}
+	// what a node restart leaves: the volume's image in the pool, its nvmet subsystem gone and
+	// the DPU's connection to it dropped; the node serves it again and the stand-in reconnects
+	c := "/sys/kernel/config/nvmet"
+	if _, err := run(vol.Home, "s="+c+"/subsystems/"+vol.NQN+"; rm "+c+"/ports/1/subsystems/"+vol.NQN+" && rm $s/allowed_hosts/* && echo 0 > $s/namespaces/1/enable && rmdir $s/namespaces/1 $s"); err != nil {
+		t.Fatalf("remove the volume's subsystem: %v", err)
+	}
+	if err := tw.Engine.DeleteStorageObject(engine.Request{Path: sys, Source: src}, "volume", "vol1"); err == nil {
+		t.Fatal("deleted a volume a DPU presents")
+	}
+	waitFor("the volume read back in the host after its subsystem came back", 3*time.Minute, func() bool {
+		back, err := run(host, "echo 3 > /proc/sys/vm/drop_caches; dd if=/dev/"+dev+" bs=4096 skip=16 count=8 2>/dev/null | md5sum")
+		return err == nil && strings.Fields(back)[0] == strings.Fields(sum)[0]
+	})
 	// detached, the drive leaves the guest's bus
 	if err := tw.Engine.DetachEmulatedVolume(r, fn.ID); err != nil {
 		t.Fatal(err)

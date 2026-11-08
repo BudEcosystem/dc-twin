@@ -15,6 +15,7 @@ import (
 	"io"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -32,6 +33,22 @@ const (
 	flagSuccess = 0x08
 )
 
+// commandTimeout bounds each command, from its capsule to its response: a target that accepts
+// a connection and then stalls fails the command rather than blocking its caller.
+const commandTimeout = 30 * time.Second
+
+// ErrBroken is a queue's error once its connection has failed: the stream is no longer in step,
+// so the session is dialled again (Session.Broken).
+var ErrBroken = errors.New("nvmetcp: the queue's connection failed")
+
+// StatusError is a command the controller completed with an error status; the queue stays usable.
+type StatusError uint16
+
+func (st StatusError) Error() string {
+	v := uint16(st) // not st: fmt would call Error on it again
+	return fmt.Sprintf("status %#x (type %d, code %#x)", v, (v>>8)&7, v&0xff)
+}
+
 // Session is a connection to one subsystem's controller: its admin queue and one I/O queue.
 type Session struct {
 	admin, io *queue
@@ -45,7 +62,18 @@ type queue struct {
 	mu      sync.Mutex
 	c       net.Conn
 	cid     uint16
-	maxData uint32 // the controller's MAXH2CDATA
+	maxData uint32    // the controller's MAXH2CDATA
+	until   time.Time // while Dial runs: its caller's deadline, which bounds each command too
+	broken  atomic.Bool
+}
+
+// arm sets the connection's deadline for the next exchange.
+func (q *queue) arm() {
+	d := time.Now().Add(commandTimeout)
+	if !q.until.IsZero() && q.until.Before(d) {
+		d = q.until
+	}
+	q.c.SetDeadline(d)
 }
 
 // Dial connects to subnqn at addr (host:port) as hostnqn, enables the controller and identifies
@@ -79,6 +107,9 @@ func Dial(ctx context.Context, addr, subnqn, hostnqn string, dial func(ctx conte
 		if time.Now().After(deadline) {
 			return fail(errors.New("the controller did not become ready"))
 		}
+		if ctx.Err() != nil {
+			return fail(ctx.Err())
+		}
 		time.Sleep(50 * time.Millisecond)
 	}
 	// Identify Namespace 1: its size and LBA format
@@ -100,7 +131,14 @@ func Dial(ctx context.Context, addr, subnqn, hostnqn string, dial func(ctx conte
 	if s.io, _, err = connectQueue(ctx, dial, addr, 1, 31, s.cntlid, subnqn, hostnqn, hostid); err != nil {
 		return fail(fmt.Errorf("I/O queue: %w", err))
 	}
+	s.admin.until, s.io.until = time.Time{}, time.Time{} // from here each command has its own
 	return s, nil
+}
+
+// Broken is whether a queue's connection has failed (the target restarted, the connection
+// dropped or stalled): the session serves no more commands and is to be dialled again.
+func (s *Session) Broken() bool {
+	return (s.admin != nil && s.admin.broken.Load()) || (s.io != nil && s.io.broken.Load())
 }
 
 // Size is the namespace's size in bytes; BlockSize its LBA size.
@@ -180,8 +218,9 @@ func connectQueue(ctx context.Context, dial func(context.Context, string) (net.C
 	}
 	q := &queue{c: c}
 	if dl, ok := ctx.Deadline(); ok {
-		c.SetDeadline(dl)
+		q.until = dl
 	}
+	q.arm()
 	// ICReq / ICResp
 	ic := make([]byte, 128)
 	ic[0], ic[2] = pduICReq, 128
@@ -217,7 +256,6 @@ func connectQueue(ctx context.Context, dial func(context.Context, string) (net.C
 		c.Close()
 		return nil, 0, fmt.Errorf("connect: %w", err)
 	}
-	c.SetDeadline(time.Time{})
 	return q, binary.LittleEndian.Uint16(cqe[0:2]), nil
 }
 
@@ -247,9 +285,14 @@ func (q *queue) write(sqe [64]byte, from []byte) ([]byte, error) { return q.comm
 
 // command sends a capsule (with in-capsule data, or asking for into's length from the
 // controller) and reads to its response; it returns the CQE.
-func (q *queue) command(sqe [64]byte, inCapsule, into []byte) ([]byte, error) {
+func (q *queue) command(sqe [64]byte, inCapsule, into []byte) (cqe []byte, err error) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
+	if q.broken.Load() {
+		return nil, ErrBroken
+	}
+	defer q.fail(&err)
+	q.arm()
 	q.cid++
 	cid := q.cid
 	binary.LittleEndian.PutUint16(sqe[2:], cid)
@@ -279,9 +322,14 @@ func (q *queue) command(sqe [64]byte, inCapsule, into []byte) ([]byte, error) {
 }
 
 // commandR2T sends a write whose data the controller asks for by R2T.
-func (q *queue) commandR2T(sqe [64]byte, from []byte) ([]byte, error) {
+func (q *queue) commandR2T(sqe [64]byte, from []byte) (cqe []byte, err error) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
+	if q.broken.Load() {
+		return nil, ErrBroken
+	}
+	defer q.fail(&err)
+	q.arm()
 	q.cid++
 	cid := q.cid
 	binary.LittleEndian.PutUint16(sqe[2:], cid)
@@ -296,6 +344,15 @@ func (q *queue) commandR2T(sqe [64]byte, from []byte) ([]byte, error) {
 		return nil, err
 	}
 	return q.await(cid, nil, from)
+}
+
+// fail marks the queue broken on an error other than a command's status: its stream is out of
+// step (a short read, a timeout, a closed connection, a PDU it cannot parse).
+func (q *queue) fail(err *error) {
+	var st StatusError
+	if *err != nil && !errors.As(*err, &st) {
+		q.broken.Store(true)
+	}
 }
 
 // await reads PDUs until the command's response: C2H data into into, R2Ts answered from from.
@@ -322,7 +379,7 @@ func (q *queue) await(cid uint16, into, from []byte) ([]byte, error) {
 			}
 			cqe := h[8:24]
 			if st := binary.LittleEndian.Uint16(cqe[14:16]) >> 1; st != 0 {
-				return cqe, fmt.Errorf("status %#x (type %d, code %#x)", st, (st>>8)&7, st&0xff)
+				return cqe, StatusError(st)
 			}
 			return cqe, nil
 		case pduC2HData:

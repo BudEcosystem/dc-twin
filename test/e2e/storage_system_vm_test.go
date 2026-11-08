@@ -123,6 +123,20 @@ func TestVMStorageSystem(t *testing.T) {
 	if err != nil || rc != 0 || !strings.Contains(out, "hello") {
 		t.Fatalf("NFS mount on %s: rc %d %v\n%s", fs.Home, rc, err, out)
 	}
+	// what a node restart leaves: the file system's data in the pool, its export's bind mount
+	// gone; the node serves it again
+	ctx, cancel = context.WithTimeout(context.Background(), 30*time.Second)
+	out, rc, err = ia.Exec(ctx, fs.Home, "exportfs -ua && umount /exports/models 2>&1")
+	cancel()
+	if err != nil || rc != 0 {
+		t.Fatalf("unmount the export: rc %d %v\n%s", rc, err, out)
+	}
+	waitFor("the file system exported again on "+fs.Home, 2*time.Minute, func() bool {
+		ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+		defer cancel()
+		out, rc, err := ia.Exec(ctx, fs.Home, "mount -t nfs4 -o vers=4.1,soft,timeo=50 127.0.0.1:/models /mnt/m && cat /mnt/m/probe; umount /mnt/m")
+		return err == nil && rc == 0 && strings.Contains(out, "hello")
+	})
 	waitFor("the volume's subsystem admitting its host on "+vol.Home, 2*time.Minute, func() bool {
 		r := report(vol.Home)
 		return strings.Contains(r, "vol vol1 ") && strings.Contains(r, "nqn "+vol.NQN+" "+host)

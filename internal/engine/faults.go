@@ -609,7 +609,7 @@ func (e *Engine) Faults(sel string) []FaultView {
 	s, _ := selector.Parse(sel)
 	var out []FaultView
 	for _, f := range e.faults {
-		if sel == "" || s.MatchPath(f.Target) || s.MatchPort(f.Target) || s.MatchPath(f.Device.Path) {
+		if sel == "" || s.MatchPath(f.Target) || s.MatchPort(f.Target) || (f.System == nil && s.MatchPath(f.Device.Path)) {
 			out = append(out, f.View())
 		}
 	}

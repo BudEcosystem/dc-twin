@@ -129,6 +129,12 @@ func TestVMSAsVastCSICallsIt(t *testing.T) {
 	if v, _ = tw.Engine.StorageSystem("vast-1"); len(v.FileSystems) != 0 {
 		t.Fatalf("the model after DeleteVolume: %+v", v.FileSystems)
 	}
+	// paths one name would conflate (a separator, a replaced character) are distinct views
+	for _, p := range []string{"/k8s/a:b", "/k8s/a_b", "/k8s/a/b", "/k8s/a-b"} {
+		if st, v := call("POST", "views/", map[string]any{"path": p, "protocols": []string{"NFS"}, "policy_id": polID, "tenant_id": 1, "create_dir": true}); st != 201 {
+			t.Fatalf("view at %s: %d %v", p, st, v)
+		}
+	}
 	_, pools := call("GET", "vippools/?name=vippool-1", nil)
 	if len(pools.([]any)) != 1 {
 		t.Fatalf("vip pool: %v", pools)

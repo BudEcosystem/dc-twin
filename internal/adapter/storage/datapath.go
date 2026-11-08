@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/netip"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -73,7 +74,31 @@ func newDatapath(s *server, sys *model.StorageSystem) *datapath {
 	var m *model.Model
 	s.a.rt.Engine.Read(func(mm *model.Model) { m = mm })
 	segs := dhcp.NetworkSegments(m, sys.DataNetwork)
-	perRack := map[string]int{}
+	segOf := func(dev *model.Device) (dhcp.Segment, bool) {
+		for _, sg := range segs {
+			if rack := dev.RackOf(); rack != nil && sg.Rack == rack.Path && sg.Prefix.IsValid() {
+				return sg, true
+			}
+		}
+		return dhcp.Segment{}, false
+	}
+	// a node's address is .20 onwards of its segment, numbered over every vm system's nodes on
+	// the network in path order: two systems sharing a rack, or racks sharing one subnet, never
+	// hand out the same address (compile keeps DHCP off the network)
+	var all []*model.Device
+	for _, o := range m.StorageSystems {
+		if o.Fidelity == "vm" && o.DataNetwork == sys.DataNetwork {
+			all = append(all, o.Nodes...)
+		}
+	}
+	sort.Slice(all, func(i, j int) bool { return all[i].Path < all[j].Path })
+	seq, next := map[*model.Device]int{}, map[netip.Prefix]int{}
+	for _, dev := range all {
+		if sg, ok := segOf(dev); ok {
+			seq[dev] = next[sg.Prefix]
+			next[sg.Prefix]++
+		}
+	}
 	for _, dev := range sys.Nodes {
 		n := &dpNode{dev: dev, pub: map[string]string{}, conns: map[string]int{}}
 		for _, p := range dev.Ports {
@@ -91,15 +116,12 @@ func newDatapath(s *server, sys *model.StorageSystem) *datapath {
 				break
 			}
 		}
-		rack := dev.RackOf()
-		for _, sg := range segs {
-			if rack != nil && sg.Rack == rack.Path && sg.Prefix.IsValid() {
-				// .20 onwards of the node's rack segment, one per storage node in the rack
-				a := sg.Prefix.Addr()
-				for i := 0; i < 20+perRack[rack.Path]; i++ {
-					a = a.Next()
-				}
-				perRack[rack.Path]++
+		if sg, ok := segOf(dev); ok {
+			a := sg.Prefix.Addr()
+			for i := 0; i < 20+seq[dev]; i++ {
+				a = a.Next()
+			}
+			if sg.Prefix.Contains(a) {
 				n.addr = netip.PrefixFrom(a, sg.Prefix.Bits())
 				n.gw = netip.PrefixFrom(sg.Gateway, sg.Prefix.Bits())
 			}
@@ -187,7 +209,16 @@ func (d *datapath) splice(ctx context.Context, n *dpNode, proto string, port int
 	wg.Add(2)
 	go func() { defer wg.Done(); io.Copy(g, c); closeWrite(g) }()
 	go func() { defer wg.Done(); io.Copy(c, g); closeWrite(c) }()
-	go func() { <-ctx.Done(); c.Close(); g.Close() }()
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		select {
+		case <-ctx.Done():
+			c.Close()
+			g.Close()
+		case <-done:
+		}
+	}()
 	wg.Wait()
 }
 
@@ -207,13 +238,14 @@ func (n *dpNode) setErr(e string) {
 type report struct {
 	ups                 map[string]bool
 	fs, vol, bucket     map[string]int64
-	hosts               map[string][]string // nqn -> allowed hosts
+	exported            map[string]bool     // file system -> bind-mounted under /exports
+	hosts               map[string][]string // nqn -> allowed hosts (a subsystem nvmet serves)
 	exports             string
 	poolUsed, poolTotal int64
 }
 
 func parseReport(out string) report {
-	r := report{ups: map[string]bool{}, fs: map[string]int64{}, vol: map[string]int64{}, bucket: map[string]int64{}, hosts: map[string][]string{}}
+	r := report{ups: map[string]bool{}, fs: map[string]int64{}, vol: map[string]int64{}, bucket: map[string]int64{}, exported: map[string]bool{}, hosts: map[string][]string{}}
 	for _, l := range strings.Split(out, "\n") {
 		f := strings.Fields(l)
 		if len(f) < 2 {
@@ -230,7 +262,7 @@ func parseReport(out string) report {
 		case "up":
 			r.ups[f[1]] = true
 		case "fs":
-			r.fs[f[1]] = n(2)
+			r.fs[f[1]], r.exported[f[1]] = n(2), n(3) == 1
 		case "vol":
 			r.vol[f[1]] = n(2)
 		case "bucket":
@@ -314,7 +346,7 @@ func (d *datapath) reconcile(ctx context.Context, n *dpNode) {
 			path = "/" + o.Name
 		}
 		fsPath[o.Name] = path
-		if _, ok := r.fs[o.Name]; !ok {
+		if !r.exported[o.Name] { // absent, or its data in the pool but not bind-mounted (a reboot)
 			cmds = append(cmds, "dctwin-storage fs "+o.Name+" "+path)
 		}
 		if !o.Online || len(o.Exports) == 0 {
@@ -344,14 +376,16 @@ func (d *datapath) reconcile(ctx context.Context, n *dpNode) {
 		content += l + "\n"
 	}
 	sum := md5.Sum([]byte(content))
-	writeExports := hex.EncodeToString(sum[:])[:12] != r.exports
+	// a file system bind-mounted again is exported again: the kernel's export cache still holds
+	// the directory under the old mount
+	writeExports := hex.EncodeToString(sum[:])[:12] != r.exports || slices.ContainsFunc(cmds, func(c string) bool { return strings.HasPrefix(c, "dctwin-storage fs ") })
 	volID := map[string]string{}
 	for _, o := range v.Volumes {
 		if o.Home != n.dev.Path {
 			continue
 		}
 		volID[o.Name] = o.ID
-		if _, ok := r.vol[o.Name]; !ok {
+		if _, served := r.hosts[o.NQN]; !served { // absent, or its image in the pool but no subsystem (a reboot)
 			cmds = append(cmds, fmt.Sprintf("dctwin-storage vol %s %s %d %s", o.Name, o.NQN, o.CapacityBytes, nguid(o.NGUID)))
 		}
 		want := []string{}
@@ -384,7 +418,11 @@ func (d *datapath) reconcile(ctx context.Context, n *dpNode) {
 	}
 	// file systems before the exports that name them
 	if writeExports {
-		cmds = append(cmds, "dctwin-storage exports <<'DCTWIN-EXPORTS'\n"+strings.Join(exportLines, "\n")+"\nDCTWIN-EXPORTS")
+		body := ""
+		for _, l := range exportLines {
+			body += l + "\n"
+		}
+		cmds = append(cmds, "dctwin-storage exports <<'DCTWIN-EXPORTS'\n"+body+"DCTWIN-EXPORTS")
 	}
 	if err := d.apply(ctx, n, cmds); err != nil {
 		n.setErr(err.Error())

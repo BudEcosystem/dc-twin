@@ -75,6 +75,7 @@ type StorageSystemView struct {
 	DataUnits, ParityUnits                  int
 	Nodes, Enclosures                       []StorageNodeView
 	Drives, DrivesFailed                    int
+	DevicesDown                             int // devices holding pool drives without power
 	FileSystems, Volumes, Buckets           []StorageObjectView
 	Snapshots                               []StorageObjectView
 	Alerts                                  []StorageAlert
@@ -168,11 +169,29 @@ func (e *Engine) nodeUp(s *model.StorageSystem, d *model.Device) (bool, string) 
 		return false, "failed (health Critical)"
 	}
 	for _, f := range e.storageFaults(s) {
-		if n, ok := f.Sets["storage.nodeDown"].(string); ok && n != "" && (n == d.Name || n == d.Path || strings.HasSuffix(d.Path, "/"+n)) {
+		if n, ok := f.Sets["storage.nodeDown"].(string); ok && n != "" && nodeNamed(s, d, n) {
 			return false, "storage service failed (" + f.Fault + ")"
 		}
 	}
 	return true, ""
+}
+
+// nodeNamed is whether a fault's node parameter names d: its path, a rack-qualified suffix
+// (s01/node-02), or its bare name when no other node of the system has it (racks reuse slot names).
+func nodeNamed(s *model.StorageSystem, d *model.Device, n string) bool {
+	if n == d.Path || (strings.Contains(n, "/") && strings.HasSuffix(d.Path, "/"+n)) {
+		return true
+	}
+	if n != d.Name {
+		return false
+	}
+	same := 0
+	for _, x := range append(append([]*model.Device{}, s.Nodes...), s.Enclosures...) {
+		if x.Name == n {
+			same++
+		}
+	}
+	return same == 1
 }
 
 // servingNode is the node serving an object homed on home: home while it is up; once home has
@@ -214,13 +233,31 @@ func (e *Engine) storageView(s *model.StorageSystem) StorageSystemView {
 		ok, why := e.nodeUp(s, d)
 		v.Enclosures = append(v.Enclosures, StorageNodeView{Path: d.Path, Name: d.Name, Up: ok, Why: why})
 	}
-	// drives: a failed or absent pool drive degrades the pool; more than its parity fails it
+	// drives: a failed or absent pool drive costs its stripes a unit; a node or enclosure without
+	// power takes all its drives, and as stripes spread evenly over the devices holding the pool
+	// it costs each stripe ceil(width/devices) units. Lost units degrade the pool; more of them
+	// than its parity fail it.
 	v.Drives = len(s.Drives)
+	devices := map[*model.Device]bool{} // device holding pool drives -> without power
 	for _, c := range s.Drives {
+		d := c.Device
+		devices[d] = !d.State.AC || d.State.Power != model.On
+		if devices[d] {
+			continue
+		}
 		ds := e.driveStatus(c)
 		if !ds.Present || ds.State == "UnavailableOffline" || ds.Health == model.Critical {
 			v.DrivesFailed++
 		}
+	}
+	for _, down := range devices {
+		if down {
+			v.DevicesDown++
+		}
+	}
+	lost := v.DrivesFailed
+	if len(devices) > 0 {
+		lost += v.DevicesDown * ((s.DataUnits + s.ParityUnits + len(devices) - 1) / len(devices))
 	}
 	offline := map[string]string{} // object name or id -> why
 	for _, f := range faults {
@@ -322,14 +359,14 @@ func (e *Engine) storageView(s *model.StorageSystem) StorageSystemView {
 		}
 	}
 	switch {
-	case v.DrivesFailed > s.ParityUnits:
-		alert(model.Critical, "PoolFailed", "", fmt.Sprintf("%d pool drives failed, more than its protection's %d parity", v.DrivesFailed, s.ParityUnits))
-	case v.DrivesFailed > 0:
-		alert(model.Warning, "PoolDegraded", "", fmt.Sprintf("%d pool drive(s) failed: the pool is degraded until they are replaced", v.DrivesFailed))
+	case lost > s.ParityUnits:
+		alert(model.Critical, "PoolFailed", "", fmt.Sprintf("%d pool drives failed and %d of its devices are without power, more than its protection's %d parity", v.DrivesFailed, v.DevicesDown, s.ParityUnits))
+	case lost > 0:
+		alert(model.Warning, "PoolDegraded", "", fmt.Sprintf("%d pool drive(s) failed and %d of its devices are without power: the pool is degraded until they are back", v.DrivesFailed, v.DevicesDown))
 	}
 	v.State = "Online"
 	switch {
-	case nodesUp == 0 || v.DrivesFailed > s.ParityUnits:
+	case nodesUp == 0 || lost > s.ParityUnits:
 		v.State = "Offline"
 		health = model.Critical
 	case health != model.OK:
@@ -486,6 +523,33 @@ func (e *Engine) home(s *model.StorageSystem) (string, error) {
 	return best, nil
 }
 
+// safeToken checks what a vm storage node is configured with (paths, host NQNs, export clients):
+// only characters that are neither shell syntax nor exports(5) syntax, so no client of a
+// management API can inject a command or an export option.
+func safeToken(what, v, extra string) error {
+	if v == "" || len(v) > 223 || strings.Trim(v, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._:"+extra) != "" {
+		return fmt.Errorf("%w: %s %q: letters, digits and '-._:%s' only", ErrPrecondition, what, v, extra)
+	}
+	return nil
+}
+
+func validPath(p string) error {
+	if err := safeToken("path", p, "/"); err != nil {
+		return err
+	}
+	if p[0] != '/' || strings.Contains(p, "//") || slices.Contains(strings.Split(p, "/"), "..") || slices.Contains(strings.Split(p, "/"), ".") {
+		return fmt.Errorf("%w: path %q: absolute, with no empty, '.' or '..' segment", ErrPrecondition, p)
+	}
+	return nil
+}
+
+func validNQN(n string) error {
+	if !strings.HasPrefix(n, "nqn.") {
+		return fmt.Errorf("%w: host NQN %q", ErrPrecondition, n)
+	}
+	return safeToken("host NQN", n, "")
+}
+
 func validName(n string) error {
 	if n == "" || len(n) > 63 || strings.Trim(n, "abcdefghijklmnopqrstuvwxyz0123456789-._") != "" || n[0] == '-' || n[0] == '.' {
 		return fmt.Errorf("%w: name %q: 1-63 of a-z, 0-9, '-', '.', '_', not starting with '-' or '.'", ErrPrecondition, n)
@@ -539,6 +603,9 @@ func (e *Engine) CreateFileSystem(r Request, spec FileSystemSpec) (model.FileSys
 	if spec.Path == "" {
 		spec.Path = "/" + spec.Name
 	}
+	if err := validPath(spec.Path); err != nil {
+		return fail(400, err)
+	}
 	for _, f := range s.State.FileSystems {
 		if f.Path == spec.Path {
 			return fail(409, fmt.Errorf("%w: a file system at %s", ErrExists, spec.Path))
@@ -557,8 +624,8 @@ func (e *Engine) CreateFileSystem(r Request, spec FileSystemSpec) (model.FileSys
 
 func checkExports(ex []model.Export) error {
 	for _, x := range ex {
-		if x.Clients == "" {
-			return fmt.Errorf("%w: an export names no clients", ErrPrecondition)
+		if err := safeToken("export clients", x.Clients, "/*"); err != nil {
+			return err
 		}
 		if x.Access != "rw" && x.Access != "ro" {
 			return fmt.Errorf("%w: export access %q: rw or ro", ErrPrecondition, x.Access)
@@ -712,7 +779,7 @@ func (e *Engine) MapVolume(r Request, id, hostNQN string, unmap bool) (model.Blo
 		e.logStorage(r, s, 404)
 		return model.BlockVolume{}, fmt.Errorf("%w: volume %s", ErrNoStorageObject, id)
 	}
-	if !strings.HasPrefix(hostNQN, "nqn.") {
+	if validNQN(hostNQN) != nil {
 		e.logStorage(r, s, 400)
 		return model.BlockVolume{}, fmt.Errorf("%w: host NQN %q", ErrPrecondition, hostNQN)
 	}
@@ -817,6 +884,10 @@ func (e *Engine) DeleteStorageObject(r Request, kind, id string) error {
 		}
 	case "volume":
 		if v := findVolume(s, id); v != nil {
+			if dpu := e.presentedBy(s, v.ID); dpu != "" {
+				e.logStorage(r, s, 409)
+				return fmt.Errorf("%w: volume %s is attached to %s's NVMe emulation; detach it first", ErrPrecondition, v.Name, dpu)
+			}
 			gone = v.ID
 			st.Volumes = slices.DeleteFunc(st.Volumes, func(x *model.BlockVolume) bool { return x == v })
 		}
@@ -846,6 +917,20 @@ func (e *Engine) DeleteStorageObject(r Request, kind, id string) error {
 	c := e.logStorage(r, s, 204)
 	e.objectEvent(r, s, c, kind, gone, "created", "deleted", nil)
 	return nil
+}
+
+// presentedBy names a DPU whose NVMe emulation presents a system's volume, or "".
+func (e *Engine) presentedBy(s *model.StorageSystem, volumeID string) string {
+	for _, d := range e.M.Devices {
+		if em := d.State.Emulation; em != nil {
+			for _, f := range em.Functions {
+				if f.System == s.Path && f.Volume == volumeID {
+					return d.Path
+				}
+			}
+		}
+	}
+	return ""
 }
 
 // ObserveStorageUse records what an object holds, as its node reports it (vm) or an act sets
@@ -975,7 +1060,7 @@ func (e *Engine) RegisterHost(r Request, hostNQN string, remove bool) error {
 	if err != nil {
 		return err
 	}
-	if !strings.HasPrefix(hostNQN, "nqn.") {
+	if validNQN(hostNQN) != nil {
 		e.logStorage(r, s, 400)
 		return fmt.Errorf("%w: host NQN %q", ErrPrecondition, hostNQN)
 	}

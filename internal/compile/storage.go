@@ -155,6 +155,11 @@ func (c *compiler) storageSystems() {
 				c.errf("%s: networks.%s: network %s has role %s, not %s", where, nb.use, nb.name, n.Role, nb.role)
 				continue
 			}
+			if nb.use == "data" && sys.Fidelity == "vm" && n.DHCP != "none" {
+				// a vm system's nodes take static addresses from .20 of their segments, which a
+				// DHCP server on the network would hand out too
+				c.errf("%s: fidelity vm: data network %s has dhcp %s; its nodes' addresses are static, so it must be dhcp none", where, nb.name, n.DHCP)
+			}
 			if nb.use == "data" {
 				for _, node := range sys.Nodes {
 					if !onNetwork(node, n) {

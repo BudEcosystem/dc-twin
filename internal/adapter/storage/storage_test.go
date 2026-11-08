@@ -3,6 +3,7 @@ package storage_test
 import (
 	"crypto/tls"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -112,6 +113,24 @@ func TestSwordfishProvisioning(t *testing.T) {
 	st, _, share := c.do("POST", fsURI+"/ExportedFileShares", `{"FileSharingProtocols":["NFSv4_1"],"DefaultAccessCapabilities":["Read","Write"],"RootAccess":true,"Oem":{"DcTwin":{"Clients":"10.50.0.0/16"}}}`)
 	if st != http.StatusCreated || share["RootAccess"] != true {
 		t.Fatalf("export: %d %v", st, share)
+	}
+	// a share's URI is the rule's: deleting another leaves it naming the same rule
+	var shares []string
+	for _, cl := range []string{"10.60.0.0/16", "10.70.0.0/16"} {
+		st, hdr, _ := c.do("POST", fsURI+"/ExportedFileShares", `{"DefaultAccessCapabilities":["Read"],"Oem":{"DcTwin":{"Clients":"`+cl+`"}}}`)
+		if st != http.StatusCreated {
+			t.Fatalf("export to %s: %d", cl, st)
+		}
+		shares = append(shares, hdr.Get("Location"))
+	}
+	if st, _, _ := c.do("DELETE", shares[0], ""); st/100 != 2 {
+		t.Fatalf("delete share %s: %d", shares[0], st)
+	}
+	if st, _, sh := c.do("GET", shares[1], ""); st != http.StatusOK || !strings.Contains(fmt.Sprint(sh["Description"]), "10.70.0.0/16") {
+		t.Fatalf("the other share after a delete: %d %v", st, sh)
+	}
+	if st, _, _ := c.do("DELETE", shares[1], ""); st/100 != 2 {
+		t.Fatalf("delete share %s: %d", shares[1], st)
 	}
 	// a volume, a host, a connection
 	st, hdr, vol := c.do("POST", sys+"/Volumes", `{"Name":"db-1","CapacityBytes":1099511627776}`)

@@ -43,9 +43,72 @@ type snap struct {
 type snapFn struct {
 	key, host, serial string
 	slot              int
-	sess              *nvmetcp.Session
+	tgt               *target
 	ln                net.Listener
 	sock              string
+}
+
+// target is what a function's NBD export reads and writes: its NVMe/TCP session to the volume,
+// dialled again when that session's connection breaks (the target's node restarted, the
+// connection dropped or stalled), so the host's drive recovers without a detach.
+type target struct {
+	mu     sync.Mutex // guards sess and closed (never held across a dial)
+	dialMu sync.Mutex // one dial at a time
+	sess   *nvmetcp.Session
+	closed bool
+	dial   func() (*nvmetcp.Session, error)
+}
+
+func (t *target) current() *nvmetcp.Session {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.sess
+}
+
+// do runs op on the session; when the session broke under it, it dials again (once, for every
+// caller that saw the same session break) and runs op on the new one.
+func (t *target) do(op func(*nvmetcp.Session) error) error {
+	s := t.current()
+	err := op(s)
+	if err == nil || !s.Broken() {
+		return err
+	}
+	t.dialMu.Lock()
+	if t.current() == s {
+		ns, derr := t.dial()
+		if derr != nil {
+			t.dialMu.Unlock()
+			return fmt.Errorf("%w (and dialling again: %v)", err, derr)
+		}
+		t.mu.Lock()
+		if t.closed {
+			ns.Close()
+		} else {
+			t.sess = ns
+		}
+		t.mu.Unlock()
+		s.Close()
+	}
+	t.dialMu.Unlock()
+	return op(t.current())
+}
+
+func (t *target) ReadAt(p []byte, off int64) (int, error) {
+	return len(p), t.do(func(s *nvmetcp.Session) error { _, err := s.ReadAt(p, off); return err })
+}
+
+func (t *target) WriteAt(p []byte, off int64) (int, error) {
+	return len(p), t.do(func(s *nvmetcp.Session) error { _, err := s.WriteAt(p, off); return err })
+}
+
+func (t *target) Flush() error { return t.do(func(s *nvmetcp.Session) error { return s.Flush() }) }
+func (t *target) Size() int64  { return t.current().Size() }
+
+func (t *target) Close() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.closed = true
+	t.sess.Close()
 }
 
 func newSnap(a *Adapter) *snap {
@@ -75,8 +138,8 @@ func (f *snapFn) close() {
 	if f.ln != nil {
 		f.ln.Close()
 	}
-	if f.sess != nil {
-		f.sess.Close()
+	if f.tgt != nil {
+		f.tgt.Close()
 	}
 	os.Remove(f.sock)
 }
@@ -153,7 +216,8 @@ func hostRunning(vm emulator, path string) bool {
 	return true
 }
 
-func (sn *snap) start(ctx context.Context, vm emulator, host *model.Device, fn model.EmulatedFunction, plugged map[int]string) (*snapFn, error) {
+// dial connects to the volume's NVMe/TCP target where it is served now, as the DPU.
+func (sn *snap) dial(ctx context.Context, fn model.EmulatedFunction) (*nvmetcp.Session, error) {
 	v, err := sn.a.rt.Engine.StorageSystem(fn.System)
 	if err != nil {
 		return nil, err
@@ -177,6 +241,16 @@ func (sn *snap) start(ctx context.Context, vm emulator, host *model.Device, fn m
 	if ep == "" {
 		return nil, fmt.Errorf("the NVMe/TCP target of %s is not published", vol.node)
 	}
+	cctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	sess, err := nvmetcp.Dial(cctx, ep, vol.nqn, fn.HostNQN, nil)
+	if err != nil {
+		return nil, fmt.Errorf("NVMe/TCP to %s at %s as %s: %w", vol.nqn, ep, fn.HostNQN, err)
+	}
+	return sess, nil
+}
+
+func (sn *snap) start(ctx context.Context, vm emulator, host *model.Device, fn model.EmulatedFunction, plugged map[int]string) (*snapFn, error) {
 	slot := -1
 	for i := 0; i < 4; i++ {
 		if _, used := plugged[i]; !used && !sn.slotTaken(host.Path, i) {
@@ -187,12 +261,11 @@ func (sn *snap) start(ctx context.Context, vm emulator, host *model.Device, fn m
 	if slot < 0 {
 		return nil, fmt.Errorf("%s has no spare port for another function", host.Path)
 	}
-	cctx, cancel := context.WithTimeout(ctx, 20*time.Second)
-	sess, err := nvmetcp.Dial(cctx, ep, vol.nqn, fn.HostNQN, nil)
-	cancel()
+	sess, err := sn.dial(ctx, fn)
 	if err != nil {
-		return nil, fmt.Errorf("NVMe/TCP to %s at %s as %s: %w", vol.nqn, ep, fn.HostNQN, err)
+		return nil, err
 	}
+	tgt := &target{sess: sess, dial: func() (*nvmetcp.Session, error) { return sn.dial(ctx, fn) }}
 	dir := filepath.Join(sn.a.rt.StateDir, "snap")
 	os.MkdirAll(dir, 0o700)
 	sum := sha256.Sum256([]byte(host.Path + fn.Serial))
@@ -200,11 +273,11 @@ func (sn *snap) start(ctx context.Context, vm emulator, host *model.Device, fn m
 	os.Remove(sock)
 	ln, err := net.Listen("unix", sock)
 	if err != nil {
-		sess.Close()
+		tgt.Close()
 		return nil, err
 	}
-	f := &snapFn{key: fmt.Sprintf("%s#%d", fn.Serial, fn.ID), host: host.Path, serial: fn.Serial, slot: slot, sess: sess, ln: ln, sock: sock}
-	go nbd.Serve(ln, "volume", nbd.Aligned{Dev: sess, Block: int64(sess.BlockSize())})
+	f := &snapFn{key: fmt.Sprintf("%s#%d", fn.Serial, fn.ID), host: host.Path, serial: fn.Serial, slot: slot, tgt: tgt, ln: ln, sock: sock}
+	go nbd.Serve(ln, "volume", nbd.Aligned{Dev: tgt, Block: int64(sess.BlockSize())})
 	if err := vm.AttachEmulatedNVMe(host.Path, slot, sock, fn.Serial, sess.BlockSize()); err != nil {
 		f.close()
 		return nil, err
@@ -227,7 +300,7 @@ func (sn *snap) reportLines() []string {
 	var out []string
 	for _, f := range sn.live {
 		out = append(out, fmt.Sprintf("NVMe emulation stand-in: %s presents %s on %s's spare port %d (NVMe/TCP %d-byte blocks, %d bytes, served over NBD)",
-			f.key, f.serial, f.host, f.slot, f.sess.BlockSize(), f.sess.Size()))
+			f.key, f.serial, f.host, f.slot, f.tgt.current().BlockSize(), f.tgt.Size()))
 	}
 	for k, why := range sn.lines {
 		out = append(out, "NVMe emulation stand-in: "+k+": no data path: "+why)

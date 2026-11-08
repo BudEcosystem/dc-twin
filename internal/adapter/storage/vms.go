@@ -325,7 +325,9 @@ func (s *server) fsByID(id string) *engine.StorageObjectView {
 	return nil
 }
 
-// fsName is a file system's name for a VMS path: its segments joined, made a valid name.
+// fsName is a file system's name for a VMS path: its segments joined, made a valid name, and a
+// hash of the path, since joining and replacing characters map distinct paths (/a/b and /a-b,
+// a:b and a_b) to one name.
 func fsName(p string) string {
 	n := strings.ToLower(strings.ReplaceAll(strings.Trim(p, "/"), "/", "-"))
 	var b strings.Builder
@@ -337,11 +339,8 @@ func fsName(p string) string {
 		}
 	}
 	n = strings.TrimLeft(b.String(), "-.")
-	if len(n) > 63 || n == "" {
-		sum := sha256.Sum256([]byte(p))
-		n = strings.TrimRight(n[:min(len(n), 50)], "-.") + "-" + hex.EncodeToString(sum[:6])
-	}
-	return n
+	sum := sha256.Sum256([]byte("/" + strings.Trim(p, "/")))
+	return strings.TrimLeft(strings.TrimRight(n[:min(len(n), 50)], "-.")+"-"+hex.EncodeToString(sum[:6]), "-")
 }
 
 var fullExport = []model.Export{{Clients: "*", Access: "rw", RootSquash: false}}

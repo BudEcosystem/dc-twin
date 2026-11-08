@@ -227,6 +227,10 @@ func TestVolumesAsIronicMakesThem(t *testing.T) {
 	if st, _, _ := send(t, a, d, "POST", base+"/Volumes", `{"RAIDType":"RAID1","Links":{"Drives":[{"@odata.id":"`+drives[0]+`"},{"@odata.id":"`+drives[5]+`"}]}}`); st != http.StatusConflict {
 		t.Fatalf("a drive in two volumes: %d", st)
 	}
+	// nor a mirror over one drive named twice
+	if st, _, _ := send(t, a, d, "POST", base+"/Volumes", `{"RAIDType":"RAID1","Links":{"Drives":[{"@odata.id":"`+drives[5]+`"},{"@odata.id":"`+drives[5]+`"}]}}`); st != http.StatusConflict {
+		t.Fatalf("a drive twice in one volume: %d", st)
+	}
 	// a member fails: degraded; replaced: rebuilding, then optimal
 	hdd0 := d.ComponentBy("hdd-0")
 	if _, err := tw.Engine.Inject(hdd0.Path, "generic/storage/drive-failure", nil, "", actor); err != nil {

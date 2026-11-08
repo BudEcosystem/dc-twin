@@ -65,6 +65,9 @@ func TestDPUNVMeEmulation(t *testing.T) {
 	if _, err := e.AttachEmulatedVolume(r, sys, "vol1"); !errors.Is(err, ErrExists) {
 		t.Fatalf("the same volume twice: %v", err)
 	}
+	if err := e.DeleteStorageObject(Request{Path: sys, Source: stack}, "volume", "vol1"); !errors.Is(err, ErrPrecondition) {
+		t.Fatalf("deleting a volume a DPU presents: %v", err)
+	}
 	if err := e.DetachEmulatedVolume(r, f.ID); err != nil {
 		t.Fatal(err)
 	}

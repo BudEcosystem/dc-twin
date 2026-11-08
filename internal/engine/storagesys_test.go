@@ -2,6 +2,7 @@ package engine
 
 import (
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -75,6 +76,16 @@ func TestStorageSystemObjects(t *testing.T) {
 	if _, err := e.CreateFileSystem(r, FileSystemSpec{Name: "models"}); !errors.Is(err, ErrExists) {
 		t.Fatalf("a second file system of the name: %v", err)
 	}
+	// what reaches a vm node's shell and exports is plain: no shell or exports(5) syntax
+	if _, err := e.CreateFileSystem(r, FileSystemSpec{Name: "x", Path: "/k8s/x; rm -rf /pool"}); !errors.Is(err, ErrPrecondition) {
+		t.Fatalf("a path with shell syntax: %v", err)
+	}
+	if _, err := e.CreateFileSystem(r, FileSystemSpec{Name: "y", Exports: []model.Export{{Clients: "*\nDCTWIN-EXPORTS", Access: "rw"}}}); !errors.Is(err, ErrPrecondition) {
+		t.Fatalf("export clients with a newline: %v", err)
+	}
+	if _, err := e.MapVolume(r, "db-1", "nqn.x; reboot -f", false); !errors.Is(err, ErrPrecondition) {
+		t.Fatalf("a host NQN with shell syntax: %v", err)
+	}
 	if _, err := e.CreateStorageVolume(r, VolumeCreate{Name: "huge", CapacityBytes: v.UsableBytes}); !errors.Is(err, ErrCapacity) {
 		t.Fatalf("a volume beyond the pool: %v", err)
 	}
@@ -113,6 +124,9 @@ func TestStorageSystemFillAndAlerts(t *testing.T) {
 	v, _ = e.StorageSystem(labFS)
 	if !alerted(v, "PoolNearlyFull") || v.UsedPercent < 93 {
 		t.Fatalf("pool near full: %.1f%% %+v", v.UsedPercent, v.Alerts)
+	}
+	if fs := e.Faults(labFS); len(fs) != 1 || len(e.Faults(v.Nodes[0].Path)) != 0 {
+		t.Fatalf("the system's fault listed as its anchor node's: %+v", e.Faults(v.Nodes[0].Path))
 	}
 	if _, err := e.Clear("full", "", user); err != nil {
 		t.Fatal(err)
@@ -156,14 +170,26 @@ func TestStorageSystemFailover(t *testing.T) {
 	if f := v.FileSystems[0]; f.Node != fs.Home || v.State != "Online" {
 		t.Fatalf("after the node is back: %+v %s %+v", f, v.State, v.Alerts)
 	}
-	// a node's storage service fails with its power on
-	if _, err := e.Inject(labFS, "generic/storage-system/node-service-failure", map[string]any{"node": "node-02"}, "svc", user); err != nil {
+	// an enclosure without power takes its drives out of every stripe: the pool degrades
+	jbof := v.Enclosures[0].Path
+	if err := e.Power(Request{Path: jbof, Canonical: "power.off.force", Source: user}); err != nil {
+		t.Fatal(err)
+	}
+	if v, _ = e.StorageSystem(labFS); v.DevicesDown != 1 || !alerted(v, "PoolDegraded") || v.State != "Degraded" {
+		t.Fatalf("its enclosure off: %d %s %+v", v.DevicesDown, v.State, v.Alerts)
+	}
+	if err := e.Power(Request{Path: jbof, Canonical: "power.on", Source: user}); err != nil {
+		t.Fatal(err)
+	}
+	// a node's storage service fails with its power on; racks reuse slot names, so the node is
+	// named with its rack
+	if _, err := e.Inject(labFS, "generic/storage-system/node-service-failure", map[string]any{"node": "s01/node-02"}, "svc", user); err != nil {
 		t.Fatal(err)
 	}
 	v, _ = e.StorageSystem(labFS)
 	for _, n := range v.Nodes {
-		if n.Name == "node-02" && n.Up {
-			t.Fatalf("node-02 with its service failed: %+v", n)
+		if n.Name == "node-02" && n.Up == strings.Contains(n.Path, "/s01/") {
+			t.Fatalf("s01/node-02 with its service failed: %+v", n)
 		}
 	}
 	// more failed pool drives than parity takes the pool offline

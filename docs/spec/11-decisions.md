@@ -1160,7 +1160,10 @@ At `fidelity: vm` each storage node is an `os: twin` guest whose initramfs adds 
 packages at the image's release, pinned by digest and obtained with the image (nfs-utils,
 e2fsprogs, rclone), laid out for its merged `/usr`, and the twin's `dctwin-storage` script. The
 storage adapter drives each node through its in-host agent (D50): its storage address on its
-data port, an ext4 pool on its first data drive, and the objects the model homes on it: a file
+data port (static, `.20` onwards of its segment, numbered over every `vm` system's nodes on the
+network, so the data network is `dhcp: none`), an ext4 pool on its first data drive, and the
+objects the model homes on it, set up again whenever the node no longer serves them (after a
+restart, an object's data is in the pool but its bind mount and subsystem are gone): a file
 system bind-mounted at its path under the NFSv4 pseudo-root `/exports` and exported by the kernel
 NFS server with its export rules, a volume an nvmet subsystem over a file admitting exactly its
 mapped hosts' NQNs on an NVMe/TCP port, a bucket a directory `rclone serve s3` serves. What each
@@ -1181,7 +1184,9 @@ the host is a `vm` host, the stand-in connects to the volume's NVMe/TCP target a
 userspace NVMe/TCP host, `internal/substrate/nvmetcp`) and serves that namespace over NBD
 (`internal/substrate/nbd`) to a QEMU NVMe controller hot-plugged into one of the host's spare root
 ports, with the function's serial: the host's guest reads and writes the storage system's volume
-through an NVMe drive, as SNAP presents a remote volume. **Why:** DOCA SNAP is NVIDIA's binary on
+through an NVMe drive, as SNAP presents a remote volume. Each NVMe/TCP command is bounded, and a
+session whose connection breaks (the node restarted) is dialled again on the next I/O; a volume a
+function presents cannot be deleted until it is detached. **Why:** DOCA SNAP is NVIDIA's binary on
 the BlueField's emulation hardware, which a QEMU Arm cannot run (the deep dive's 5.3). **Not
 modelled:** the function's PCI id is QEMU's, the stand-in runs beside the host's machine rather
 than on the DPU, and DPF's `DPUVolume` objects are not read (the twin's API attaches).

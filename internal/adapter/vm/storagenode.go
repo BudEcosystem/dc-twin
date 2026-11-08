@@ -362,7 +362,7 @@ bucket() { mkdir -p $P/s3/$1; }
 rmbucket() { rm -rf $P/s3/$1; }
 report() {
 	mountpoint -q $P && echo "pool $(df -k $P | awk 'NR==2{print $3*1024, $2*1024}')"
-	for d in $P/fs/*; do [ -d "$d" ] && echo "fs $(basename $d) $(du -sk $d | awk '{print $1*1024}')"; done
+	for d in $P/fs/*; do [ -d "$d" ] && echo "fs $(basename $d) $(du -sk $d | awk '{print $1*1024}') $(awk -v r="/fs/$(basename $d)" '$4 == r {m=1} END {print m+0}' /proc/self/mountinfo)"; done
 	for f in $P/vol/*.img; do [ -f "$f" ] && echo "vol $(basename $f .img) $(du -k $f | awk '{print $1*1024}')"; done
 	for d in $P/s3/*; do [ -d "$d" ] && echo "bucket $(basename $d) $(du -sk $d | awk '{print $1*1024}')"; done
 	for s in $C/subsystems/*; do [ -d "$s" ] && echo "nqn $(basename $s) $(ls $s/allowed_hosts | tr '\n' ' ')"; done

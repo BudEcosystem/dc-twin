@@ -373,7 +373,13 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case p == "/storage" && r.Method == http.MethodPost:
 		s.storageOp(w, r, body, user)
 	case p == "/dpu/emulation" && r.Method == http.MethodGet:
-		v, err := eng.Emulation(q.Get("device"))
+		// the device is a selector, as the POST takes it
+		ds, err := eng.SelectDevices(q.Get("device"))
+		if err != nil || len(ds) != 1 {
+			jsonErr(w, 400, fmt.Sprintf("device %q names %d devices, not one", q.Get("device"), len(ds)))
+			return
+		}
+		v, err := eng.Emulation(ds[0].Path)
 		if err != nil {
 			jsonErr(w, 400, err.Error())
 			return

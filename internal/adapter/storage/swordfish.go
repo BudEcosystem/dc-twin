@@ -349,13 +349,12 @@ func (s *server) render(v engine.StorageSystemView, path string) (map[string]any
 				return s.fileSystemDoc(v, o), "GET, HEAD, PATCH, DELETE"
 			case sub == "ExportedFileShares":
 				var ids []string
-				for i := range o.Exports {
-					ids = append(ids, fs+"/ExportedFileShares/"+strconv.Itoa(i+1))
+				for _, x := range o.Exports {
+					ids = append(ids, fs+"/ExportedFileShares/"+shareID(x))
 				}
 				return collection(path, "#FileShareCollection.FileShareCollection", "Exported File Shares", ids), "GET, HEAD, POST"
 			case strings.HasPrefix(sub, "ExportedFileShares/"):
-				n, err := strconv.Atoi(strings.TrimPrefix(sub, "ExportedFileShares/"))
-				if err == nil && n >= 1 && n <= len(o.Exports) {
+				if n := shareIndex(o.Exports, strings.TrimPrefix(sub, "ExportedFileShares/")); n >= 0 {
 					return s.shareDoc(v, o, n, path), "GET, HEAD, DELETE"
 				}
 			}
@@ -487,15 +486,14 @@ func (s *server) poolDoc(v engine.StorageSystemView) map[string]any {
 	if v.FullPercent > 0 {
 		d["LowSpaceWarningThresholdPercents"] = []any{100 - v.FullPercent}
 	}
-	h := model.OK
+	h, st := model.OK, "Enabled"
 	for _, a := range v.Alerts {
 		if strings.HasPrefix(a.ID, "Pool") {
 			h = model.WorstHealth(h, a.Severity)
 		}
-	}
-	st := "Enabled"
-	if v.DrivesFailed > v.ParityUnits {
-		st = "UnavailableOffline"
+		if a.ID == "PoolFailed" {
+			st = "UnavailableOffline"
+		}
 	}
 	d["Status"] = status(st, h)
 	d["AllocatedVolumes"] = ref(p + "/AllocatedVolumes")
@@ -564,10 +562,27 @@ func (s *server) fileSystemDoc(v engine.StorageSystemView, o engine.StorageObjec
 	return d
 }
 
+// shareID is an export rule's FileShare id: of the rule itself, not its place in the list, so
+// deleting one share leaves the others' URIs as they were.
+func shareID(x model.Export) string {
+	sum := sha256.Sum256([]byte(fmt.Sprintf("%s|%s|%t", x.Clients, x.Access, x.RootSquash)))
+	return hex.EncodeToString(sum[:6])
+}
+
+// shareIndex is the index of the rule a FileShare id names, or -1.
+func shareIndex(ex []model.Export, id string) int {
+	for i, x := range ex {
+		if shareID(x) == id {
+			return i
+		}
+	}
+	return -1
+}
+
 func (s *server) shareDoc(v engine.StorageSystemView, o engine.StorageObjectView, n int, path string) map[string]any {
-	x := o.Exports[n-1]
+	x := o.Exports[n]
 	d := odata(path, "#FileShare.v1_3_0.FileShare")
-	d["Id"], d["Name"] = strconv.Itoa(n), o.Name+" export to "+x.Clients
+	d["Id"], d["Name"] = shareID(x), o.Name+" export to "+x.Clients
 	d["FileSharePath"] = "/" + o.Name
 	d["FileSharingProtocols"] = []any{"NFSv4_1"}
 	caps := []any{"Read"}
@@ -852,6 +867,10 @@ func (s *server) post(w http.ResponseWriter, r *http.Request, path string, src s
 				}
 			}
 		}
+		if shareIndex(fs.Exports, shareID(x)) >= 0 {
+			writeError(w, http.StatusConflict, "Base.1.18.ResourceAlreadyExists", "The file system already has this export rule")
+			return
+		}
 		exports := append(append([]model.Export{}, fs.Exports...), x)
 		if _, err := eng.UpdateFileSystem(s.req(r, "storage.export.create", src), id, nil, exports); err != nil {
 			engineError(w, err)
@@ -860,8 +879,10 @@ func (s *server) post(w http.ResponseWriter, r *http.Request, path string, src s
 		v = s.view()
 		for _, o := range v.FileSystems {
 			if o.ID == id {
-				loc := path + "/" + strconv.Itoa(len(o.Exports))
-				created(w, loc, s.shareDoc(v, o, len(o.Exports), loc))
+				if n := shareIndex(o.Exports, shareID(x)); n >= 0 {
+					loc := path + "/" + shareID(x)
+					created(w, loc, s.shareDoc(v, o, n, loc))
+				}
 			}
 		}
 	case path == fabric+"/Endpoints":
@@ -970,11 +991,11 @@ func (s *server) delete(w http.ResponseWriter, r *http.Request, path string, src
 			err = eng.DeleteStorageObject(s.req(r, "storage.filesystem.delete", src), "filesystem", id)
 			break
 		}
-		n, perr := strconv.Atoi(strings.TrimPrefix(sub, "ExportedFileShares/"))
+		share, _ := strings.CutPrefix(sub, "ExportedFileShares/")
 		v := s.view()
 		for _, o := range v.FileSystems {
-			if o.ID == id && perr == nil && n >= 1 && n <= len(o.Exports) {
-				ex := append(append([]model.Export{}, o.Exports[:n-1]...), o.Exports[n:]...)
+			if n := shareIndex(o.Exports, share); o.ID == id && n >= 0 {
+				ex := append(append([]model.Export{}, o.Exports[:n]...), o.Exports[n+1:]...)
 				_, err = eng.UpdateFileSystem(s.req(r, "storage.export.delete", src), id, nil, ex)
 				goto done
 			}
