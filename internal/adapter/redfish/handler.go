@@ -161,6 +161,10 @@ func (b *bmc) get(w http.ResponseWriter, r *http.Request, path string) {
 		b.serveSSE(w, r)
 		return
 	}
+	if strings.HasPrefix(path, TaskMonitorPath) {
+		b.taskMonitor(w, r, path)
+		return
+	}
 	if x, ok := b.xmlDoc(path); ok {
 		b.logRead(r, path, 200)
 		w.Header().Set("Content-Type", "application/xml")
@@ -184,6 +188,9 @@ func (b *bmc) get(w http.ResponseWriter, r *http.Request, path string) {
 		b.expandQuery(rd, doc, ex)
 	}
 	w.Header().Set("ETag", fmt.Sprintf(`W/"%d"`, b.a.eng.Seq()))
+	if allow := b.storageAllow(path); allow != "" {
+		w.Header().Set("Allow", allow)
+	}
 	writeJSON(w, 200, doc)
 }
 
@@ -333,6 +340,9 @@ var resetMap = map[string]string{
 func (b *bmc) post(w http.ResponseWriter, r *http.Request, path string, src schema.EventSource) {
 	body := readBody(r)
 	eng := b.a.eng
+	if b.storagePost(w, r, path, body, src) {
+		return
+	}
 	fail := func(err error) {
 		status, id := http.StatusBadRequest, "Base.1.8.ActionNotSupported"
 		switch {
@@ -459,7 +469,10 @@ func (b *bmc) post(w http.ResponseWriter, r *http.Request, path string, src sche
 			canonical = "media.eject"
 		}
 		res := strings.SplitN(path, "/Actions/", 2)[0]
-		props := map[string]any{"Inserted": canonical == "media.insert", "Image": body["Image"]}
+		props := map[string]any{"Inserted": canonical == "media.insert", "Image": body["Image"], "ConnectedVia": "NotConnected"}
+		if canonical == "media.insert" {
+			props["ConnectedVia"] = "URI"
+		}
 		_ = eng.Patch(b.request(r, path, canonical, src), res, props)
 		w.WriteHeader(http.StatusNoContent)
 	case strings.HasSuffix(path, "/Actions/EventService.SubmitTestEvent"):
@@ -713,6 +726,9 @@ func lockdownIn(body map[string]any) (bool, bool) {
 
 func (b *bmc) delete(w http.ResponseWriter, r *http.Request, path string, src schema.EventSource) {
 	eng := b.a.eng
+	if b.storageDelete(w, r, path, src) {
+		return
+	}
 	var err error
 	switch {
 	case strings.HasPrefix(path, "/redfish/v1/SessionService/Sessions/"):

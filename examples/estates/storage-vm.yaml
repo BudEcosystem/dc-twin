@@ -1,0 +1,46 @@
+# One x86_64 server at vm fidelity with its drives (docs/reviews/2026-11-08-storage-deep-dive.md
+# 5.1): each of the generic 2U server's two NVMe drives is a QEMU NVMe controller in the guest,
+# with the model's serial, model and firmware strings, on a sparse backing in the state directory.
+# A drive fault raises its SMART bits or takes it off the guest's PCIe bus; a replacement brings
+# an empty one back; Redfish SecureErase (with the host off) empties it.
+#
+# Needs Linux with KVM, OVMF, and QEMU 11.1 or later for the drives' model strings; for a stack
+# that rebuilds namespaces (NICo's scout), QEMU built by scripts/qemu/build.sh:
+#   bin/dctwin assets fetch
+#   bin/dctwin up examples/estates/storage-vm.yaml --adapters redfish,ipmi,vm,inhost
+#   bin/dctwin drive pull c01/server-01/nvme-1
+apiVersion: dc-twin/v1alpha1
+kind: Estate
+metadata: { name: storage-vm }
+spec:
+  seed: 4242
+  clock: wall
+  timeScale: 0.05
+  packs: [generic@0.1.0]
+  fidelity:
+    default: model
+    overrides:
+      - { select: "c01/server-01", level: vm, os: twin }
+  adapters:
+    vm: { memoryMB: 1024, cpus: 2 }
+  sites:
+    - name: site-1
+      halls:
+        - name: hall-a
+          rows:
+            - name: c
+              positions: 4
+              racks:
+                - { name: c01, position: 1, format: generic/cpu-rack, params: { servers: 2 }, feeds: [A, B] }
+                - { name: c04, position: 4, format: generic/network-rack }
+  networks:
+    oob:          { role: management,   dhcp: twin, cidr: 10.30.0.0/20, fabric: oob }
+    provisioning: { role: provisioning, dhcp: twin, cidr: 10.40.0.0/20, fabric: frontend }
+    frontend:     { role: frontend,     fabric: frontend }
+    service:      { role: service,      cidr: 10.90.0.0/24, dhcp: none }
+  fabrics:
+    - { name: oob,      template: oob-flat,   nos: none }
+    - { name: frontend, template: clos-2tier, nos: none, params: { leafsPerRack: 2, spines: 2 }, placeIn: c04 }
+  facility:
+    power: { feeds: [{ name: A, capacityW: 100000 }, { name: B, capacityW: 100000 }] }
+  stacks: []

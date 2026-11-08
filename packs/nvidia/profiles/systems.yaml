@@ -58,7 +58,8 @@ spec:
     - { name: cx7, kind: nic, count: 8, model: "ConnectX-7 400G" }
     - { name: psu, kind: psu, count: 6, model: "3300 W" }
     - { name: fan, kind: fan, count: 12, model: "fan module" }
-    - { name: nvme, kind: drive, count: 8, model: "NVMe 3.84 TB" }
+    - { name: os, kind: drive, count: 2, model: "NVMe 1.92 TB M.2", role: boot, formFactor: m.2 }
+    - { name: nvme, kind: drive, count: 8, model: "NVMe 3.84 TB U.2", role: data, formFactor: u.2 }
     - { name: tpm, kind: tpm, count: 1, model: "TPM 2.0" }
   bmc: { dialect: nvidia/dgx, ipmi: true }
   ports:
@@ -66,6 +67,9 @@ spec:
     - { name: "cx7-{0..7}", kind: infiniband, speed: 400G, role: scale-out }
     - { name: eth0, kind: ethernet, speed: 200G, role: provisioning }
     - { name: eth1, kind: ethernet, speed: 200G, role: frontend }
+    # the first ports of the two dual-port ConnectX-7 in slots 1 and 2: storage (DGX BasePOD network
+    # overview; their second ports, bonded, are eth0/eth1's in-band and frontend)
+    - { name: "stor{0..1}", kind: ethernet, speed: 400G, role: storage }
     - { name: "psu-{0..1}", kind: power-in, source: pdu }
   power: { standbyW: 80, idleW: 2500, maxW: 10200 }
   cooling: { kind: air }
@@ -78,7 +82,7 @@ spec:
     - { component: bios, baseline: "01.01.03", applyOn: reset }
     - { component: cpld, baseline: "0.2.1.8", applyOn: reset }   # CPLDMB_0, as the captured DGX has it
   behaviours: { power: { onSeconds: 60, offSeconds: 15 }, bmc: { bootSeconds: 90 } }
-  faults: [generic/power, generic/bmc, generic/thermal, generic/link, generic/firmware, nvidia/xid]
+  faults: [generic/power, generic/bmc, generic/thermal, generic/link, generic/firmware, nvidia/xid, generic/storage]
   fidelity: { model: {}, vm: { arch: x86_64, firmware: uefi, tpm: true, inHost: [nvidia/mokka], cost: { ramGB: 8, vcpu: 4 } } }
   kubernetes: { resources: { "nvidia.com/gpu": 8 } }
   metrics: { exporter: dcgm }

@@ -256,5 +256,19 @@ func TestZeroDPUServerIsDiscoveredOnItsProvisioningPort(t *testing.T) {
 		if len(ifs) != 1 || str(ifs[0].(map[string]any), "mac_address") != strings.ToLower(p.MAC) || str(info, "machine_arch") != "X86_64" {
 			t.Errorf("%s: scout reported %v", h.path, info)
 		}
+		// scout reported the host's NVMe drives, and its cleanup erased them
+		nvmes, _ := info["nvme_devices"].([]any)
+		var want []string
+		for _, c := range h.dev.Drives() {
+			if c.Drive.Controller == nil && c.Drive.Protocol == "nvme" {
+				want = append(want, c.Drive.Serial)
+				if got := tw.Engine.DriveStatus(c).Contents; got != engine.ContentsErased {
+					t.Errorf("%s: after scout's cleanup %s holds %q", h.path, c.Name, got)
+				}
+			}
+		}
+		if len(nvmes) != len(want) || (len(want) > 0 && str(nvmes[0].(map[string]any), "serial") != want[0]) {
+			t.Errorf("%s: scout's nvme_devices %v, want serials %v", h.path, nvmes, want)
+		}
 	}
 }

@@ -228,6 +228,7 @@ window.TC = window.TC || {};
     let body;
     if (S.screen === 'topology') body = V.topology(A, M);
     else if (S.screen === 'facility') body = V.facility(A, M);
+    else if (S.screen === 'storage') body = V.storage(A, M);
     else if (S.screen === 'scenarios') body = V.scenarios(A, M);
     else if (S.screen === 'design') body = A.draft ? V.designer(A, M) : V.design(A, M);
     else body = V.cockpit(A, M);

@@ -253,8 +253,8 @@ var gbRe = regexp.MustCompile(`(?i)(\d+(?:\.\d+)?)\s*GB\b`)
 
 // machineSize is cpu cores, memory bytes and local disk bytes, from the component models where
 // they say ("NVIDIA Grace, 72 cores", "DDR5 64 GB", "NVMe 3.84 TB") and twin defaults where
-// they do not: 32 cores a socket and 8 GiB a core. Local disk is the largest single drive (the
-// root filesystem a kubelet reports as ephemeral-storage). The fidelity report says so.
+// they do not: 32 cores a socket and 8 GiB a core. Local disk is the boot drive (the root
+// filesystem a kubelet reports as ephemeral-storage), else the largest. The fidelity report says so.
 func machineSize(d *model.Device) (cores, mem, disk int64) {
 	var memBytes, diskBytes float64
 	for _, c := range d.Components {
@@ -268,8 +268,11 @@ func machineSize(d *model.Device) (cores, mem, disk int64) {
 			}
 		case "drive":
 			// ephemeral-storage is the kubelet's root filesystem: one drive, not the sum.
-			diskBytes = math.Max(diskBytes, model.DriveBytes(c))
+			diskBytes = math.Max(diskBytes, driveBytes(c))
 		}
+	}
+	if bd := d.BootDrive(); bd != nil && bd.Drive != nil && bd.Drive.Role == "boot" && bd.Drive.CapacityBytes > 0 {
+		diskBytes = float64(bd.Drive.CapacityBytes)
 	}
 	if cores == 0 {
 		cores = 4
@@ -289,6 +292,8 @@ type observed struct {
 	hostCritical  bool // Critical from something other than an accelerator
 	accels        []accelObs
 	faults        []engine.FaultView
+	// diskPressure is the host's root file system full (generic/storage/filesystem-full)
+	diskPressure bool
 }
 
 type accelObs struct {
@@ -314,6 +319,9 @@ func observe(e *engine.Engine, d *model.Device) observed {
 		o.accels = append(o.accels, accelObs{group: c.Group, name: c.Name, path: c.Path, health: h, state: st})
 	}
 	o.faults = e.Faults(d.Path)
+	if v, ok := e.FaultSets(d)["node.diskPressure"]; ok && (v == true || fmt.Sprint(v) == "true") {
+		o.diskPressure = true
+	}
 	return o
 }
 
@@ -372,7 +380,8 @@ func desire(s staticNode, path string, o observed) desired {
 		notReady(ReasonCritical, msg)
 	}
 	des.conditions = append(des.conditions, ready)
-	// The pressure conditions a kubelet always posts; the model has no memory, disk or PID state.
+	// The pressure conditions a kubelet always posts; the model has no memory or PID state, and
+	// disk pressure only as a full root file system (generic/storage/filesystem-full).
 	for _, p := range []struct {
 		t      corev1.NodeConditionType
 		reason string
@@ -383,6 +392,9 @@ func desire(s staticNode, path string, o observed) desired {
 		{corev1.NodePIDPressure, "KubeletHasSufficientPID", "kubelet has sufficient PID available"},
 	} {
 		c := corev1.NodeCondition{Type: p.t, Status: corev1.ConditionFalse, Reason: p.reason, Message: p.msg}
+		if p.t == corev1.NodeDiskPressure && o.diskPressure {
+			c.Status, c.Reason, c.Message = corev1.ConditionTrue, "KubeletHasDiskPressure", "kubelet has disk pressure"
+		}
 		if !des.up {
 			c.Status, c.Reason, c.Message = corev1.ConditionUnknown, "HostNotRunning", "dc-twin model: the host is not running"
 		}
@@ -531,4 +543,12 @@ func gpuArch(product string) (family, major, minor string) {
 		}
 	}
 	return "", "", ""
+}
+
+// driveBytes is a drive's size: the model's, else its model string's.
+func driveBytes(c *model.Component) float64 {
+	if c.Drive != nil && c.Drive.CapacityBytes > 0 {
+		return float64(c.Drive.CapacityBytes)
+	}
+	return model.DriveBytes(c)
 }

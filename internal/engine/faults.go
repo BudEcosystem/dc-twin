@@ -3,6 +3,7 @@ package engine
 import (
 	"fmt"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -20,13 +21,16 @@ type ActiveFault struct {
 	ID string
 	// Group is the id the fault was injected under when one inject named several targets (each
 	// then gets "<group>-<n>"); clearing the group's id clears them all.
-	Group      string
-	Fault      string
-	Title      string
-	Target     string
-	Device     *model.Device
-	Component  *model.Component
-	Port       *model.Port
+	Group     string
+	Fault     string
+	Title     string
+	Target    string
+	Device    *model.Device
+	Component *model.Component
+	Port      *model.Port
+	// System is the storage system a storageSystem-target fault is on; Device is then its first
+	// node, which anchors it (its fidelity) but takes none of its effects.
+	System     *model.StorageSystem
 	Params     map[string]any
 	Since      time.Time
 	Seq        uint64
@@ -55,7 +59,7 @@ func (f *ActiveFault) View() FaultView {
 func (e *Engine) faultsOn(d *model.Device) []*ActiveFault {
 	var out []*ActiveFault
 	for _, f := range e.faults {
-		if f.Device == d && f.Component == nil && f.Port == nil {
+		if f.Device == d && f.Component == nil && f.Port == nil && f.System == nil {
 			out = append(out, f)
 		}
 	}
@@ -76,7 +80,7 @@ func (e *Engine) faultsOnComponent(c *model.Component) []*ActiveFault {
 func (e *Engine) faultsTouching(d *model.Device) []*ActiveFault {
 	var out []*ActiveFault
 	for _, f := range e.faults {
-		if f.Device == d {
+		if f.Device == d && f.System == nil {
 			out = append(out, f)
 		}
 	}
@@ -109,10 +113,17 @@ func (e *Engine) injectLocked(selStr, faultID string, params map[string]any, id 
 		d    *model.Device
 		c    *model.Component
 		p    *model.Port
+		s    *model.StorageSystem
 		path string
 	}
 	var targets []target
 	switch {
+	case t.StorageSystem:
+		for _, s := range e.M.StorageSystems {
+			if sel.MatchPath(s.Path) || selStr == s.Name || selStr == "storage/"+s.Name {
+				targets = append(targets, target{d: s.Nodes[0], s: s, path: s.Path})
+			}
+		}
 	case t.Port:
 		for r, p := range e.M.Ports {
 			if sel.MatchPort(r) {
@@ -155,6 +166,10 @@ func (e *Engine) injectLocked(selStr, faultID string, params map[string]any, id 
 				if e.M.PowerBy[d.Path] == nil {
 					continue
 				}
+			case "host":
+				if !d.IsHost() {
+					continue
+				}
 			}
 			targets = append(targets, target{d: d, path: d.Path})
 		}
@@ -166,7 +181,10 @@ func (e *Engine) injectLocked(selStr, faultID string, params map[string]any, id 
 	catalogue := ref.Catalogue.Metadata.Name
 	var out []*ActiveFault
 	for i, tg := range targets {
-		if !allowed(tg.d, catalogue) {
+		if tg.s != nil && !slices.Contains(tg.s.Faults, catalogue) {
+			return out, fmt.Errorf("fault %s refused on %s: template %s does not list catalogue %s (a strict allow-list)", faultID, tg.path, tg.s.Template, catalogue)
+		}
+		if tg.s == nil && !allowed(tg.d, catalogue) {
 			return out, fmt.Errorf("fault %s refused on %s: profile %s does not list catalogue %s (a strict allow-list)", faultID, tg.path, tg.d.ProfileName, catalogue)
 		}
 		fid := id
@@ -181,13 +199,13 @@ func (e *Engine) injectLocked(selStr, faultID string, params map[string]any, id 
 		if id != "" && len(targets) > 1 {
 			group = id
 		}
-		f := &ActiveFault{ID: fid, Group: group, Fault: faultID, Title: ref.Spec.Title, Target: tg.path, Device: tg.d, Component: tg.c, Port: tg.p,
+		f := &ActiveFault{ID: fid, Group: group, Fault: faultID, Title: ref.Spec.Title, Target: tg.path, Device: tg.d, Component: tg.c, Port: tg.p, System: tg.s,
 			Params: resolveParams(ref.Spec, params), Since: e.now, Spec: ref.Spec, Source: src, Sets: map[string]any{}}
 		f.Seq = e.commit(schema.Event{Kind: "fault", Source: src, Path: tg.path, Cause: cause, Severity: "Warning",
 			Message: "inject " + faultID + ": " + ref.Spec.Title, Data: map[string]any{"fault": faultID, "id": fid, "params": f.Params}})
 		e.faults = append(e.faults, f)
 		e.applyEffects(f)
-		if tg.c == nil && tg.p == nil && tg.d.HasBMC() && !e.bmcAvailable(tg.d) {
+		if tg.c == nil && tg.p == nil && tg.s == nil && tg.d.HasBMC() && !e.bmcAvailable(tg.d) {
 			// a fault that hangs or resets the BMC (generic/bmc/unreachable, generic/bmc/reset)
 			// takes it down as a reset does: the update tasks it was running are lost (D53)
 			e.abortFirmwareTasks(tg.d, "the management controller became unavailable ("+faultID+")", f.Seq)
@@ -215,6 +233,8 @@ func describeTarget(t schema.FaultTarget) string {
 		return "device of class " + t.Device
 	case t.DeviceWith == "breaker":
 		return "power-chain node (UPS, busway or panel)"
+	case t.DeviceWith == "host":
+		return "host (server or compute tray)"
 	case t.DeviceWith != "":
 		return "device with a " + t.DeviceWith
 	}
@@ -270,6 +290,10 @@ func (f *ActiveFault) subst(v any) any {
 		case "index":
 			if f.Component != nil {
 				return strconv.Itoa(f.Component.Index)
+			}
+		case "bay":
+			if f.Component != nil && f.Component.Drive != nil {
+				return strconv.Itoa(f.Component.Drive.Bay)
 			}
 		case "pci":
 			if f.Component != nil {
@@ -426,6 +450,12 @@ func (e *Engine) applyEffects(f *ActiveFault) {
 				e.propagate(f, fmt.Sprint(body))
 			case "attestation":
 				f.Sets["attestation"] = m["result"]
+			case "storage":
+				// on a storage system (storagesys.go reads them): usedPercent, offline, nodeDown,
+				// alert and severity
+				for k, v := range m {
+					f.Sets["storage."+k] = f.subst(v)
+				}
 			default:
 				f.NotApplied = append(f.NotApplied, "unknown effect "+verb)
 			}
@@ -579,7 +609,7 @@ func (e *Engine) Faults(sel string) []FaultView {
 	s, _ := selector.Parse(sel)
 	var out []FaultView
 	for _, f := range e.faults {
-		if sel == "" || s.MatchPath(f.Target) || s.MatchPort(f.Target) || s.MatchPath(f.Device.Path) {
+		if sel == "" || s.MatchPath(f.Target) || s.MatchPort(f.Target) || (f.System == nil && s.MatchPath(f.Device.Path)) {
 			out = append(out, f.View())
 		}
 	}

@@ -219,3 +219,96 @@ spec:
       effects: [{ set: { "firmware.failNext": true } }]
       clears: { manual: true }
       isNot: []
+---
+apiVersion: dc-twin/v1alpha1
+kind: FaultCatalogue
+metadata: { name: generic/storage, version: 0.1.0 }
+spec:
+  isNot:
+    - "A drive's state is the model's: SMART values, wear and temperature are set by the fault, not measured from writes."
+    - "At vm, QEMU's NVMe SMART log carries the critical-warning bits; its spare, wear and media-error fields stay zero."
+  faults:
+    - name: drive-failure
+      title: "Drive failed"
+      target: { component: drive }
+      effects:
+        - set: { health: Critical, state: offline, "drive.failed": true }
+        - redfish.logEntry: { severity: Critical, message: "Drive {component} in bay {bay} failed.", messageId: "StorageDevice.1.2.DriveFailure" }
+        # as the Linux NVMe driver logs a controller that stops answering (Fleet Intelligence's
+        # nvme_controller_timeout and nvme_device_disabled)
+        - kernelLog: { line: "nvme nvme{bay}: I/O tag 0 (0000) opcode 0x2 (Read) QID 1 timeout, reset controller", appliesAt: [vm] }
+        - kernelLog: { line: "nvme nvme{bay}: Disabling device after reset failure: -19", appliesAt: [vm] }
+      clears: { on: [component.replaced], manual: true }
+      isNot: ["At vm the drive leaves the guest's PCIe bus (hot removal); a real failing drive may instead hang in place."]
+    - name: missing
+      title: "Drive does not enumerate"
+      target: { component: drive }
+      effects:
+        - set: { health: Critical, state: absent, "drive.present": false }
+        - redfish.logEntry: { severity: Critical, message: "Drive {component} in bay {bay} is missing.", messageId: "StorageDevice.1.2.DriveRemoved" }
+      clears: { on: [component.replaced], manual: true }
+      isNot: []
+    - name: predictive-failure
+      title: "Drive predicts its own failure (SMART reliability degraded)"
+      target: { component: drive }
+      effects:
+        - set: { health: Warning, "drive.failurePredicted": true, "smart.criticalWarning": 4 }
+        - redfish.logEntry: { severity: Warning, message: "Drive {component} in bay {bay} predicts a failure.", messageId: "StorageDevice.1.2.DrivePredictiveFailure" }
+      clears: { on: [component.replaced], manual: true }
+      isNot: []
+    - name: spare-low
+      title: "Available spare below threshold"
+      target: { component: drive }
+      params: { spare: { type: int, default: 5, range: [0, 9] } }
+      effects:
+        - set: { health: Warning, "smart.criticalWarning": 1, "drive.availableSpare": "{spare}", "drive.lifeLeftPercent": 4 }
+      clears: { on: [component.replaced], manual: true }
+      isNot: []
+    - name: endurance-worn
+      title: "Drive endurance used up (percentage used over 100)"
+      target: { component: drive }
+      params: { percentageUsed: { type: int, default: 102, range: [90, 255] } }
+      effects:
+        - set: { health: Warning, "drive.percentageUsed": "{percentageUsed}", "drive.lifeLeftPercent": 0, "smart.criticalWarning": 4 }
+      clears: { on: [component.replaced], manual: true }
+      isNot: []
+    - name: over-temperature
+      title: "Drive over its temperature threshold"
+      target: { component: drive }
+      params: { temperatureC: { type: int, default: 82, range: [60, 110] } }
+      effects:
+        - set: { health: Warning, "smart.criticalWarning": 2, "drive.temperatureC": "{temperatureC}" }
+      clears: { manual: true }
+      isNot: []
+    - name: read-only
+      title: "Drive media read-only"
+      target: { component: drive }
+      effects:
+        - set: { health: Critical, "drive.readOnly": true, "smart.criticalWarning": 8 }
+        - kernelLog: { line: "EXT4-fs (nvme{bay}n1): Remounting filesystem read-only", appliesAt: [vm] }
+      clears: { on: [component.replaced], manual: true }
+      isNot: ["At vm the namespace is not made read-only to the guest; its SMART log says so."]
+    - name: media-errors
+      title: "Uncorrectable media errors"
+      target: { component: drive }
+      params: { count: { type: int, default: 16, range: [1, 100000] } }
+      effects:
+        - set: { health: Warning }
+        - counter: { mediaErrors: "+{count}" }
+        - kernelLog: { line: "Buffer I/O error on dev nvme{bay}n1, logical block 0, async page read", appliesAt: [vm] }
+      clears: { on: [component.replaced], manual: true }
+      isNot: []
+    - name: erase-fails
+      title: "The next secure erase of the drive fails"
+      target: { component: drive }
+      effects:
+        - set: { "drive.eraseFails": true }
+      clears: { on: [component.replaced], manual: true }
+      isNot: []
+    - name: filesystem-full
+      title: "The host's root file system is full (DiskPressure)"
+      target: { deviceWith: host }
+      effects:
+        - set: { "node.diskPressure": true, "filesystem.availPercent": 1 }
+      clears: { manual: true }
+      isNot: ["Only the model's view (KWOK's DiskPressure, exporters) fills; nothing is written to a guest's disk."]

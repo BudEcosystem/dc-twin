@@ -527,3 +527,48 @@ func TestParseSiteNetwork(t *testing.T) {
 		}
 	}
 }
+
+// On a network without DHCP the twin gives the port its gateway, and reaches a service the guest
+// serves at its static address from there (a storage node's targets).
+func TestHostPortDialsIntoTheGuest(t *testing.T) {
+	cab := newMemCable()
+	hp, err := NewHostPort(cab, HostPortConfig{Ref: "node:stor0", MAC: guestMAC})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer hp.Close()
+	defer cab.close()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if _, err := hp.Dial(ctx, netip.MustParseAddrPort("10.40.2.10:2049")); err == nil {
+		t.Fatal("dialled with no gateway")
+	}
+	if err := hp.SetGateway(netip.MustParsePrefix("10.40.2.1/24"), net.HardwareAddr{0x02, 0xdc, 0, 0, 0, 0x02}); err != nil {
+		t.Fatal(err)
+	}
+	g := guestStack(t, cab) // the guest at 10.40.2.10/24
+	ln, err := gonet.ListenTCP(g, tcpip.FullAddress{NIC: 1, Port: 2049}, ipv4.ProtocolNumber)
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		c, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		fmt.Fprintf(c, "hello from the guest to %s", c.RemoteAddr())
+		c.Close()
+	}()
+	c, err := hp.Dial(ctx, netip.MustParseAddrPort("10.40.2.10:2049"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := io.ReadAll(c)
+	c.Close()
+	if !strings.HasPrefix(string(b), "hello from the guest to 10.40.2.1:") {
+		t.Fatalf("read %q", b)
+	}
+	if _, err := hp.Dial(ctx, netip.MustParseAddrPort("10.41.0.1:2049")); err == nil {
+		t.Fatal("dialled off the segment")
+	}
+}

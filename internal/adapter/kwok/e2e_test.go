@@ -221,6 +221,9 @@ func TestKwokAndMetricsEndToEnd(t *testing.T) {
 	sampled := map[string]bool{}
 	var trayEP *metrics.Endpoint
 	for _, ep := range ma.Endpoints() {
+		if ep.Storage() {
+			continue
+		}
 		fams, body, err := scrape(ep.Local)
 		if err != nil {
 			t.Fatalf("scrape %s: %v", ep.Site, err)

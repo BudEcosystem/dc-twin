@@ -1,0 +1,36 @@
+apiVersion: dc-twin/v1alpha1
+kind: DeviceProfile
+metadata: { name: generic/nvme-jbof-2u, version: 0.1.0 }
+spec:
+  class: appliance
+  form: { mounting: rack, units: 2 }
+  identity: { serialFormat: "JB{alnum:10}", macOUI: "02:dc:06", manufacturer: "dc-twin", model: "Generic 2U NVMe-oF JBOF" }
+  components:
+    - { name: iom, kind: nic, count: 2, model: "I/O module, 2x200GbE NVMe-oF" }
+    - { name: nvme, kind: drive, count: 24, model: "NVMe 30.72 TB", role: data, formFactor: e3.s, firmware: "3.0.2" }
+    - { name: psu, kind: psu, count: 2, model: "2000 W" }
+    - { name: fan, kind: fan, count: 6, model: "80 mm" }
+  bmc: { dialect: generic/dmtf, ipmi: true, console: none }
+  ports:
+    - { name: bmc0, kind: ethernet, speed: 1G, role: management }
+    - { name: "stor{0..3}", kind: ethernet, speed: 200G, role: storage }
+    - { name: "psu-{0..1}", kind: power-in, source: pdu }
+  power: { standbyW: 40, idleW: 350, maxW: 1100 }
+  cooling: { kind: air }
+  sensors:
+    - { name: inlet, quantity: temperature, unit: C, warn: 35, crit: 45, source: inlet }
+    - { name: power, quantity: power, unit: W, source: power }
+  firmware:
+    - { component: bmc, baseline: "1.4.0", applyOn: reset }
+    - { component: iom, baseline: "2.8.1", applyOn: reset }
+  behaviours:
+    storage: { eraseSeconds: 8, eraseSecondsPerTB: 60, rebuildSeconds: 120 }
+  faults: [generic/power, generic/bmc, generic/thermal, generic/link, generic/firmware, generic/storage]
+  fidelity: { model: {} }
+  provides:
+    - { capability: "redfish/dialect:generic/dmtf", at: [model] }
+    - { capability: redfish/secure-erase, at: [model] }
+  isNot:
+    all: ["A generic archetype: a drive enclosure presented as one Redfish system whose direct drives are its bays; no enclosure (SES) resources and no NVMe-oF data path of its own."]
+  sources:
+    - { what: "archetype: an EBOF/JBOF (SNIA Swordfish NVMeEBOF and PCIeJBOF profiles)", url: "https://github.com/SNIA/Swordfish-Publications", date: 2026-11-08 }

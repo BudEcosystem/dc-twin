@@ -130,6 +130,7 @@ func Compile(est *schema.Estate, reg *pack.Registry, opt Options) (*Result, erro
 	c.powerInputs()
 	c.powerChain()
 	c.networks()
+	c.storageSystems()
 	c.domains()
 	c.loops()
 	c.validate()
@@ -586,12 +587,29 @@ func (c *compiler) newDevice(r *model.Rack, hall *model.Hall, parentPath, name s
 		}
 	}
 	// components (and sub-devices)
+	type behind struct {
+		drive      *model.Component
+		controller string
+	}
+	var wiring []behind
+	bay := 0
 	for _, cs := range p.Spec.Components {
 		for i := 0; i < cs.Count; i++ {
 			cname := fmt.Sprintf("%s-%0*d", cs.Name, cs.Pad, i)
 			comp := &model.Component{Path: path + "/" + cname, Name: cname, Group: cs.Name, Kind: cs.Kind, Model: cs.Model,
 				Vendor: cs.Vendor, Index: i, Device: d, MaxW: cs.MaxW, MemoryMiB: accelMemoryMiB(cs), SerialShare: cs.SerialShare, State: model.ComponentState{Counters: map[string]float64{}}}
 			d.Components = append(d.Components, comp)
+			switch cs.Kind {
+			case "drive":
+				comp.Drive = c.driveInfo(comp, cs, major)
+				comp.Drive.Bay = bay
+				bay++
+				if cs.Controller != "" {
+					wiring = append(wiring, behind{comp, cs.Controller})
+				}
+			case "storage-controller":
+				comp.Controller = &model.ControllerInfo{RAIDTypes: append([]string{}, cs.RAIDTypes...)}
+			}
 			for _, ps := range cs.Ports {
 				lanes := ps.Lanes
 				if lanes == 0 {
@@ -612,6 +630,22 @@ func (c *compiler) newDevice(r *model.Rack, hall *model.Hall, parentPath, name s
 			}
 		}
 	}
+	// drives behind a storage controller: the first controller of the named group
+	for _, w := range wiring {
+		var ctl *model.Component
+		for _, x := range d.Components {
+			if x.Kind == "storage-controller" && (x.Group == w.controller || x.Name == w.controller) {
+				ctl = x
+				break
+			}
+		}
+		if ctl == nil {
+			c.errf("profile %s: drive %s names controller %q, which is no storage-controller component", p.Metadata.Name, w.drive.Group, w.controller)
+			continue
+		}
+		w.drive.Drive.Controller = ctl
+		ctl.Controller.Drives = append(ctl.Controller.Drives, w.drive)
+	}
 	// the BMC's MAC is its management port's
 	if d.HasBMC() {
 		if bp := bmcPort(d); bp != nil {
@@ -621,6 +655,49 @@ func (c *compiler) newDevice(r *model.Rack, hall *model.Hall, parentPath, name s
 		}
 	}
 	return d
+}
+
+// driveInfo derives a drive's facts and identity from its profile entry: its serial and its
+// namespace's EUI-64 derive from its own path, as every identity does (D26).
+func (c *compiler) driveInfo(comp *model.Component, cs schema.ComponentSpec, major string) *model.DriveInfo {
+	di := &model.DriveInfo{CapacityBytes: cs.CapacityBytes, Media: cs.Media, Protocol: cs.Protocol, FormFactor: cs.FormFactor,
+		Role: cs.Role, Firmware: cs.Firmware, PartNumber: cs.PartNumber, Manufacturer: cs.Vendor}
+	if di.CapacityBytes == 0 {
+		di.CapacityBytes = int64(model.DriveBytes(comp))
+	}
+	if di.Media == "" {
+		di.Media = "ssd"
+	}
+	if di.Protocol == "" {
+		di.Protocol = "sata"
+		if strings.Contains(strings.ToUpper(cs.Model), "NVME") {
+			di.Protocol = "nvme"
+		}
+	}
+	switch di.Media {
+	case "ssd", "hdd":
+	default:
+		c.errf("%s: drive media %q: ssd or hdd", comp.Path, di.Media)
+	}
+	switch di.Protocol {
+	case "nvme", "sata", "sas":
+	default:
+		c.errf("%s: drive protocol %q: nvme, sata or sas", comp.Path, di.Protocol)
+	}
+	switch di.Role {
+	case "", "boot", "data", "cache":
+	default:
+		c.errf("%s: drive role %q: boot, data or cache", comp.Path, di.Role)
+	}
+	format := cs.SerialFormat
+	if format == "" {
+		format = "{upper:3}{alnum:11}"
+	}
+	di.SerialFormat = format
+	di.Serial = c.id.Serial(comp.Path, major, format, 0)
+	// a locally administered EUI-64 (02:dc:7e…), never a drive vendor's
+	di.EUI64 = strings.TrimPrefix(c.id.GUID(comp.Path, major, "eui64", "0x02dc7e", 0), "0x")
+	return di
 }
 
 // bmcPort is the port the BMC is reached on: bmc0, else the first management-role port.
@@ -831,8 +908,13 @@ func (c *compiler) networks() {
 		names = append(names, n)
 	}
 	sort.Strings(names)
+	var overlays []string
 	for _, name := range names {
 		ns := c.est.Spec.Networks[name]
+		if ns.Overlay != nil {
+			overlays = append(overlays, name)
+			continue
+		}
 		switch ns.Role {
 		case "management", "provisioning", "frontend", "scale-out", "storage", "service":
 		default:
@@ -897,6 +979,51 @@ func (c *compiler) networks() {
 				}
 			}
 		}
+	}
+	c.overlayNetworks(overlays)
+}
+
+// overlayNetworks are the networks that ride another's ports (spec.networks.<n>.overlay): checked,
+// and given that network's ports and fabric. They take no ports of their own role.
+func (c *compiler) overlayNetworks(names []string) {
+	for _, name := range names {
+		ns := c.est.Spec.Networks[name]
+		o := ns.Overlay
+		switch ns.Role {
+		case "management", "provisioning", "frontend", "scale-out", "storage", "service":
+		default:
+			c.errf("network %s: role %q", name, ns.Role)
+		}
+		base := c.m.Networks[o.On]
+		if base == nil {
+			c.errf("network %s: overlay on %q, which is no network with ports of its own", name, o.On)
+			continue
+		}
+		switch {
+		case o.Encap == "vlan" && (o.ID < 1 || o.ID > 4094):
+			c.errf("network %s: VLAN id %d out of range 1-4094", name, o.ID)
+		case o.Encap == "vxlan" && (o.ID < 1 || o.ID > 16777215):
+			c.errf("network %s: VNI %d out of range 1-16777215", name, o.ID)
+		case o.Encap != "vlan" && o.Encap != "vxlan":
+			c.errf("network %s: overlay encap %q: vlan or vxlan", name, o.Encap)
+		}
+		if ns.CIDR != "" {
+			if _, err := netip.ParsePrefix(ns.CIDR); err != nil {
+				c.errf("network %s: cidr %q: %v", name, ns.CIDR, err)
+			}
+		}
+		dhcp := ns.DHCP
+		if dhcp == "" {
+			dhcp = "none"
+		}
+		for _, other := range names {
+			oo := c.est.Spec.Networks[other].Overlay
+			if other < name && oo.On == o.On && oo.Encap == o.Encap && oo.ID == o.ID {
+				c.errf("networks %s and %s: both %s %d on %s", other, name, o.Encap, o.ID, o.On)
+			}
+		}
+		c.m.Networks[name] = &model.Network{Name: name, Role: ns.Role, CIDR: ns.CIDR, DHCP: dhcp, Fabric: base.Fabric,
+			Ports: base.Ports, Overlay: o.On, Encap: o.Encap, OverlayID: o.ID}
 	}
 }
 
@@ -1153,6 +1280,14 @@ func (c *compiler) finish() {
 		if d.Profile.Spec.SNMP != nil {
 			for i := 1; i <= d.Profile.Spec.SNMP.Outlets; i++ {
 				st.Outlets[i] = true
+			}
+		}
+		// a racked host booted to its OS: the boot drive holds it, the rest hold data
+		boot := d.BootDrive()
+		for _, dr := range d.Drives() {
+			dr.State.Contents = "data"
+			if dr == boot && d.IsHost() {
+				dr.State.Contents = "installed"
 			}
 		}
 	}

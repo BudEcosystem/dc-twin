@@ -282,9 +282,15 @@ func (e *Engine) componentHealth(c *model.Component) string {
 }
 
 func (e *Engine) componentState(c *model.Component) string {
+	if c.State.Pulled {
+		return "Absent"
+	}
 	for _, f := range e.faultsOnComponent(c) {
-		if f.State == "offline" {
+		switch f.State {
+		case "offline":
 			return "UnavailableOffline"
+		case "absent":
+			return "Absent"
 		}
 	}
 	if c.Device.State.Power != model.On {

@@ -16,6 +16,7 @@ import (
 	_ "github.com/BudEcosystem/dc-twin/internal/adapter/redfish"
 	_ "github.com/BudEcosystem/dc-twin/internal/adapter/rms"
 	_ "github.com/BudEcosystem/dc-twin/internal/adapter/snmp"
+	_ "github.com/BudEcosystem/dc-twin/internal/adapter/storage" // shared storage systems: Swordfish, exporter, vm data path (P4)
 	_ "github.com/BudEcosystem/dc-twin/internal/adapter/ufm"
 	_ "github.com/BudEcosystem/dc-twin/internal/inhost" // the in-host agent of `vm` hosts (D50)
 )

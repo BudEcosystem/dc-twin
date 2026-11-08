@@ -18,8 +18,38 @@ func (e *Engine) DeviceView(d *model.Device) map[string]any {
 func (e *Engine) deviceView(d *model.Device) map[string]any {
 	comps := []any{}
 	for _, c := range d.Components {
-		comps = append(comps, map[string]any{"name": c.Name, "path": c.Path, "kind": c.Kind, "model": c.Model, "vendor": c.Vendor,
-			"health": e.componentHealth(c), "state": e.componentState(c), "counters": c.State.Counters})
+		cv := map[string]any{"name": c.Name, "path": c.Path, "kind": c.Kind, "model": c.Model, "vendor": c.Vendor,
+			"health": e.componentHealth(c), "state": e.componentState(c), "counters": c.State.Counters}
+		if di := c.Drive; di != nil {
+			s := e.driveStatus(c)
+			ctl := ""
+			if di.Controller != nil {
+				ctl = di.Controller.Name
+			}
+			cv["drive"] = map[string]any{"capacityBytes": di.CapacityBytes, "media": di.Media, "protocol": di.Protocol,
+				"formFactor": di.FormFactor, "role": di.Role, "firmware": di.Firmware, "serial": s.Serial, "eui64": s.EUI64, "replaced": s.Replaced,
+				"bay": di.Bay, "controller": ctl, "present": s.Present, "contents": s.Contents, "erasing": s.Erasing,
+				"criticalWarning": s.CriticalWarning, "failurePredicted": s.FailurePredicted, "readOnly": s.ReadOnly,
+				"percentageUsed": s.PercentageUsed, "temperatureC": round(s.TemperatureC)}
+		}
+		if ci := c.Controller; ci != nil {
+			var names []string
+			for _, x := range ci.Drives {
+				names = append(names, x.Name)
+			}
+			types := ci.RAIDTypes
+			if len(types) == 0 {
+				types = RAIDTypes()
+			}
+			cv["controller"] = map[string]any{"raidTypes": types, "drives": names}
+		}
+		comps = append(comps, cv)
+	}
+	vols := []any{}
+	for _, v := range d.State.Volumes {
+		h, st, pct := e.volumeStatus(d, &v)
+		vols = append(vols, map[string]any{"id": v.ID, "name": v.Name, "raidType": v.RAIDType, "controller": v.Controller,
+			"drives": v.Drives, "capacityBytes": v.CapacityBytes, "pending": v.Pending, "health": h, "state": st, "rebuild": pct})
 	}
 	fw := map[string]any{}
 	for k, v := range d.State.Firmware {
@@ -52,7 +82,7 @@ func (e *Engine) deviceView(d *model.Device) map[string]any {
 		"endpoint": map[string]any{"redfish": d.Endpoint.ListenTLS, "siteIP": d.Endpoint.SiteIP, "ipmi": d.Endpoint.IPMI, "snmp": d.Endpoint.SNMP},
 		"boot": map[string]any{"overrideTarget": d.State.Boot.OverrideTarget, "overrideEnabled": d.State.Boot.OverrideEnabled,
 			"overrideMode": d.State.Boot.OverrideMode, "httpBootUri": d.State.Boot.HTTPBootURI, "order": d.State.Boot.Order},
-		"lockdown": d.State.Lockdown, "secureBoot": d.State.SecureBoot,
+		"lockdown": d.State.Lockdown, "secureBoot": d.State.SecureBoot, "volumes": vols,
 	}
 	if d.Parent != nil {
 		out["parent"] = d.Parent.Path

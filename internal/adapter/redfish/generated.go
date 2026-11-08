@@ -41,6 +41,9 @@ func (generatedBackend) render(rd *renderer, path string) (map[string]any, bool)
 	if doc, ok := rd.dynamic(path); ok {
 		return doc, true
 	}
+	if doc, ok := rd.storageDoc(path); ok {
+		return doc, doc != nil
+	}
 	b, s := rd.b, rd.snap
 	d := b.dev
 	idsp := d.Profile.Spec.Identity
@@ -147,23 +150,6 @@ func (generatedBackend) render(rd *renderer, path string) (map[string]any, bool)
 			}
 		}
 		doc = collection(path, "#EthernetInterfaceCollection.EthernetInterfaceCollection", "Ethernet Interfaces", ids)
-	case sys + "/Storage":
-		var ids []string
-		if len(drives(d)) > 0 {
-			ids = []string{sys + "/Storage/1"}
-		}
-		doc = collection(path, "#StorageCollection.StorageCollection", "Storage", ids)
-	case sys + "/Storage/1":
-		ds := drives(d)
-		if len(ds) == 0 {
-			return nil, false
-		}
-		doc = odata(path, "#Storage.v1_15_0.Storage")
-		var refs []any
-		for _, c := range ds {
-			refs = append(refs, ref(sys+"/Storage/1/Drives/"+driveID(c)))
-		}
-		doc["Id"], doc["Name"], doc["Drives"], doc["Drives@odata.count"], doc["Status"] = "1", "Storage", refs, len(refs), status(s.health, "Enabled")
 	case sys + "/BootOptions":
 		var ids []string
 		for i := range s.boot.Order {
@@ -321,8 +307,30 @@ func (generatedBackend) render(rd *renderer, path string) (map[string]any, bool)
 		links := map[string]any{"ManagerForChassis": []any{ref(ch)}}
 		if !isPDU {
 			links["ManagerForServers"] = []any{ref(sys)}
+			doc["VirtualMedia"] = ref(mgr + "/VirtualMedia")
 		}
 		doc["Links"] = links
+	case mgr + "/VirtualMedia":
+		if isPDU {
+			return nil, false
+		}
+		doc = collection(path, "#VirtualMediaCollection.VirtualMediaCollection", "Virtual Media Services", []string{mgr + "/VirtualMedia/CD1"})
+	case mgr + "/VirtualMedia/CD1":
+		// one virtual CD, as a BMC offers it to Ironic's virtual-media boot; InsertMedia and
+		// EjectMedia persist what they set (handler.go)
+		if isPDU {
+			return nil, false
+		}
+		doc = odata(path, "#VirtualMedia.v1_6_2.VirtualMedia")
+		doc["Id"], doc["Name"], doc["MediaTypes"] = "CD1", "Virtual CD", []any{"CD", "DVD"}
+		doc["Image"], doc["Inserted"], doc["WriteProtected"], doc["ConnectedVia"] = nil, false, true, "NotConnected"
+		doc["TransferMethod"], doc["TransferProtocolType"] = "Stream", nil
+		doc["Actions"] = map[string]any{
+			"#VirtualMedia.InsertMedia": map[string]any{"target": path + "/Actions/VirtualMedia.InsertMedia", "TransferProtocolType@Redfish.AllowableValues": []any{"HTTP", "HTTPS"}},
+			"#VirtualMedia.EjectMedia":  map[string]any{"target": path + "/Actions/VirtualMedia.EjectMedia"}}
+		if p, ok := s.patches[path]; ok {
+			deepMerge(doc, p)
+		}
 	case mgr + "/EthernetInterfaces":
 		doc = collection(path, "#EthernetInterfaceCollection.EthernetInterfaceCollection", "Manager Ethernet Interfaces", []string{mgr + "/EthernetInterfaces/1"})
 	case mgr + "/EthernetInterfaces/1":
@@ -429,22 +437,6 @@ func (generatedBackend) render(rd *renderer, path string) (map[string]any, bool)
 					} else {
 						doc["ProcessorArchitecture"], doc["InstructionSet"] = "x86", "x86-64"
 					}
-				}
-				return doc, true
-			}
-		}
-	case strings.HasPrefix(path, sys+"/Storage/1/Drives/"):
-		id := strings.TrimPrefix(path, sys+"/Storage/1/Drives/")
-		for _, c := range drives(d) {
-			if driveID(c) == id {
-				h, st := componentStatus(s, c)
-				doc = odata(path, "#Drive.v1_17_0.Drive")
-				doc["Id"], doc["Name"], doc["Model"], doc["Status"] = id, c.Name, c.Model, status(h, st)
-				doc["MediaType"], doc["CapacityBytes"] = "SSD", int64(model.DriveBytes(c))
-				if strings.Contains(strings.ToUpper(c.Model), "NVME") {
-					doc["Protocol"] = "NVMe"
-				} else {
-					doc["Protocol"] = "SATA"
 				}
 				return doc, true
 			}

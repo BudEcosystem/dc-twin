@@ -48,10 +48,12 @@ type EstateSpec struct {
 	Cabling      *Cabling           `json:"cabling,omitempty"`
 	Networks     map[string]Network `json:"networks"`
 	Fabrics      []Fabric           `json:"fabrics"`
-	Facility     Facility           `json:"facility,omitempty"`
-	Stacks       []StackRef         `json:"stacks,omitempty"`
-	Hardware     []HardwareSpec     `json:"hardware,omitempty"`
-	Adapters     AdapterOptions     `json:"adapters,omitempty"`
+	// StorageSystems are the shared storage systems the storage racks' nodes and enclosures make.
+	StorageSystems []StorageSystem `json:"storageSystems,omitempty"`
+	Facility       Facility        `json:"facility,omitempty"`
+	Stacks         []StackRef      `json:"stacks,omitempty"`
+	Hardware       []HardwareSpec  `json:"hardware,omitempty"`
+	Adapters       AdapterOptions  `json:"adapters,omitempty"`
 }
 
 // AdapterOptions are twin-side knobs the fidelity report always prints when set away from the
@@ -76,6 +78,9 @@ type VMOptions struct {
 	// TPM is `auto` (default: attach swtpm to hosts whose profile has a TPM, when swtpm is
 	// installed) or `off`.
 	TPM string `json:"tpm,omitempty"`
+	// Drives is `nvme` (default: every drive of a vm host's profile is an NVMe drive in the guest,
+	// on a sparse backing in the state directory) or `off` (the guest has no drives).
+	Drives string `json:"drives,omitempty"`
 }
 
 type RedfishOptions struct {
@@ -87,6 +92,10 @@ type RedfishOptions struct {
 	// holds whatever DPUs the model's host has, for an oracle run whose suite counts the captured
 	// machine's devices; the fidelity report prints it.
 	DPUs string `json:"dpus,omitempty"`
+	// Drives is `model` (default: a captured tree's drives are bound to the model's, in order, and
+	// those it has beyond the model's are absent) or `capture` (the captured machine's drives as
+	// captured, for an oracle run whose suite counts them); the fidelity report prints it.
+	Drives string `json:"drives,omitempty"`
 }
 
 type NetworkOptions struct {
@@ -194,6 +203,17 @@ type Network struct {
 	Fabric string `json:"fabric,omitempty"`
 	// Server is where relayed DHCP goes when dhcp: stack (host:port); normally a stack output.
 	Server string `json:"server,omitempty"`
+	// Overlay makes the network a second network on another network's ports, a segment the same
+	// NICs and switches carry tagged (GB trays' storage VXLAN on their BlueField's frontend ports,
+	// docs/reviews/2026-11-08-storage-deep-dive.md 5.5). Its role need not be its ports'.
+	Overlay *NetworkOverlay `json:"overlay,omitempty"`
+}
+
+// NetworkOverlay is the network an overlay rides and how it is told apart there.
+type NetworkOverlay struct {
+	On    string `json:"on"`    // the network whose ports carry it
+	Encap string `json:"encap"` // vlan or vxlan
+	ID    int    `json:"id"`    // the VLAN id or the VNI
 }
 
 type Fabric struct {
@@ -205,6 +225,33 @@ type Fabric struct {
 	Params     map[string]any `json:"params,omitempty"`
 	Select     string         `json:"select,omitempty"`
 	PlaceIn    string         `json:"placeIn,omitempty"`
+}
+
+// StorageSystem is one shared storage system (docs/reviews/2026-11-08-storage-deep-dive.md 5.4,
+// S-Q4): the storage nodes and drive enclosures of the racks it selects, made one system with
+// protocols, a pool, a management API and, at vm, a data path.
+type StorageSystem struct {
+	Name     string `json:"name"`
+	Template string `json:"template"`
+	// Select names the racks whose storage nodes and enclosures are the system's.
+	Select   string          `json:"select,omitempty"`
+	Networks StorageNetworks `json:"networks,omitempty"`
+	// Protocols are what the system serves, from its template's: nfs, s3, nvme-tcp.
+	Protocols []string       `json:"protocols,omitempty"`
+	Params    map[string]any `json:"params,omitempty"`
+	// Manager is the management API it serves (default: its template's first).
+	Manager string `json:"manager,omitempty"`
+	// Fidelity is model (default: the management API, exporters and events from the model) or vm
+	// (its nodes are vm hosts that serve the protocols with real Linux targets).
+	Fidelity string `json:"fidelity,omitempty"`
+}
+
+// StorageNetworks bind a storage system to the estate's networks by name.
+type StorageNetworks struct {
+	// Data is the network clients reach its protocols on (role storage).
+	Data string `json:"data,omitempty"`
+	// Management is the network its management API is served on (role management).
+	Management string `json:"management,omitempty"`
 }
 
 type Facility struct {
@@ -350,6 +397,25 @@ type ComponentSpec struct {
 	// SerialShare is how many consecutive accelerators share one board serial (2 on a GB200/GB300
 	// tray, whose superchips carry two GPUs each); 0 or 1: each has its own.
 	SerialShare int `json:"serialShare,omitempty"`
+	// A drive's facts (kind drive). CapacityBytes wins over a size in Model ("NVMe 3.84 TB");
+	// Media is ssd or hdd; Protocol nvme, sata or sas (default: nvme when Model says NVMe, else
+	// sata); FormFactor m.2, u.2, e1.s, e3.s, 2.5 or 3.5; Role boot, data or cache (default: the
+	// first drive boot, the rest data); Firmware the drive's firmware revision; PartNumber; and
+	// SerialFormat its serial number's pattern (identity.Serial).
+	CapacityBytes int64  `json:"capacityBytes,omitempty"`
+	Media         string `json:"media,omitempty"`
+	Protocol      string `json:"protocol,omitempty"`
+	FormFactor    string `json:"formFactor,omitempty"`
+	Role          string `json:"role,omitempty"`
+	Firmware      string `json:"firmware,omitempty"`
+	PartNumber    string `json:"partNumber,omitempty"`
+	SerialFormat  string `json:"serialFormat,omitempty"`
+	// Controller names the storage-controller component (its name) a drive sits behind; a drive
+	// without one is attached to the host directly (NVMe on PCIe).
+	Controller string `json:"controller,omitempty"`
+	// RAIDTypes are a storage controller's supported RAID types (kind storage-controller), as
+	// Redfish names them (RAID0, RAID1, RAID5, RAID6, RAID10, RAID50, RAID60).
+	RAIDTypes []string `json:"raidTypes,omitempty"`
 }
 
 type BMCSpec struct {
@@ -621,6 +687,38 @@ type TemplateSpec struct {
 	Sources   []Source               `json:"sources,omitempty"`
 }
 
+// ---------------------------------------------------------------- Storage template
+
+// StorageTemplate is a kind of shared storage system: which devices of the selected racks make
+// it, what it can serve and which management APIs it has (the storage analogue of a fabric
+// template).
+type StorageTemplate struct {
+	APIVersion string              `json:"apiVersion"`
+	Kind       string              `json:"kind"`
+	Metadata   Metadata            `json:"metadata"`
+	Spec       StorageTemplateSpec `json:"spec"`
+}
+
+type StorageTemplateSpec struct {
+	// Nodes and Enclosures are the device classes of the selected racks that are the system's
+	// storage nodes (they serve) and drive enclosures (drives behind the nodes).
+	Nodes      string `json:"nodes"`
+	Enclosures string `json:"enclosures,omitempty"`
+	// Media are the drive media its pool is made of (default ssd); boot drives never are.
+	Media []string `json:"media,omitempty"`
+	// Protocols are what it can serve; Managers the management APIs it can serve, the first by
+	// default.
+	Protocols []string               `json:"protocols"`
+	Managers  []string               `json:"managers"`
+	Params    map[string]FormatParam `json:"params,omitempty"`
+	// Faults are the catalogues a system of this template accepts (a strict allow-list, as a
+	// profile's faults are).
+	Faults   []string            `json:"faults,omitempty"`
+	Provides map[string][]string `json:"provides,omitempty"`
+	IsNot    IsNot               `json:"isNot"`
+	Sources  []Source            `json:"sources,omitempty"`
+}
+
 // ---------------------------------------------------------------- Fault catalogue
 
 type FaultCatalogue struct {
@@ -651,6 +749,8 @@ type FaultTarget struct {
 	Port       bool   `json:"port,omitempty"`
 	DeviceWith string `json:"deviceWith,omitempty"`
 	Vendor     string `json:"vendor,omitempty"`
+	// StorageSystem targets the storage systems the selector names (storage/<name>).
+	StorageSystem bool `json:"storageSystem,omitempty"`
 }
 
 type FaultClears struct {
@@ -721,16 +821,21 @@ type DialectSpec struct {
 	// SettingsJobs is the Location of the job a PATCH of a settings object schedules when the
 	// capture has no answer for that request, with {n} for a twelve-digit job number: iDRAC
 	// answers every Bios/Settings PATCH 202 with a JID_ job. Empty: 204, as most BMCs answer.
-	SettingsJobs string            `json:"settingsJobs,omitempty"`
-	Sensors      []SensorBind      `json:"sensors,omitempty"`
-	Leak         []string          `json:"leakDetectors,omitempty"`
-	Actions      []ActionBind      `json:"actions,omitempty"`
-	Firmware     map[string]string `json:"firmware,omitempty"`
-	Quirks       []QuirkSpec       `json:"quirks,omitempty"`
-	Identity     DialectIdentity   `json:"identity,omitempty"`
-	Requests     []RequestMap      `json:"requests,omitempty"`
-	IsNot        IsNot             `json:"isNot"`
-	Sources      []Source          `json:"sources,omitempty"`
+	SettingsJobs string `json:"settingsJobs,omitempty"`
+	// StorageControllers are storage controllers the dialect serves from the model rather than
+	// from its capture: component group -> the Storage resource's id under the system (a Dell
+	// BOSS: boss -> BOSS.SL.14-1). Their drives and volumes are the model's, with the dialect's
+	// job semantics (settingsJobs) for volume and decommission requests.
+	StorageControllers map[string]string `json:"storageControllers,omitempty"`
+	Sensors            []SensorBind      `json:"sensors,omitempty"`
+	Leak               []string          `json:"leakDetectors,omitempty"`
+	Actions            []ActionBind      `json:"actions,omitempty"`
+	Firmware           map[string]string `json:"firmware,omitempty"`
+	Quirks             []QuirkSpec       `json:"quirks,omitempty"`
+	Identity           DialectIdentity   `json:"identity,omitempty"`
+	Requests           []RequestMap      `json:"requests,omitempty"`
+	IsNot              IsNot             `json:"isNot"`
+	Sources            []Source          `json:"sources,omitempty"`
 }
 
 type FactoryLogin struct {
@@ -929,6 +1034,23 @@ type ActStep struct {
 	Up   *bool  `json:"up,omitempty"`
 	// Utilisation sets the load of the selected hosts.
 	Utilisation *float64 `json:"utilisation,omitempty"`
+	// Drive is a technician's act on the drives Select names: pull, insert, replace or erase.
+	Drive string `json:"drive,omitempty"`
+	// Storage is an act on the storage system Select names (storage/<name>): its objects' use
+	// (`fill`), or an object taken offline or back (`offline`, `online`).
+	Storage *StorageAct `json:"storage,omitempty"`
+}
+
+// StorageAct changes what a storage system holds without its management API.
+type StorageAct struct {
+	// Fill sets the used bytes of the named object (a file system, volume or bucket), as clients
+	// writing to it would; UsedPercent sets it as a share of the object's quota or capacity.
+	Fill        string   `json:"fill,omitempty"`
+	UsedBytes   *int64   `json:"usedBytes,omitempty"`
+	UsedPercent *float64 `json:"usedPercent,omitempty"`
+	// Offline and Online take the named object offline or bring it back.
+	Offline string `json:"offline,omitempty"`
+	Online  string `json:"online,omitempty"`
 }
 
 type FaultStep struct {

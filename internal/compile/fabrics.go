@@ -145,7 +145,15 @@ func (c *compiler) generated(f *model.Fabric, rack *model.Rack, name, profile st
 	}
 	if rack != nil {
 		if existing := c.m.DeviceBy[parent+"/"+name]; existing != nil {
-			return existing
+			if existing.Generated == f.Name {
+				return existing
+			}
+			// another fabric's switch has the name (a storage fabric's leaves beside the
+			// frontend's): this fabric's are named after it
+			name = f.Name + "-" + name
+			if existing := c.m.DeviceBy[parent+"/"+name]; existing != nil {
+				return existing
+			}
 		}
 	}
 	d := c.newDevice(rack, hall, parent, name, p, nil)
@@ -284,7 +292,18 @@ func (c *compiler) genClos(f *model.Fabric, place *model.Rack) {
 	for s := 1; s <= S; s++ {
 		spines = append(spines, c.generated(f, place, fmt.Sprintf("spine-%d", s), spineProfile))
 	}
-	roles := map[string]bool{"frontend": true, "provisioning": true, "storage": true}
+	roles := map[string]bool{}
+	for _, role := range strings.Fields(strParam(f, "roles")) {
+		switch role {
+		case "frontend", "provisioning", "storage":
+			roles[role] = true
+		default:
+			c.errf("fabric %s: roles: %q is not a role a Clos fabric cables (frontend, provisioning, storage)", f.Name, role)
+		}
+	}
+	if len(roles) == 0 {
+		roles = map[string]bool{"frontend": true, "provisioning": true, "storage": true}
+	}
 	for _, r := range f.Racks {
 		ports := rackPorts(r, roles, "ethernet")
 		if len(ports) == 0 {

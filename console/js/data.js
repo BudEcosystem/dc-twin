@@ -15,6 +15,7 @@ TC.data = (() => {
     gaudi: { tag: 'Gaudi 3', title: 'generic/gaudi3-8 · intel/gaudi3', cap: 50000, cooling: 'air' },
     cpu: { tag: 'CPU', title: 'generic/cpu-rack', cap: 20000, cooling: 'air' },
     net: { tag: 'NET', title: 'generic/network-rack', cap: 24000, cooling: 'air' },
+    sto: { tag: 'STOR', title: 'generic/storage-rack', cap: 34500, cooling: 'air' },
   };
   const FORMAT_IDS = { 'nvidia/gb300-nvl72': 'nvl', 'generic/hgx-8gpu': 'hgx', 'generic/oam-8gpu': 'oam', 'generic/cpu-rack': 'cpu' };
 
@@ -26,13 +27,14 @@ TC.data = (() => {
     if (/gaudi/.test(n)) return 'gaudi';
     if (archetype === 'network' || /network/.test(n)) return 'net';
     if (archetype === 'cpu' || /cpu/.test(n)) return 'cpu';
+    if (archetype === 'storage' || /storage/.test(n)) return 'sto';
     return 'hgx';
   }
   function formatTag(name, key) {
     const last = String(name || '').split('/').pop();
     const m = /nvl(\d+(x\d+)?)/i.exec(last);
     if (m) return 'NVL' + m[1];
-    return { hgx: 'HGX', oam: 'OAM', gaudi: 'Gaudi 3', cpu: 'CPU', net: 'NET' }[key] || last;
+    return { hgx: 'HGX', oam: 'OAM', gaudi: 'Gaudi 3', cpu: 'CPU', net: 'NET', sto: 'STOR' }[key] || last;
   }
 
   const KIND_C = {
@@ -69,7 +71,7 @@ TC.data = (() => {
   ];
   const RACK_FAULTS = [
     { id: 'generic/leak/rack-point', title: 'Rack leak point (BMS)', on: ['nvl'], sev: 'Warning', effects: ['leak-sensor-02 → Leak', 'BMS RackLeakDetect → true', 'propagation: none (rack-level)'], clears: 'manually' },
-    { id: 'generic/power/pdu-outlet-off', title: 'PDU outlet off (feed A)', on: ['hgx', 'oam', 'gaudi', 'cpu', 'net'], sev: 'Warning', effects: ['feed A to rack → 0 W', 'power.loss: devices with minSources 1 stay up', 'PSU redundancy lost'], clears: 'manually' },
+    { id: 'generic/power/pdu-outlet-off', title: 'PDU outlet off (feed A)', on: ['hgx', 'oam', 'gaudi', 'cpu', 'net', 'sto'], sev: 'Warning', effects: ['feed A to rack → 0 W', 'power.loss: devices with minSources 1 stay up', 'PSU redundancy lost'], clears: 'manually' },
   ];
   const ISNOT = {
     'compute-tray': ['Thermal behaviour is first-order: coolant-in follows the CDU supply plus a load term; no flow modelling inside the cold plate.', 'A real Xid 79 also leaves PCIe link-state artefacts the host firmware reports; this one does not.', 'Redfish tree captured from one firmware version (GB300 BMC 25.06); other versions differ in OEM paths.'],

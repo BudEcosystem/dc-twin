@@ -10,7 +10,9 @@ spec:
     - { name: nic, kind: nic, count: 2, model: "25GbE" }
     - { name: psu, kind: psu, count: 2, model: "1400 W" }
     - { name: fan, kind: fan, count: 6, model: "fan" }
-    - { name: nvme, kind: drive, count: 4, model: "NVMe 1.92 TB" }
+    - { name: nvme, kind: drive, role: data, formFactor: u.2, count: 4, model: "NVMe 1.92 TB" }
+    - { name: boss, kind: storage-controller, count: 1, model: "Dell BOSS-N1", raidTypes: [RAID0, RAID1] }
+    - { name: m2, kind: drive, count: 2, model: "M.2 NVMe 480 GB", vendor: "Dell", controller: boss, role: boot, formFactor: m.2 }
     - { name: tpm, kind: tpm, count: 1, model: "TPM 2.0" }
   bmc: { dialect: oem-dell/idrac, ipmi: true }
   ports:
@@ -28,7 +30,7 @@ spec:
     - { component: bmc, baseline: "7.10.30.00", applyOn: reset }
     - { component: bios, baseline: "2.3.5", applyOn: reset }
   behaviours: { power: { onSeconds: 30, offSeconds: 10 }, bmc: { bootSeconds: 90 } }
-  faults: [generic/power, generic/bmc, generic/thermal, generic/link, generic/firmware]
+  faults: [generic/power, generic/bmc, generic/thermal, generic/link, generic/firmware, generic/storage]
   fidelity: { model: {}, vm: { arch: x86_64, firmware: uefi, tpm: true, cost: { ramGB: 4, vcpu: 2 } } }
   provides:
     - { capability: "redfish/dialect:oem-dell/idrac", at: [model, vm] }

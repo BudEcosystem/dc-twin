@@ -4,5 +4,5 @@ package packs
 
 import "embed"
 
-//go:embed all:generic all:nvidia all:liteon all:oem-dell all:oem-hpe all:oem-lenovo all:oem-supermicro all:amd all:intel all:delta
+//go:embed all:generic all:nvidia all:liteon all:oem-dell all:oem-hpe all:oem-lenovo all:oem-supermicro all:amd all:intel all:delta all:vast
 var FS embed.FS

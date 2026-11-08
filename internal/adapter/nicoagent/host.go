@@ -24,8 +24,9 @@ import (
 // port through the twin relay, as the DGX of the Ready path does. Scout reports the host's
 // hardware (DiscoverMachine, reporter SCOUT) and that the host has rebooted into it
 // (RebootCompleted), then asks NICo what to do (ForgeAgentControl) until the host is reset:
-// finish discovery (DiscoveryCompleted), clean up (CleanupMachineCompleted, every step OK: no
-// disk is wiped), or validate (MachineValidationCompleted, no test run). What it reports is the
+// finish discovery (DiscoveryCompleted), clean up (CleanupMachineCompleted: the host's NVMe drives
+// are erased, as scout's nvme format and namespace rebuild leave them, and a drive that cannot be
+// erased fails the step), or validate (MachineValidationCompleted, no test run). What it reports is the
 // host's own: the identity its BMC serves, a TPM endorsement-key certificate kept for the host
 // and signed by the estate CA (which a stack loads as its TPM vendors' CA, as the Ready path
 // loads it for swtpm's), its boot NIC, and its GPUs with the NVLink placement NVML reports and
@@ -260,7 +261,11 @@ func (h *host) scoutControl(ctx context.Context, conn *grpc.ClientConn, in *inst
 		method, req = "DiscoveryCompleted", obj{"machine_id": id}
 	case res["reset"] != nil || legacy == "RESET":
 		ok := obj{"result": "OK", "message": ""}
-		method, req = "CleanupMachineCompleted", obj{"machine_id": id, "nvme": ok, "ram": ok, "mem_overwrite": ok, "ib": ok, "hdd": ok, "result": "OK"}
+		nvme, result := h.cleanNVMe(), "OK"
+		if nvme["result"] != "OK" {
+			result = "ERROR"
+		}
+		method, req = "CleanupMachineCompleted", obj{"machine_id": id, "nvme": nvme, "ram": ok, "mem_overwrite": ok, "ib": ok, "hdd": ok, "result": result}
 	case res["machine_validation"] != nil || legacy == "MACHINE_VALIDATION":
 		mv, _ := res["machine_validation"].(map[string]any)
 		v := str(mv, "validation_id", "value")
@@ -276,6 +281,70 @@ func (h *host) scoutControl(ctx context.Context, conn *grpc.ClientConn, in *inst
 		return
 	}
 	h.called(method)
+}
+
+// cleanNVMe is scout's NVMe cleanup on the model's drives (crates/scout/src/deprovision/scrabbing.rs
+// clean_this_nvme: nvme format -s2 on every namespace, then delete, create and attach one over the
+// whole capacity): every NVMe drive the host enumerates is left erased; one whose format fails (a
+// read-only or erase-fails drive) fails the step, as NICo then records NVMECleanFailed.
+func (h *host) cleanNVMe() obj {
+	eng := h.a.rt.Engine
+	var failed []string
+	cleaned := 0
+	for _, c := range h.dev.Drives() {
+		if c.Drive.Controller != nil || c.Drive.Protocol != "nvme" {
+			continue
+		}
+		st := eng.DriveStatus(c)
+		if !st.Present || st.State == "UnavailableOffline" {
+			continue // not enumerated: nothing for scout to clean
+		}
+		dev := fmt.Sprintf("/dev/nvme%d", c.Drive.Bay)
+		if st.EraseFails || st.ReadOnly {
+			failed = append(failed, dev+": nvme format failed")
+			continue
+		}
+		if err := eng.SetDriveContents(c.Path, "erased", src); err != nil {
+			failed = append(failed, dev+": "+err.Error())
+			continue
+		}
+		cleaned++
+	}
+	if len(failed) > 0 {
+		h.note(fmt.Sprintf("NVMe cleanup: %d drive(s) erased, failed: %s", cleaned, strings.Join(failed, "; ")))
+		return obj{"result": "ERROR", "message": strings.Join(failed, "; ")}
+	}
+	h.note(fmt.Sprintf("NVMe cleanup: %d drive(s) erased", cleaned))
+	return obj{"result": "OK", "message": ""}
+}
+
+// storageInfo is the host's drives as scout's udev enumeration reports them: a block device per
+// NVMe namespace (ID_MODEL with its spaces as udev writes them) and each NVMe controller.
+func (h *host) storageInfo() (blocks, nvmes []any) {
+	eng := h.a.rt.Engine
+	for _, c := range h.dev.Drives() {
+		st := eng.DriveStatus(c)
+		if !st.Present || st.State == "UnavailableOffline" {
+			continue
+		}
+		di := c.Drive
+		udevModel := strings.ReplaceAll(strings.TrimSpace(c.Model), " ", "_")
+		if di.Controller != nil {
+			continue // behind a RAID controller: the host sees its volumes, not its drives
+		}
+		blocks = append(blocks, obj{"model": udevModel, "revision": di.Firmware, "serial": st.Serial, "device_type": "disk"})
+		if di.Protocol == "nvme" {
+			nvmes = append(nvmes, obj{"model": c.Model, "firmware_rev": di.Firmware, "serial": st.Serial,
+				"size_mb":  di.CapacityBytes >> 20,
+				"pci_path": fmt.Sprintf("/devices/pci0000:00/0000:00:%02x.0/0000:%02x:00.0/nvme/nvme%d", 0x1c+di.Bay/8, 0x20+di.Bay, di.Bay)})
+		}
+	}
+	for _, v := range eng.Volumes(h.dev) {
+		if v.Pending != "create" {
+			blocks = append(blocks, obj{"model": v.RAIDType + "_Virtual_Disk", "revision": "", "serial": v.ID, "device_type": "disk"})
+		}
+	}
+	return blocks, nvmes
 }
 
 // discoveryInfo is the host's hardware as scout reports it.
@@ -326,6 +395,12 @@ func (h *host) discoveryInfo() obj {
 	}
 	if len(cpus) > 0 {
 		info["cpu_info"] = cpus
+	}
+	if blocks, nvmes := h.storageInfo(); len(blocks) > 0 {
+		info["block_devices"] = blocks
+		if len(nvmes) > 0 {
+			info["nvme_devices"] = nvmes
+		}
 	}
 	return info
 }

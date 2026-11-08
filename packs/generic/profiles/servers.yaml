@@ -32,7 +32,7 @@ spec:
     power: { onSeconds: 20, offSeconds: 8 }
     boot: { postSeconds: 60 }
     bmc: { bootSeconds: 45 }
-  faults: [generic/power, generic/bmc, generic/thermal, generic/link, generic/firmware]
+  faults: [generic/power, generic/bmc, generic/thermal, generic/link, generic/firmware, generic/storage]
   fidelity:
     model: {}
     vm: { arch: x86_64, firmware: uefi, tpm: true, cost: { ramGB: 4, vcpu: 2 } }
@@ -90,3 +90,57 @@ spec:
     - { capability: boot/walk, at: [model] }
   isNot: ["A generic archetype: no vendor's BMC tree.", "GPUs carry state only; nothing executes."]
   sources: [{ what: archetype, url: "https://www.dmtf.org/standards/redfish", date: 2026-10-18 }]
+---
+apiVersion: dc-twin/v1alpha1
+kind: DeviceProfile
+metadata: { name: generic/storage-node-2u, version: 0.1.0 }
+spec:
+  class: server
+  form: { mounting: rack, units: 2 }
+  identity: { serialFormat: "SN{alnum:10}", macOUI: "02:dc:05", manufacturer: "dc-twin", model: "Generic 2U Storage Node" }
+  components:
+    - { name: cpu, kind: cpu, count: 2, model: "x86-64, 32 cores" }
+    - { name: dimm, kind: memory, count: 16, model: "DDR5 64 GB" }
+    - { name: nic, kind: nic, count: 2, model: "ConnectX-7 2x200GbE" }
+    - { name: boot, kind: drive, count: 2, model: "M.2 NVMe 480 GB", role: boot, formFactor: m.2, firmware: "1.2.0" }
+    - { name: nvme, kind: drive, count: 12, model: "NVMe 15.36 TB", role: data, formFactor: u.2, firmware: "2.1.4" }
+    - { name: raid, kind: storage-controller, count: 1, model: "SAS3916 Tri-Mode RAID", raidTypes: [RAID0, RAID1, RAID5, RAID6, RAID10, RAID50, RAID60] }
+    - { name: hdd, kind: drive, count: 8, model: "SAS HDD 20 TB", media: hdd, protocol: sas, formFactor: "3.5", controller: raid, role: data, firmware: "SE04" }
+    - { name: psu, kind: psu, count: 2, model: "1600 W" }
+    - { name: fan, kind: fan, count: 6, model: "60 mm" }
+    - { name: tpm, kind: tpm, count: 1, model: "TPM 2.0" }
+  bmc: { dialect: generic/dmtf, ipmi: true, console: none }
+  ports:
+    - { name: bmc0, kind: ethernet, speed: 1G, role: management }
+    - { name: eth0, kind: ethernet, speed: 25G, role: provisioning }
+    - { name: "stor{0..1}", kind: ethernet, speed: 200G, role: storage }
+    - { name: "psu-{0..1}", kind: power-in, source: pdu }
+  power: { standbyW: 30, idleW: 450, maxW: 1400 }
+  cooling: { kind: air }
+  sensors:
+    - { name: inlet, quantity: temperature, unit: C, warn: 35, crit: 45, source: inlet }
+    - { name: cpu-max, quantity: temperature, unit: C, warn: 85, crit: 95, source: cpu-max }
+    - { name: power, quantity: power, unit: W, source: power }
+  firmware:
+    - { component: bmc, baseline: "1.12.0", applyOn: reset }
+    - { component: bios, baseline: "2.4.1", applyOn: reset }
+    - { component: raid-0, baseline: "52.26.0", applyOn: reset }
+  behaviours:
+    power: { onSeconds: 30, offSeconds: 10 }
+    boot: { postSeconds: 90 }
+    bmc: { bootSeconds: 45 }
+    storage: { eraseSeconds: 8, eraseSecondsPerTB: 60, rebuildSeconds: 120 }
+  faults: [generic/power, generic/bmc, generic/thermal, generic/link, generic/firmware, generic/storage]
+  fidelity:
+    model: {}
+    vm: { arch: x86_64, firmware: uefi, tpm: true, cost: { ramGB: 4, vcpu: 2 } }
+  provides:
+    - { capability: "redfish/dialect:generic/dmtf", at: [model, vm] }
+    - { capability: redfish/secure-erase, at: [model, vm] }
+    - { capability: ipmi/lan, at: [model] }
+    - { capability: boot/walk, at: [model] }
+  isNot:
+    all: ["A generic archetype: no vendor's BMC tree, firmware or quirks.", "The RAID controller is the model's: volumes, rebuilds and their timing are behaviours, not a controller's firmware."]
+    model: ["No operating system runs; boot stops at the boot walk."]
+  sources:
+    - { what: "archetype: a 2U storage server with a tri-mode RAID controller, U.2 NVMe and SAS bays", url: "https://www.dmtf.org/standards/redfish", date: 2026-11-08 }

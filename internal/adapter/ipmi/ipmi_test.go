@@ -282,15 +282,30 @@ func TestSELIsTheModelLog(t *testing.T) {
 func TestSDRSensorsAndFRU(t *testing.T) {
 	tw, a := lab(t)
 	c := openAdmin(t, tw, a, dell, suites[1])
+	var drives int
+	tw.Engine.Read(func(mm *model.Model) { drives = len(mm.DeviceBy[dell].Drives()) })
 	info := c.mustCmd(t, netFnStorage, cmdGetSDRRepositoryInfo)
-	if info[0] != sdrVersion || le16(info[1:3]) != 4 {
-		t.Fatalf("SDR info % x", info)
+	if info[0] != sdrVersion || int(le16(info[1:3])) != 4+drives {
+		t.Fatalf("SDR info % x (4 threshold sensors and %d drive slots)", info, drives)
 	}
 	res := c.mustCmd(t, netFnStorage, cmdReserveSDRRepository)
 	var names []string
+	slots := 0
 	for id := uint16(0); id != 0xFFFF; {
 		r := c.mustCmd(t, netFnStorage, cmdGetSDR, res[0], res[1], byte(id), byte(id>>8), 0, 0xFF)
 		rec := r[2:]
+		if rec[3] == sdrCompact {
+			if rec[12] != sensorTypeDrive || rec[13] != readingSpecific || int(rec[4]) != len(rec)-5 {
+				t.Fatalf("drive slot record % x", rec)
+			}
+			rd := c.mustCmd(t, netFnSensor, cmdGetSensorReading, rec[7])
+			if rd[2]&driveBitPresent == 0 || rd[2]&driveBitFault != 0 {
+				t.Fatalf("%s reads % x: present and healthy expected", rec[32:], rd)
+			}
+			slots++
+			id = le16(r[0:2])
+			continue
+		}
 		if rec[3] != sdrFullSensor || int(rec[4]) != len(rec)-5 {
 			t.Fatalf("record % x", rec)
 		}
@@ -305,8 +320,8 @@ func TestSDRSensorsAndFRU(t *testing.T) {
 		}
 		id = le16(r[0:2])
 	}
-	if strings.Join(names, ",") != "inlet,gpu-max,cpu-max,power" {
-		t.Fatalf("SDR names %v", names)
+	if strings.Join(names, ",") != "inlet,gpu-max,cpu-max,power" || slots != drives {
+		t.Fatalf("SDR names %v, %d drive slots of %d", names, slots, drives)
 	}
 	fi := c.mustCmd(t, netFnStorage, cmdGetFRUInventoryAreaInfo, 0)
 	size := int(le16(fi[0:2]))
@@ -362,5 +377,43 @@ func TestEncodings(t *testing.T) {
 		if err != nil || !bytes.Equal(got, p) {
 			t.Errorf("AES round trip of %d bytes: %v", n, err)
 		}
+	}
+}
+
+// A failed drive is a drive-slot sensor with its fault asserted and a SEL record of sensor type
+// 0Dh (drive slot), offset 1 (drive fault).
+func TestDriveSlotSensorAndSEL(t *testing.T) {
+	tw, a := lab(t)
+	var drive string
+	tw.Engine.Read(func(mm *model.Model) { drive = mm.DeviceBy[dell].Drives()[0].Path })
+	if _, err := tw.Engine.Inject(drive, "generic/storage/drive-failure", nil, "", stackSrc); err != nil {
+		t.Fatal(err)
+	}
+	c := openAdmin(t, tw, a, dell, suites[1])
+	res := c.mustCmd(t, netFnStorage, cmdReserveSDRRepository)
+	found := false
+	for id := uint16(0); id != 0xFFFF; {
+		r := c.mustCmd(t, netFnStorage, cmdGetSDR, res[0], res[1], byte(id), byte(id>>8), 0, 0xFF)
+		rec := r[2:]
+		if rec[3] == sdrCompact && string(rec[32:]) == "Drive 0" {
+			rd := c.mustCmd(t, netFnSensor, cmdGetSensorReading, rec[7])
+			if rd[2]&driveBitFault == 0 {
+				t.Fatalf("failed drive reads % x", rd)
+			}
+			found = true
+		}
+		id = le16(r[0:2])
+	}
+	if !found {
+		t.Fatal("no Drive 0 slot sensor")
+	}
+	e := c.mustCmd(t, netFnStorage, cmdGetSELEntry, 0, 0, 0, 0, 0, 0xFF)
+	if e[2+10] != sensorTypeDrive || e[2+13]&0x0F != 0x01 {
+		t.Fatalf("SEL entry for the drive failure: % x", e)
+	}
+	// IPMI chassis status says a drive is faulted
+	st := c.mustCmd(t, netFnChassis, cmdGetChassisStatus)
+	if st[2]&0x04 == 0 {
+		t.Fatalf("chassis status % x: no drive fault", st)
 	}
 }

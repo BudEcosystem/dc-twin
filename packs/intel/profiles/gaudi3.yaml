@@ -37,7 +37,7 @@ spec:
     - { component: bmc, baseline: "7.10.30.00", applyOn: reset }
     - { component: bios, baseline: "2.3.5", applyOn: reset }
   behaviours: { power: { onSeconds: 45, offSeconds: 12 }, boot: { postSeconds: 150 }, bmc: { bootSeconds: 90 } }
-  faults: [generic/power, generic/bmc, generic/thermal, generic/link, generic/firmware, intel/gaudi]
+  faults: [generic/power, generic/bmc, generic/thermal, generic/link, generic/firmware, intel/gaudi, generic/storage]
   fidelity: { model: {}, vm: { arch: x86_64, firmware: uefi, tpm: true, cost: { ramGB: 8, vcpu: 4 } } }
   kubernetes: { resources: { "habana.ai/gaudi": 8 }, labels: { "habana.ai/gaudi.product": "HL-325L" } }
   metrics: { exporter: gaudi }

@@ -20,6 +20,9 @@ spec:
     spines:       { type: int, default: 2, range: [1, 16] }
     leaf:         { type: profile, class: switch, default: generic/leaf-switch-400g }
     spine:        { type: profile, class: switch, default: generic/spine-switch-400g }
+    # the port roles the fabric cables: a dedicated storage fabric takes "storage", the frontend then
+    # "frontend provisioning" (the deep dive's 5.5)
+    roles:        { type: string, default: "frontend provisioning storage", label: Port roles }
   provides: { none: [switch/lldp, dhcp/relay-option-82, dhcp/relay-link-selection], vm: [switch/lldp, dhcp/relay-giaddr, switch/bgp-unnumbered, switch/evpn] }
   layout: { tiers: [spine, leaf] }
   isNot: ["Packets flow; nothing is measured.", "With nos none, no BGP or EVPN runs (D21)."]

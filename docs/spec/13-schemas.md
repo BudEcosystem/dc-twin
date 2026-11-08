@@ -121,6 +121,17 @@ devices (with `placeIn`), links, per-NOS configuration, and `provides`. **Port a
 function of the endpoint's path** so that adding a rack never moves another rack's links
 ([03](03-estate-model.md#changing-a-running-estate)). `layout.tiers` for the console. `isNot` required.
 
+## Storage template
+
+`kind: StorageTemplate` (D59). What a shared storage system of the estate's `storageSystems` is
+made of and serves: `nodes` and `enclosures` (the device classes of the selected racks that are its
+storage nodes and drive enclosures; a device of the class without pool drives is not the
+system's), `media` (the drive media its pool is made of; D `[ssd]`; boot drives never are),
+`protocols` (`nfs`, `s3`, `nvme-tcp`), `managers` (the management APIs it can serve, the first by
+default: `generic/swordfish`, `vast/vms`), typed `params` (`protection` as `data+parity`,
+`poolFullPercent`, `minNodes`, `failoverSeconds`), `faults` (the catalogues a system of it accepts,
+a strict allow-list as a profile's), `provides` by fidelity, `isNot` (R) by fidelity, `sources`.
+
 ## Fault catalogue
 
 `kind: FaultCatalogue`, `metadata.name: pack/catalogue`. Each fault:
@@ -129,7 +140,7 @@ function of the endpoint's path** so that adding a rack never moves another rack
 |---|---|---|
 | `name` | R | Fault id is `pack/catalogue/name` |
 | `title` | R | |
-| `target` | R | `{component?: kind, device?: class, port?: true, deviceWith?: bmc\|firmware\|tpm\|leak-detector\|breaker, vendor?}`. `breaker` is a node of the power chain (a UPS, busway or panel) |
+| `target` | R | `{component?: kind, device?: class, port?: true, deviceWith?: bmc\|firmware\|tpm\|leak-detector\|breaker\|host, vendor?, storageSystem?: true}`. `breaker` is a node of the power chain (a UPS, busway or panel); `storageSystem` targets the storage systems the selector names (`storage/<name>`), whose template must list the catalogue |
 | `params` | O | map of typed parameters the injector may set |
 | `effects[]` | R | Effect verbs ([08](08-scenarios-and-faults.md#faults)): `set`, `counter`, `ports`, `kernelLog`, `shim`, `redfish.logEntry`, `redfish.property`, `bms`, `power.loss`, `link`, `attestation`, or a pack `EffectHandler`. Each may carry `appliesAt: [levels]`; `kernelLog` takes `line`, `level` (default 4) and `when: boot` for a line written at every boot while the fault holds rather than when it is injected |
 | `clears` | R | `{on: [triggers], after?: duration, manual: bool}`; triggers from the registry ([14](14-expressions.md#triggers)) |
@@ -323,6 +334,21 @@ the core generator; `spec.provides` is keyed by `none` and `vm` (the fabric's `n
 | observation `dhcp` | | `{select, leased}` |
 | observation `event` | | Also `kind`, `field`, `to`; an expect sees the events of the acts and faults that led to it |
 | accessor `args` | | `"{serial:<selector>}"` passes the selected device's serial |
+| `spec.storageSystems[]` | O | `{name, template, select, networks: {data, management}, protocols, params, manager, fidelity}`: a shared storage system made of the storage nodes and enclosures of the racks `select` names (D59). `networks` name an estate network of role `storage` that reaches every node and one of role `management`; `protocols` default to the template's; `fidelity` is `model` (D) or `vm`, whose nodes must be `vm` hosts with `os: twin` (D61) |
+| `spec.adapters.vm.drives` | O | `nvme` (D: every drive of a `vm` host's profile is an NVMe drive in the guest, on a sparse backing in the state directory) or `off` (D60) |
+| `spec.adapters.redfish.drives` | O | `model` (D: a captured tree's drives are bound to the model's) or `capture` (oracle mode) |
+| `networks.<n>.overlay` | O | `{on, encap: vlan\|vxlan, id}`: a network that rides another network's ports (GB200/GB300 storage beside in-band management); takes no ports of its own role |
+| `act.drive` | O | `pull`, `insert`, `replace` or `erase` the drives `select` names |
+| `act.storage` | O | On the storage system `select` names: `{fill: <object>, usedBytes \| usedPercent}`, `{offline: <object>}`, `{online: <object>}` |
+
+**Device profile** (drives, controllers and DPUs): a drive component takes `capacityBytes` or a
+size in its `model`, `media` (`ssd`, `hdd`), `protocol` (`nvme`, `sas`, `sata`), `formFactor`,
+`role` (`boot`, `data`, `cache`), `firmware`, `partNumber`, `serialFormat` and `controller` (the
+`storage-controller` component it is behind); a `storage-controller` takes `raidTypes`. A
+dialect's `storageControllers` maps a controller group to its Storage id in a captured tree
+(Dell's `boss` to `BOSS.SL.14-1`). `behaviours.storage` sets `eraseSeconds`,
+`eraseSecondsPerTB` and `rebuildSeconds`; a DPU's `behaviours.nvmeEmulation.functions` the NVMe
+functions it can present to its host (D62).
 
 **Stack**: `components.<c>.outputs` names what flows back (`dhcpServer`, `exchangeBroker`);
 `impersonators[].projection` names the twin adapter that is the impersonator (`kwok`).

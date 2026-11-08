@@ -415,6 +415,11 @@ func (r *runner) act(a *schema.ActStep) error {
 		}
 	case a.Cable != "":
 		return eng.SetLink(a.Link, a.Cable == "replace", r.src())
+	case a.Drive != "":
+		_, err := eng.DriveAct(a.Select, a.Drive, r.src())
+		return err
+	case a.Storage != nil:
+		return eng.StorageAct(a.Select, *a.Storage, r.src())
 	case a.Reseat:
 		ds, _ := eng.SelectDevices(a.Select)
 		for _, d := range ds {

@@ -1120,3 +1120,86 @@ replace the twin's BMCs, switches and power shelves with its own mocks and disco
 address with `allow_insecure_discovery`; the stand-ins keep the estate's BMCs and each machine's
 own address. **Refines:** D24, D48, D52. **Reversed if:** `vm` machines run NICo's DPU image,
 agent and scout at the scale of a rack (Q1).
+
+### D59 — A shared storage system is an estate list over the storage racks' devices; what it holds is the engine's
+A storage system is not a device: it is the storage nodes and drive enclosures of the racks it
+selects made one system with protocols, a pool, a protection, networks and a management address,
+declared in `spec.storageSystems` from a `StorageTemplate` (as a fabric is from a fabric
+template). The compiler checks it: its racks hold nodes of the template's class with pool drives,
+its protection fits those drives, its data network has the `storage` role and reaches every node,
+its management network the `management` role. What it holds (file systems with their export
+rules, volumes with their host mappings, buckets, snapshots, known NVMe hosts) is owned state in
+the engine, changed by its management API, by acts and, at `vm`, observed from its nodes' used
+bytes; its health, the node serving each object (a node down for `failoverSeconds` hands its
+objects to the next node that is up), its used capacity and its alerts (pool nearly full, quota
+exceeded, node down, pool degraded or failed, object offline, a fault's) are derived. A system's
+faults (`target: {storageSystem: true}`) set its use, take an object offline, fail a node's
+storage service or raise an alert. **Why:** a volume made through one API is read back through
+Swordfish, a vendor dialect, the exporter, the console, faults and scenario assertions; D2 needs
+them to agree, and only the engine orders them (the deep dive's S-Q1, S-Q4). **Reversed if:** a
+stack needs storage state that only one protocol reads, as UFM's partition keys.
+
+### D60 — A `vm` host's drives are QEMU NVMe controllers with the model's identity, on a patched QEMU
+Each drive of a `vm` host's profile is one NVMe controller on a PCIe root port of its own, in an
+NVM subsystem of its own (so its namespace outlives the controller across a hot-plug), with the
+model's serial, model and firmware strings (QEMU 11.1 or later) and an EUI-64 from the identity
+deriver, its namespace a sparse backing in the state directory that persists across restarts (an
+installed OS stays installed), capped at the largest file the host's file system holds. A failed
+or pulled drive leaves the guest's bus, a replacement (keeping the bay's identity, as the
+subsystem's serial must) comes back empty, a SMART fault sets its critical-warning bits, and a
+secure erase with the host off empties the backing. QEMU's NVMe controller advertises namespace
+management it does not implement and reports no capacity; `scripts/qemu/build.sh` builds QEMU
+with `0001-hw-nvme-namespace-management.patch`, which implements it over the subsystem's backing,
+so NICo's scout cleanup (format, delete-ns, create-ns, attach-ns) runs as on a real drive.
+**Why:** the deep dive's S-15 and S-Q5: without a real block device a `vm` host's cleanup,
+discovery and SKU checks are vacuous. **Reversed if:** QEMU upstream implements namespace
+management, when the patch is dropped.
+
+### D61 — A storage system at `vm` is its nodes as `os: twin` guests serving Linux's own targets
+At `fidelity: vm` each storage node is an `os: twin` guest whose initramfs adds Alpine's own
+packages at the image's release, pinned by digest and obtained with the image (nfs-utils,
+e2fsprogs, rclone), laid out for its merged `/usr`, and the twin's `dctwin-storage` script. The
+storage adapter drives each node through its in-host agent (D50): its storage address on its
+data port (static, `.20` onwards of its segment, numbered over every `vm` system's nodes on the
+network, so the data network is `dhcp: none`), an ext4 pool on its first data drive, and the
+objects the model homes on it, set up again whenever the node no longer serves them (after a
+restart, an object's data is in the pool but its bind mount and subsystem are gone): a file
+system bind-mounted at its path under the NFSv4 pseudo-root `/exports` and exported by the kernel
+NFS server with its export rules, a volume an nvmet subsystem over a file admitting exactly its
+mapped hosts' NQNs on an NVMe/TCP port, a bucket a directory `rclone serve s3` serves. What each
+node holds is observed back. Each node's targets are published through the segment gateway the
+twin is on its data port: at the node's storage address as a site route for the estate's `vm`
+hosts, and on this machine's loopback for clients outside the twin (`dctwin storage credentials`).
+**Why:** the protocols are real because Linux's own servers run them, on any host the twin runs
+QEMU on, without the host's kernel modules or configfs (the deep dive's S-Q2); the management API
+stays the twin's. **Not modelled:** an object's data stays on its home node (a failover moves its
+service in the model only), snapshots hold no data at `vm`, quotas are not enforced on the node,
+and a client through the published endpoint reaches the node from its segment's gateway address.
+
+### D62 — A DPU's NVMe emulation at `vm` is the twin's stand-in for DOCA SNAP
+A BlueField whose profile emulates NVMe (`behaviours.nvmeEmulation`) presents NVMe functions to
+its host: owned state, turned on (`NVME_EMULATION_ENABLE`) and given a storage system's volume by
+an act or the control API, which maps the volume to the DPU's host NQN in the storage system. When
+the host is a `vm` host, the stand-in connects to the volume's NVMe/TCP target as the DPU (a
+userspace NVMe/TCP host, `internal/substrate/nvmetcp`) and serves that namespace over NBD
+(`internal/substrate/nbd`) to a QEMU NVMe controller hot-plugged into one of the host's spare root
+ports, with the function's serial: the host's guest reads and writes the storage system's volume
+through an NVMe drive, as SNAP presents a remote volume. Each NVMe/TCP command is bounded, and a
+session whose connection breaks (the node restarted) is dialled again on the next I/O; a volume a
+function presents cannot be deleted until it is detached. **Why:** DOCA SNAP is NVIDIA's binary on
+the BlueField's emulation hardware, which a QEMU Arm cannot run (the deep dive's 5.3). **Not
+modelled:** the function's PCI id is QEMU's, the stand-in runs beside the host's machine rather
+than on the DPU, and DPF's `DPUVolume` objects are not read (the twin's API attaches).
+
+### D63 — Storage management APIs: Swordfish for the generic system, vendor dialects scoped by their CSI drivers
+A storage system serves its template's manager at its management address (`.5` onwards of its
+first node's rack segment): `generic/swordfish`, SNIA Swordfish 1.2.9's resources over Redfish at
+the URIs the schemas allow (Storage, StoragePool, Volume, FileSystem with ExportedFileShares, the
+NVMe-oF Fabric with Endpoints and Connections, Chassis and Drives, a ComputerSystem with the
+`StorageServer` hosting role), checked by DMTF's validators with SNIA's Discovery, File and Block
+Provisioning profiles; or a vendor's API as a dialect in its vendor pack, scoped by the calls its
+CSI driver makes (D25): `vast/vms`, from vast-csi's source. Its Prometheus exporter
+(`storage_system_*`) is served beside it. **Why:** the deep dive's S-Q3 and S-Q6: standards-based
+clients read Swordfish, and what a platform calls is its vendor's CSI driver. **Reversed if:** a
+vendor publishes an emulator of its own API that is bound to the model.
+

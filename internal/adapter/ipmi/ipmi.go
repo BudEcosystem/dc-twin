@@ -101,7 +101,7 @@ func (a *Adapter) Start(ctx context.Context, rt *adapter.Runtime) error {
 			noMfr[t.dialect] = true
 		}
 		b := &bmc{a: a, d: t.d, conn: conn, mfr: mfr, product: productID(t.d.ProfileName), guid: guidOf(t.uuid),
-			sensors: sensorsFor(t.d.Profile), fru: fruImage(t.d.Profile.Spec.Identity, t.serial),
+			sensors: withDrives(sensorsFor(t.d.Profile), t.d), fru: fruImage(t.d.Profile.Spec.Identity, t.serial),
 			sessions: map[uint32]*session{}, sdrRes: 1, selRes: 1}
 		addr := conn.LocalAddr().String()
 		a.mu.Lock()
@@ -150,7 +150,7 @@ func (a *Adapter) Report() adapter.Report {
 		IsNot: []string{
 			"No IPMI v1.5 sessions (MD5, straight password): only RMCP+; cipher suite 0 is not offered.",
 			"No Serial over LAN payload, no OEM payloads or OEM commands, no IPMB bridging, no PEF or alerting, no user or channel configuration commands.",
-			"Sensors are 8-bit linear SDR readings of the model's derived values (a power sensor's step is about maxW/212 W); leak and discrete sensors are not in the SDR.",
+			"Sensors are 8-bit linear SDR readings of the model's derived values (a power sensor's step is about maxW/212 W); leak sensors are not in the SDR; the only discrete sensors are the drive slots (presence, fault, predictive failure, rebuild).",
 			"The SEL is the model's log mapped to an IPMI event class by message id; the Redfish message text is not carried.",
 			"The FRU board and product serial are the device serial; the manufacturing date is unspecified; the product id is a hash of the profile name, not a vendor's.",
 			"Chassis power is binary: it reads on from the moment power is applied (PoweringOn) until the model reaches Off.",
@@ -659,4 +659,9 @@ func privilegeOf(role string) byte {
 		return privCallback
 	}
 	return privUser
+}
+
+// withDrives adds a drive-slot sensor for each of the device's drives after its threshold sensors.
+func withDrives(ss []*sensor, d *model.Device) []*sensor {
+	return append(ss, driveSensors(d, len(ss)+1)...)
 }
