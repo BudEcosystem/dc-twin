@@ -104,79 +104,9 @@ func (e *Engine) injectLocked(selStr, faultID string, params map[string]any, id 
 	if !ok {
 		return nil, fmt.Errorf("fault %q is in no pinned catalogue", faultID)
 	}
-	sel, err := selector.Parse(selStr)
+	targets, err := e.faultTargets(selStr, ref)
 	if err != nil {
 		return nil, err
-	}
-	t := ref.Spec.Target
-	type target struct {
-		d    *model.Device
-		c    *model.Component
-		p    *model.Port
-		s    *model.StorageSystem
-		path string
-	}
-	var targets []target
-	switch {
-	case t.StorageSystem:
-		for _, s := range e.M.StorageSystems {
-			if sel.MatchPath(s.Path) || selStr == s.Name || selStr == "storage/"+s.Name {
-				targets = append(targets, target{d: s.Nodes[0], s: s, path: s.Path})
-			}
-		}
-	case t.Port:
-		for r, p := range e.M.Ports {
-			if sel.MatchPort(r) {
-				targets = append(targets, target{d: p.Device, p: p, path: r})
-			}
-		}
-	case t.Component != "":
-		for _, d := range e.M.Devices {
-			for _, c := range d.Components {
-				if c.Kind != t.Component || (t.Vendor != "" && c.Vendor != t.Vendor) {
-					continue
-				}
-				if sel.MatchPath(c.Path) {
-					targets = append(targets, target{d: d, c: c, path: c.Path})
-				}
-			}
-		}
-	default:
-		for _, d := range e.M.Devices {
-			if !sel.MatchPath(d.Path) || !sel.MatchAttrs(d.Attr) {
-				continue
-			}
-			if t.Device != "" && d.BaseClass != t.Device {
-				continue
-			}
-			switch t.DeviceWith {
-			case "bmc":
-				if !d.HasBMC() {
-					continue
-				}
-			case "firmware":
-				if len(d.Profile.Spec.Firmware) == 0 {
-					continue
-				}
-			case "leak-detector":
-				if !hasSensorSource(d, "tray-leak-detector") {
-					continue
-				}
-			case "breaker":
-				if e.M.PowerBy[d.Path] == nil {
-					continue
-				}
-			case "host":
-				if !d.IsHost() {
-					continue
-				}
-			}
-			targets = append(targets, target{d: d, path: d.Path})
-		}
-	}
-	sort.Slice(targets, func(i, j int) bool { return targets[i].path < targets[j].path })
-	if len(targets) == 0 {
-		return nil, fmt.Errorf("fault %s: selector %q matches no %s", faultID, selStr, describeTarget(t))
 	}
 	catalogue := ref.Catalogue.Metadata.Name
 	var out []*ActiveFault
@@ -719,4 +649,109 @@ func (e *Engine) FaultSets(d *model.Device) map[string]any {
 		}
 	}
 	return out
+}
+
+// target is one thing a fault lands on: a device, a component, a port or a storage system.
+type target struct {
+	d    *model.Device
+	c    *model.Component
+	p    *model.Port
+	s    *model.StorageSystem
+	path string
+}
+
+// faultTargets resolves a selector to the targets a fault would land on, in path order.
+func (e *Engine) faultTargets(selStr string, ref *pack.FaultRef) ([]target, error) {
+	sel, err := selector.Parse(selStr)
+	if err != nil {
+		return nil, err
+	}
+	t := ref.Spec.Target
+	var targets []target
+	switch {
+	case t.StorageSystem:
+		for _, s := range e.M.StorageSystems {
+			if sel.MatchPath(s.Path) || selStr == s.Name || selStr == "storage/"+s.Name {
+				targets = append(targets, target{d: s.Nodes[0], s: s, path: s.Path})
+			}
+		}
+	case t.Port:
+		for r, p := range e.M.Ports {
+			if sel.MatchPort(r) {
+				targets = append(targets, target{d: p.Device, p: p, path: r})
+			}
+		}
+	case t.Component != "":
+		for _, d := range e.M.Devices {
+			for _, c := range d.Components {
+				if c.Kind != t.Component || (t.Vendor != "" && c.Vendor != t.Vendor) {
+					continue
+				}
+				if sel.MatchPath(c.Path) {
+					targets = append(targets, target{d: d, c: c, path: c.Path})
+				}
+			}
+		}
+	default:
+		for _, d := range e.M.Devices {
+			if !sel.MatchPath(d.Path) || !sel.MatchAttrs(d.Attr) {
+				continue
+			}
+			if t.Device != "" && d.BaseClass != t.Device {
+				continue
+			}
+			switch t.DeviceWith {
+			case "bmc":
+				if !d.HasBMC() {
+					continue
+				}
+			case "firmware":
+				if len(d.Profile.Spec.Firmware) == 0 {
+					continue
+				}
+			case "leak-detector":
+				if !hasSensorSource(d, "tray-leak-detector") {
+					continue
+				}
+			case "breaker":
+				if e.M.PowerBy[d.Path] == nil {
+					continue
+				}
+			case "host":
+				if !d.IsHost() {
+					continue
+				}
+			}
+			targets = append(targets, target{d: d, path: d.Path})
+		}
+	}
+	sort.Slice(targets, func(i, j int) bool { return targets[i].path < targets[j].path })
+	if len(targets) == 0 {
+		return nil, fmt.Errorf("fault %s: selector %q matches no %s", ref.ID, selStr, describeTarget(t))
+	}
+	return targets, nil
+}
+
+// FaultTargets lists the targets a fault would land on and that its profile's allow-list
+// admits, without injecting it: the critic's generator draws from these (17 — Campaigns).
+func (e *Engine) FaultTargets(sel, faultID string) ([]string, error) {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	ref, ok := e.Reg.Faults[faultID]
+	if !ok {
+		return nil, fmt.Errorf("fault %q is in no pinned catalogue", faultID)
+	}
+	ts, err := e.faultTargets(sel, ref)
+	if err != nil {
+		return nil, err
+	}
+	catalogue := ref.Catalogue.Metadata.Name
+	var out []string
+	for _, tg := range ts {
+		if tg.s != nil && !slices.Contains(tg.s.Faults, catalogue) || tg.s == nil && !allowed(tg.d, catalogue) {
+			continue
+		}
+		out = append(out, tg.path)
+	}
+	return out, nil
 }

@@ -75,6 +75,25 @@ the diff in the file's own layout, and suggested fixes; **Apply** restarts the e
 live: here feed A is lost and UPS-A carries its side on battery. More in the
 [console's README](console/README.md).
 
+## The critic
+
+Every scenario run is also **judged** ([spec 17](docs/spec/17-critic.md)). From the event log
+alone (every request the software under test made, every fault and what it reached, and what the
+stack's own API said) the critic checks policies (generic ones such as "no destructive request on
+a healthy device", and a stack's own playbook of what it promises per fault), derives each fault's
+moments (exposed, acknowledged, first action, mitigated, recovered), scores the run and explains
+every violation with the events that prove it:
+
+```bash
+bin/dctwin scenario run examples/scenarios/nvl72-leak-response.yaml --judgement j.json --junit j.xml
+bin/dctwin critic explain j.json 1                 # who did what, the device before it, what it read first
+bin/dctwin critic judge <state dir> --policy p.yaml  # re-judge a recorded run offline, under another policy
+bin/dctwin campaign run examples/campaigns/refstack-nightly.yaml   # seeds × scenarios, baselines, shrunk fault sequences
+```
+
+It knows no stack: a stack brings a policy and maps the standard aliases, and nothing in its code
+changes. `make critic-mutants` verifies the critic against the reference stack's seeded defects.
+
 ## What it is for
 
 - **Testing a datacenter stack before the hardware arrives.** Rack ingestion, firmware baselines,
@@ -107,6 +126,7 @@ live: here feed A is lost and UPS-A carries its side on battery. More in the
 | [`internal/compile`](internal/compile) | The compiler: an estate file and the packs become the model, with every validation rule |
 | [`internal/engine`](internal/engine) | The single-writer engine: power, sensors, faults, the event log, the clocks |
 | [`internal/adapter`](internal/adapter) | One package per protocol: Redfish, DHCP, BMS, SNMP, IPMI, UFM, NVUE, NMX-C, RMS, VMs, … |
+| [`internal/critic`](internal/critic) | The critic: policies, invariants, fault moments, measures, judgements, campaigns ([17](docs/spec/17-critic.md)); generic policies in [`policies`](policies) |
 | [`internal/control`](internal/control) | The control API the CLI and the console use, and the estate drafts |
 | [`packs`](packs) | Device profiles, rack formats, fabric templates and fault catalogues, per vendor |
 | [`stacks`](stacks) | Stack definitions (NVIDIA DSX OS, a reference stack) |

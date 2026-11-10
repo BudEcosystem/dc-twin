@@ -153,7 +153,7 @@ a strict allow-list as a profile's), `provides` by fidelity, `isNot` (R) by fide
 | Field | | Meaning |
 |---|---|---|
 | `estate` | R | `{requires: {formats?: [], capabilities?: [], racks?: {min}}}` — constraints, not a file. The scenario runs on the estate it is given |
-| `stack` | R | `{components: [], accessors: {alias: <stack>.<component>.<accessor>}}` — the installed stack comes from the estate; the scenario names the components it needs and maps **stack-neutral aliases** to accessors so the same scenario can run against another stack |
+| `stack` | R | `{components: [], accessors: {alias: <stack>.<component>.<accessor>}, aliases: [standard alias…]}` — the installed stack comes from the estate; the scenario names the components it needs and maps **stack-neutral aliases** to accessors so the same scenario can run against another stack; `aliases` names [standard aliases](17-critic.md#standard-aliases) bound through the installed stack's `critic.aliases`, and a scenario none maps is `not-run` |
 | `timeout` | R | duration |
 | `chaos` | O | `{enabled, ratePerDeviceHour}` |
 | `setup[]` | O | steps run before the clock of `steps` starts |
@@ -162,7 +162,7 @@ a strict allow-list as a profile's), `provides` by fidelity, `isNot` (R) by fide
 | `act` | | `{power: On\|…, select}` \| `{cable: pull\|replace, link}` \| `{reseat, select}` \| `{seconds}` |
 | `fault` | | `{select, inject: faultId, params?, id?: name}` or `{clear: name \| {select, inject}}` |
 | `expect` | | `{within, all: [observation \| {not: observation}]}`. A positive observation must become true within the window; **a `not` must hold for the entire window** |
-| observation | | `redfish: {select, property, equals}` · `ipmi: {select, sensor, equals}` · `bms: {topic (MQTT filter with + and #), value}` (observed at the publisher's log) · `event: {canonical, from?: stack\|user\|scenario, on: selector}` · `domain: {path, state}` · `faults: {select, count}` · `accessor: {alias, args, equals}` |
+| observation | | `redfish: {select, property, equals}` · `ipmi: {select, sensor, equals}` · `bms: {topic (MQTT filter with + and #), value}` (observed at the publisher's log) · `event: {canonical?, class?: read\|write\|destructive, from?: stack\|user\|scenario, on: selector, field?, to?}` · `domain: {path, state}` · `faults: {select, count}` · `accessor: {alias, args, equals}` |
 | `report` | O | D `fidelity` |
 
 A scenario result is `passed`, `failed`, `not-run` (a requirement unmet) or `impersonated` (it ran
@@ -352,6 +352,55 @@ functions it can present to its host (D62).
 
 **Stack**: `components.<c>.outputs` names what flows back (`dhcpServer`, `exchangeBroker`);
 `impersonators[].projection` names the twin adapter that is the impersonator (`kwok`).
+
+## Policy, Judgement, Campaign (the critic, 17)
+
+`kind: Policy`, `metadata.name: <owner>/<name>` (`generic/safety`, `reference/default`). The Go
+types are `internal/schema/critic.go`.
+
+| Field | | Meaning |
+|---|---|---|
+| `extends[]` | O | policies merged in first; the generic ones are always included (D67) |
+| `disable[]` | O | `{rule: <policy>/<name> glob, reason}`; the reason is required |
+| `playbook[]` | O | `{on: fault glob, where?, acknowledged?, mitigated?, within?, then?: {recovered, within}, permits[], forbids[], key? (D true)}`; conditions are CEL over `fault` (`id`, `fault`, `catalogue`, `path`, `device`, `rack`, `rackName`, `serial`, `class`); `permits`/`forbids` are `{canonical?, class?, on?, except?, when?}` with `on`/`except` CEL giving a selector |
+| `invariants[]` | O | `{name, dimension, severity: error\|warning, key, message, requires: [stack \| alias…], never \| always \| leadsTo \| atMost \| sometimes}` (17 — Invariants); event filters `{kind, canonical, class, from, principal, on, field, to}` take globs with `\|` |
+| `objectives[]` | O | `{name, measure, where?, aggregate: max (D)\|p50\|p95\|min\|sum\|mean, pass, warn?, key, dimension?}`; criteria `<=45s`, `==0`, `>=0.9`, `<=+10%` (against the baseline) |
+| `weights` | O | per dimension; D correctness 4, safety 4, timeliness 2, restraint 1, hygiene 1 |
+| `gate` | O | `{score: ">=0.9"}` |
+| `sampling` | O | `{accessors: 2s}` |
+| `isNot[]` | O | what passing this policy does not show |
+
+The CEL environment of a condition (`expr.EnvCritic`): `event`, `before` (the event's device as of
+the event before it: `path`, `known`, `class`, `rack`, `rackName`, `serial`, `power`, `health`,
+`ac`, `rackIsolated`, `faults`, `affected`), `fault`, `device`, `affected`, `permitted`, `run`;
+member functions `model.device(path)`, `model.affected(path)`, `model.openFaults({fault, rack,
+device})`, `model.bySerial(serial)`, `model.state({path, field})`, `events.count({kind, canonical,
+class, from, on, status, within})`, and `accessors.<alias>(args)` for the standard aliases and the
+stack's.
+
+**Stack**: `critic: {aliases: {<standard alias>: <component>.<accessor>}, stateMap: {<stack
+state>: <standard state>}, principals: {<component>: {users, addresses}}, policy: policy.yaml}`.
+
+**Event**: `request.class` (`read`, `write`, `destructive`, `other`; set at commit from the
+canonical name, 14); `kind: run` markers (`data.phase: start|end`, `run`, `runKind`, `scenario`,
+`subject`, `clock`, `stacks`, `aliases`, `stateMap`, `snapshot` of every device; the end marker's
+`verdict` and `steps`); `kind: observe` with `data.accessor`, `args`, `value` (D68) or
+`data.push: true` (the BMS pushed a discrete point to the stack).
+
+`kind: Judgement` (JSON, `<state>/judgements/<run>.json`): `run`, `subject`, `policies`, `disabled`,
+`verdict`, `reason`, `score`, `dimensions{score, pass, warn, fail, items}`, `assertions`,
+`violations[{rule, policy, dimension, severity, key, message, fault, expected, observed,
+witness{events, offset, request, principal, causeChain, before, reads, openFaults}}]`,
+`faults[{…, affected, moments{injected, exposed, acknowledged, firstAction, mitigated, recovered:
+{seq, after}}, response{requests, writes, destructive, byCanonical, collateral}}]`, `measures`,
+`objectives`, `coverage`, `na`, `incidents`, `gate`, `fidelity`, `holdout`.
+
+`kind: Campaign`: `estates[]`, `adapters[]`, `scenarios.files[]`, `holdout.files[]`, `policy`,
+`subject`, `seeds: {count, from}`, `stack: {command, outputs, server, broker, ready}` with
+placeholders `{tcp:<name>}`, `{udp:<name>}` (free loopback addresses per cell; `{tcp:gateway}` is
+the twin's site gateway) and `{state}`, `generate: {runs, select, faults[], count, within,
+settle, maxConcurrent, setup[], stack, shrink}`, `baseline: {file}`, `budget: {wall}`. The result
+is `kind: CampaignResult` (`campaign.json`).
 
 ## Compatibility
 

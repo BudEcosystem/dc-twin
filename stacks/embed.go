@@ -3,5 +3,5 @@ package stacks
 
 import "embed"
 
-//go:embed */stack.yaml
+//go:embed */stack.yaml */policy.yaml
 var FS embed.FS

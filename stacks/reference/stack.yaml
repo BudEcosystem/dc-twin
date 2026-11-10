@@ -19,6 +19,10 @@ spec:
       accessors:
         machine: { kind: http, endpoint: "{refstack}/v1/machines/{id}", credential: twin-issued-readonly, join: { twin: serial, stack: serial } }
         alerts: { kind: http, endpoint: "{refstack}/v1/alerts?rack={rack}", credential: twin-issued-readonly }
+  critic:
+    aliases: { machine: refstack.machine, alerts: refstack.alerts }
+    stateMap: { Discovered: Discovered, Ready: Ready, LeakDetected: Maintenance }
+    policy: policy.yaml
   scenarios: [examples/scenarios/bmc-discovery.yaml, examples/scenarios/nvl72-leak-response.yaml, examples/scenarios/tray-leak-isolation.yaml]
   isNot:
     - "Not NICo: implements NICo's documented leak policies (tray shutdown, RackLeak alert, isolation request above a threshold) and NICo's identity-string hardware detection, nothing more."

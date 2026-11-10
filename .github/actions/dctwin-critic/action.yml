@@ -1,0 +1,53 @@
+# The dc-twin critic as a CI gate (docs/spec/17-critic.md — Interfaces: CI). It builds dctwin,
+# runs a campaign against the software under test, uploads the judgements and JUnit, posts the
+# Markdown judgement on the pull request, and fails the job on a failed cell or a broken rule.
+name: dc-twin critic
+description: Run a dc-twin campaign and gate on the critic's judgement
+inputs:
+  campaign:
+    description: Path to the campaign file
+    required: true
+  subject:
+    description: What is being judged (defaults to the commit)
+    required: false
+    default: ${{ github.sha }}
+  comment:
+    description: Post the judgement on the pull request (true/false)
+    required: false
+    default: "true"
+outputs:
+  result:
+    description: Path to campaign.json
+    value: ${{ steps.run.outputs.result }}
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-go@v5
+      with: { go-version-file: go.mod }
+    - name: Build dctwin and the reference stack
+      shell: bash
+      run: make build && bin/dctwin assets fetch
+    - name: Run the campaign
+      id: run
+      shell: bash
+      run: |
+        set +e
+        out="${RUNNER_TEMP}/dctwin-campaign"
+        bin/dctwin campaign run "${{ inputs.campaign }}" --out "$out" --junit "$out/junit.xml" --markdown "$out/judgement.md"
+        code=$?
+        echo "result=$out/campaign.json" >> "$GITHUB_OUTPUT"
+        echo "code=$code" >> "$GITHUB_OUTPUT"
+        cat "$out/judgement.md" >> "$GITHUB_STEP_SUMMARY" || true
+    - uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: dctwin-critic
+        path: ${{ runner.temp }}/dctwin-campaign
+    - name: Comment on the pull request
+      if: always() && inputs.comment == 'true' && github.event_name == 'pull_request'
+      shell: bash
+      env: { GH_TOKEN: "${{ github.token }}" }
+      run: gh pr comment "${{ github.event.pull_request.number }}" --body-file "${RUNNER_TEMP}/dctwin-campaign/judgement.md" || true
+    - name: Gate
+      shell: bash
+      run: exit ${{ steps.run.outputs.code }}

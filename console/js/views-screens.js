@@ -185,6 +185,30 @@ window.TC = window.TC || {};
       h('span', { style: SUB }, 'Fidelity report'),
       lines.map((r, i) => h('span', { key: i, style: `font:11px ${MONO};color:#b3b3b3;line-height:1.6;white-space:pre-wrap` }, r)));
   }
+  // The critic's judgement of a run (docs/spec/17-critic.md): verdict and score, the scorecard,
+  // each fault's moments, and every violation with its witness.
+  function judgementBox(J) {
+    if (!J) return null;
+    const col = { pass: '#5cde7b', warn: '#d1b854', fail: '#ec7575' };
+    const dims = ['correctness', 'safety', 'timeliness', 'restraint', 'hygiene', 'coverage'];
+    const line = (t, c) => h('span', { style: `font:11px ${MONO};color:${c || '#b3b3b3'};line-height:1.6;white-space:pre-wrap` }, t);
+    const mom = (f, n) => (f.moments && f.moments[n] ? `${n} +${f.moments[n].after.toFixed(1)}s` : `${n} —`);
+    return h('div', { style: 'padding:12px;background:#0a0a0a;border:1px solid #1f1f1f;border-radius:6px;display:flex;flex-direction:column;gap:6px' },
+      h('div', { style: 'display:flex;align-items:center;gap:10px' }, h('span', { style: SUB }, 'Critic'), h('div', { style: 'flex:1' }),
+        h('span', { style: `font-size:12px;color:${STATUS_C[J.verdict] || '#757575'}` }, `${J.verdict} · score ${J.score == null ? 'n/a' : J.score.toFixed(2)}`)),
+      J.reason ? line(J.reason, '#757575') : null,
+      h('div', { style: 'display:flex;flex-wrap:wrap;gap:6px' }, dims.map((d) => {
+        const ds = (J.dimensions || {})[d]; const sc = ds && ds.score != null ? ds.score : null;
+        const c = sc == null ? '#4d4d4d' : sc >= 0.999 ? col.pass : sc >= 0.5 ? col.warn : col.fail;
+        return h('span', { key: d, title: ds ? `${ds.pass} pass · ${ds.warn} warn · ${ds.fail} fail` : 'n/a', style: `font-size:11px;color:${c};border:1px solid ${c};border-radius:999px;padding:1px 8px` }, `${d} ${sc == null ? 'n/a' : sc.toFixed(2)}`);
+      })),
+      (J.faults || []).map((f, i) => line(`${f.fault} on ${f.target.split('/').slice(2).join('/')}: ${['exposed', 'acknowledged', 'firstAction', 'mitigated', 'recovered'].map((n) => mom(f, n)).join('  ')}`)),
+      (J.violations || []).length === 0 ? line('violations: none', col.pass) : (J.violations || []).slice(0, 20).map((v, i) => h('div', { key: i, style: 'display:flex;flex-direction:column;border-left:2px solid ' + (v.severity === 'warning' ? col.warn : col.fail) + ';padding-left:8px' },
+        line(`${v.rule}${v.key ? ' (key)' : ''} at +${(v.witness.offset || 0).toFixed(1)}s`, v.severity === 'warning' ? col.warn : col.fail),
+        line(v.message), v.observed ? line('observed: ' + v.observed, '#757575') : null,
+        v.witness.reads && v.witness.reads.length ? line('read before it: ' + v.witness.reads.slice(0, 3).join(' · '), '#757575') : null)),
+      (J.objectives || []).filter((o) => o.result === 'fail' || o.result === 'warn').map((o, i) => line(`objective ${o.id}: ${o.result} (${o.measure} = ${o.value}, pass ${o.pass})`, col[o.result])));
+  }
   function scenariosDemo(A) {
     const S = A.S, src = A.src, SC = src.scenarios(), sn = SC[S.scenSel] ? S.scenSel : Object.keys(SC)[0], cur = SC[sn];
     const rr = src.scenRun && src.scenRun.name === sn ? src.scenRun : src.scenLast && src.scenLast.name === sn ? src.scenLast : null;
@@ -237,6 +261,7 @@ window.TC = window.TC || {};
           const ok = s.status === 'passed';
           return stepRow(i, ok ? '✓' : '✕', ok ? '#5cde7b' : '#ec7575', 'none', s.kind, `${s.name || ''}${s.took ? ' · ' + s.took : ''}`, (s.detail || []).map((x) => ({ text: x, icon: ok ? '✓' : '✕', color: ok ? '#757575' : '#ec7575' })));
         })),
+        judgementBox(R && R.judgement),
         reportBox(lines)));
   }
 

@@ -50,6 +50,8 @@ type Machine struct {
 	Updated   time.Time `json:"updated"`
 	user, pw  string
 	client    *gofish.APIClient
+	// lastSession is when the session-leak mutant last opened a session on this BMC.
+	lastSession time.Time
 }
 
 type Alert struct {
@@ -83,6 +85,8 @@ type stack struct {
 	integ     string
 	rackTags  map[string]map[string]string // rack -> pointType -> integration value topic
 	log       *log.Logger
+	mut       mutants // seeded defects (mutants.go)
+	poll      time.Duration
 }
 
 func main() {
@@ -92,10 +96,25 @@ func main() {
 	gateway := flag.String("gateway", "", "the twin's site gateway (HTTP CONNECT) for reaching BMC site addresses")
 	expectedFile := flag.String("expected", "", "expected machines file (BMC MAC, serial, factory credentials), as an operator loads into a lifecycle manager")
 	threshold := flag.Int("isolation-threshold", 2, "leaking trays in one rack above which the BMS is asked to isolate it")
+	mutant := flag.String("mutant", "", "seeded defects to switch on, comma-separated, for verifying the critic (mutants.go)")
 	flag.Parse()
+	mut, err := parseMutants(*mutant)
+	if err != nil {
+		log.Fatal(err)
+	}
 	s := &stack{machines: map[string]*Machine{}, alerts: map[string]*Alert{}, leases: map[string]string{}, pool: map[string]int{},
 		expected: map[string]expected{}, gateway: *gateway, isolation: map[string]bool{}, threshold: *threshold, integ: "NICO",
-		rackTags: map[string]map[string]string{}, log: log.New(os.Stderr, "refstack ", log.Ltime|log.Lmicroseconds)}
+		rackTags: map[string]map[string]string{}, log: log.New(os.Stderr, "refstack ", log.Ltime|log.Lmicroseconds), mut: mut,
+		poll: 500 * time.Millisecond}
+	if mut.on("chatty") {
+		go s.chatter()
+	}
+	if mut.on("eager-isolation") {
+		s.threshold = 0
+	}
+	for m := range mut {
+		s.log.Printf("MUTANT %s: %s", m, mutantNames[m])
+	}
 	if err := s.startBroker(*broker); err != nil {
 		s.log.Fatal(err)
 	}
@@ -363,16 +382,17 @@ func (s *stack) healthLoop() {
 			}
 		}
 		for rack, n := range leaking {
-			if n > s.threshold && !s.isolation[rack] {
+			if n > s.threshold && !s.isolation[rack] && !s.mut.on("no-isolation") {
 				s.requestIsolation(rack)
 			}
 		}
-		time.Sleep(500 * time.Millisecond)
+		time.Sleep(s.poll)
 	}
 }
 
 func (s *stack) checkMachine(m *Machine) {
 	c := m.client
+	s.leakSession(m)
 	systems, err := c.Service.Systems()
 	if err != nil {
 		s.mu.Lock()
@@ -425,18 +445,42 @@ func (s *stack) checkMachine(m *Machine) {
 		delete(s.alerts, key)
 		m.State = "Ready"
 	}
-	shut := leak == "Leaking" && m.Handling == "None" && sys.PowerState == redfish.OnPowerState
+	shut := leak == "Leaking" && m.Handling == "None" && sys.PowerState == redfish.OnPowerState && !s.mut.on("ignore-leak")
 	if shut {
 		m.Handling = "ShuttingDown"
 	}
 	s.mu.Unlock()
 	if shut {
-		// NICo's documented default: shut down the leaking tray, and only it
-		s.log.Printf("tray leak on %s (%s): graceful shutdown", m.Serial, m.BMCIP)
-		if err := sys.Reset(redfish.GracefulShutdownResetType); err != nil {
-			s.mu.Lock()
-			m.Handling = "Failed"
-			s.mu.Unlock()
+		do := func() {
+			if s.mut.on("reset-storm") {
+				for i := 0; i < 8; i++ {
+					_ = sys.Reset(redfish.ForceRestartResetType)
+					time.Sleep(time.Second)
+				}
+			}
+			// NICo's documented default: shut down the leaking tray, and only it
+			s.log.Printf("tray leak on %s (%s): graceful shutdown", m.Serial, m.BMCIP)
+			if err := sys.Reset(redfish.GracefulShutdownResetType); err != nil {
+				s.mu.Lock()
+				m.Handling = "Failed"
+				s.mu.Unlock()
+			}
+			if s.mut.on("wrong-tray") {
+				if n := s.neighbour(m); n != nil {
+					s.log.Printf("mutant wrong-tray: shutting down %s as well", n.Serial)
+					_ = s.resetSystem(n, redfish.GracefulShutdownResetType)
+				}
+			}
+		}
+		if s.mut.on("slow") || s.mut.on("reset-storm") {
+			go func() {
+				if s.mut.on("slow") {
+					time.Sleep(time.Minute)
+				}
+				do()
+			}()
+		} else {
+			do()
 		}
 	}
 	if m.Handling == "ShuttingDown" && sys.PowerState == redfish.OffPowerState {
@@ -514,6 +558,9 @@ func (s *stack) bmsConsumer(broker string) {
 				s.alerts[key] = &Alert{Kind: "RackLeak", Rack: rack, PreventAllocations: true,
 					Classifications: []string{"RackLeak", "Hardware", "SensorCritical", "PreventAllocations"}, Since: time.Now().UTC().Format(time.RFC3339)}
 				s.log.Printf("BMS rack leak on %s: RackLeak alert, PreventAllocations", rack)
+				if s.mut.on("rack-leak-poweroff") {
+					go s.rackLeakPowerOff(rack)
+				}
 			}
 		} else {
 			delete(s.alerts, key)

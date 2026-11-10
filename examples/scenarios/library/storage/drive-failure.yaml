@@ -1,0 +1,18 @@
+# Twin-only: a drive fails and its host reports it; with a stack, the stack sees it.
+apiVersion: dc-twin/v1alpha1
+kind: Scenario
+metadata: { name: library-storage-drive-failure }
+spec:
+  estate: { requires: { formats: [generic/storage-rack] } }
+  stack: {}
+  timeout: 2m
+  steps:
+    - fault: { id: drive, select: "c01/server-01/nvme-1", inject: generic/storage/drive-failure }
+    - expect:
+        within: 10s
+        all:
+          - event: { field: health, to: Critical, on: "c01/server-01/nvme-1" }
+          - faults: { select: "c01/server-01/**", count: 1 }
+    - fault: { clear: drive }
+    - expect: { within: 10s, all: [{ faults: { select: "c01/server-01/**", count: 0 } }] }
+  report: fidelity

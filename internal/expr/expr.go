@@ -23,7 +23,11 @@ const (
 	EnvBehaviour Env = "behaviour" // profile behaviours.*.requires: device, rack, estate
 	EnvEstate    Env = "estate"    // stack requires[].when, inputs: estate, stack
 	EnvScenario  Env = "scenario"  // scenario wait.for and model observations
+	EnvCritic    Env = "critic"    // policy conditions (docs/spec/17-critic.md)
 )
+
+// CriticVars are the variables of a policy condition (17 — Invariants).
+var CriticVars = []string{"event", "before", "fault", "run", "device", "affected", "permitted", "model", "accessors", "events"}
 
 // Funcs are the member functions bound at run time (model.select, accessors.<alias>,
 // events.count …). Each takes the receiver and one argument.
@@ -48,6 +52,10 @@ func envFor(e Env, names []string, funcs Funcs) (*cel.Env, error) {
 	case EnvScenario:
 		opts = append(opts, cel.Variable("model", cel.DynType), cel.Variable("accessors", cel.DynType),
 			cel.Variable("events", cel.DynType), cel.Variable("clock", cel.DynType))
+	case EnvCritic:
+		for _, v := range CriticVars {
+			opts = append(opts, cel.Variable(v, cel.DynType))
+		}
 	default:
 		return nil, fmt.Errorf("unknown CEL environment %q", e)
 	}

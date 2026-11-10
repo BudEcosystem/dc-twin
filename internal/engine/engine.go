@@ -322,6 +322,9 @@ func (e *Engine) commit(ev schema.Event) uint64 {
 	ev.T = e.now.Format(time.RFC3339Nano)
 	ev.Wall = time.Now().UTC().Format(time.RFC3339Nano)
 	ev.Data = redact(ev.Data)
+	if ev.Request != nil && ev.Request.Class == "" {
+		ev.Request.Class = schema.RequestClass(ev.Request.Canonical)
+	}
 	e.events = append(e.events, ev)
 	if len(e.events) > e.retain {
 		e.events = append([]schema.Event{}, e.events[len(e.events)-e.retain/2:]...)
