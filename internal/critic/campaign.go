@@ -204,6 +204,7 @@ func RunCampaign(ctx context.Context, c *schema.Campaign, opt CampaignOptions) (
 				}
 				s, err := loadScenario(sc.path)
 				if err != nil {
+					env.stop()
 					return nil, err
 				}
 				cell := Cell{Estate: base(estPath), Scenario: s.Metadata.Name, Seed: seed, Holdout: sc.holdout}

@@ -123,8 +123,12 @@ func Run(ctx context.Context, t *twin.Twin, sc *schema.Scenario, opt Options) *R
 		for _, st := range res.Steps {
 			steps = append(steps, map[string]any{"index": st.Index, "kind": st.Kind, "name": st.Name, "status": st.Status, "detail": st.Detail, "took": st.Took})
 		}
-		r.cleanup()
 		MarkEnd(t, opt.RunID, map[string]any{"verdict": verdict, "reason": reason, "steps": steps})
+		if verdict != "passed" {
+			// after the end marker: the clears are not the run's, and a passing scenario keeps
+			// whatever state it left, as it always has
+			r.cleanup()
+		}
 		return res
 	}
 	if why := r.requirements(); why != "" {
@@ -910,6 +914,8 @@ func MarkStart(t *twin.Twin, id, kind, scenario, subject string) uint64 {
 	for _, d := range t.Engine.Snapshot() {
 		snap = append(snap, d)
 	}
+	// the run's first read of each accessor is recorded, changed or not (D68)
+	accessor.ResetShared(t.Engine)
 	clock := "wall"
 	if t.Engine.Virtual() {
 		clock = "virtual"
@@ -932,7 +938,7 @@ func MarkEnd(t *twin.Twin, id string, data map[string]any) uint64 {
 }
 
 // cleanup clears every fault the scenario injected that is still active, so a scenario that stops
-// at a failed step does not leave its faults to the next run on the estate.
+// at a failed step (before its own clears) does not leave its faults to the next run on the estate.
 func (r *runner) cleanup() {
 	eng := r.t.Engine
 	for _, f := range eng.Faults("") {

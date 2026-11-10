@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"strings"
 	"testing"
 )
 
@@ -76,6 +77,18 @@ spec:
 	if code != 200 || s["session"] == "" {
 		t.Fatalf("%d %s", code, b)
 	}
+	// a holdout run inside the session: its stored judgement says only its verdict (D70)
+	code, b = post(t, base+"/scenarios/run", tok, map[string]any{"scenario": strings.Replace(sc, "api-judged", "api-holdout", 1), "holdout": true})
+	var h struct{ Run string }
+	json.Unmarshal(b, &h)
+	if code != 200 || h.Run == "" {
+		t.Fatalf("%d %s", code, b)
+	}
+	stored, _ := io.ReadAll(get(t, base+"/critic/judgements/"+h.Run, tok).Body)
+	if !bytes.Contains(stored, []byte(`"holdout": true`)) && !bytes.Contains(stored, []byte(`"holdout":true`)) || bytes.Contains(stored, []byte(`"assertions"`)) {
+		t.Fatalf("the stored holdout judgement is redacted: %s", stored)
+	}
+	// the session goes on past the run made inside it
 	if code, b := post(t, base+"/faults", tok, map[string]any{"select": "a01/compute-tray-07/gpu-2", "fault": "nvidia/xid/xid-79", "id": "x"}); code != 200 {
 		t.Fatalf("%d %s", code, b)
 	}

@@ -156,7 +156,7 @@ func (m *mcp) call(name string, a map[string]any) (string, error) {
 		switch s("format") {
 		case "json":
 			if j.Holdout {
-				j.Violations, j.Faults, j.Assertions = nil, nil, nil
+				j.Redact()
 			}
 			b, _ := json.MarshalIndent(j, "", "  ")
 			return string(b), nil

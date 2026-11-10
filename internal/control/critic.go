@@ -64,8 +64,8 @@ func (s *Server) runScenario(w http.ResponseWriter, r *http.Request, body map[st
 	}
 	if holdout && j != nil {
 		// a holdout reports its verdict and scores only (D70)
+		// (RunScenario has already redacted the judgement it stored)
 		out.Result = &scenario.Result{Run: result.Run, Scenario: result.Scenario, Estate: result.Estate, Verdict: result.Verdict, Took: result.Took}
-		j.Violations, j.Assertions, j.Faults, j.Measures = nil, nil, nil, nil
 	}
 	writeJSON(w, out)
 }
@@ -80,8 +80,12 @@ func (s *Server) criticRoute(w http.ResponseWriter, r *http.Request, p string, b
 		s.crit.sessions = map[string]*critic.Session{}
 	}
 	s.crit.mu.Unlock()
-	dir := s.T.Runtime.StateDir
+	dir := critic.StateDir(s.T)
 	rest := strings.TrimPrefix(p, "/critic/")
+	if dir == "" && strings.HasPrefix(rest, "judgements") {
+		jsonErr(w, 404, "this twin keeps no state directory, so no judgement is stored")
+		return true
+	}
 	switch {
 	case rest == "judgements" && r.Method == http.MethodGet:
 		writeJSON(w, critic.List(dir))
@@ -160,13 +164,17 @@ func (s *Server) criticRoute(w http.ResponseWriter, r *http.Request, p string, b
 		}
 		run, _ := body["run"].(string)
 		if run == "" {
-			s.T.Engine.FlushLog()
-			evs, err := critic.ReadLog(dir)
-			if err != nil {
-				jsonErr(w, 500, err.Error())
-				return true
+			// the latest run: in memory when the engine still holds its start, else in the log
+			runs := critic.RunsIn(s.T.Engine.Events(0, func(e schema.Event) bool { return e.Kind == "run" }))
+			if len(runs) == 0 && dir != "" {
+				s.T.Engine.FlushLog()
+				evs, err := critic.ReadLog(dir)
+				if err != nil {
+					jsonErr(w, 500, err.Error())
+					return true
+				}
+				runs = critic.RunsIn(evs)
 			}
-			runs := critic.RunsIn(evs)
 			if len(runs) == 0 {
 				jsonErr(w, 404, "no run in the log")
 				return true

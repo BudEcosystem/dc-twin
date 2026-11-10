@@ -135,6 +135,25 @@ func Shared(c Committer, site string) *Recorder {
 	return r
 }
 
+// Reset forgets the answers recorded so far, so the next read of each key is recorded again: a
+// run is judged from its own events, and its first answer must be among them.
+func (r *Recorder) Reset() {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	r.last = map[string]string{}
+	r.mu.Unlock()
+}
+
+// ResetShared resets a committer's shared recorder, when it has one.
+func ResetShared(c Committer) {
+	sharedMu.Lock()
+	r := shared[c]
+	sharedMu.Unlock()
+	r.Reset()
+}
+
 // Forget drops a committer's shared recorder (when its engine goes down).
 func Forget(c Committer) {
 	sharedMu.Lock()

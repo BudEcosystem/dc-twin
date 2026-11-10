@@ -106,29 +106,37 @@ func Plan(tw *twin.Twin, g *schema.CampaignGenerate, seed int64) (GenPlan, error
 		hold := float64(int((10+rng.Float64()*30)*10)) / 10
 		p.Faults = append(p.Faults, GenFault{Select: c.target, Fault: c.fault, At: at, Clear: at + hold})
 	}
-	sort.Slice(p.Faults, func(i, j int) bool { return p.Faults[i].At < p.Faults[j].At })
-	// no more than maxc open at once: push a fault after the earliest clear before it
-	for i := range p.Faults {
-		for {
-			open := 0
-			first := 1e18
-			for j := 0; j < i; j++ {
-				if p.Faults[j].Clear > p.Faults[i].At {
-					open++
-					if p.Faults[j].Clear < first {
-						first = p.Faults[j].Clear
-					}
-				}
-			}
-			if open < maxc {
-				break
-			}
-			hold := p.Faults[i].Clear - p.Faults[i].At
-			p.Faults[i].At = first + 0.5
-			p.Faults[i].Clear = p.Faults[i].At + hold
-		}
-	}
+	p.Faults = spread(p.Faults, maxc)
 	return p, nil
+}
+
+// spread orders faults by start and pushes a fault after the earliest clear before it while
+// maxc are already open at its start. The faults before i are settled and start no later than
+// it; a pushed fault goes back among the rest, which may now start before it.
+func spread(fs []GenFault, maxc int) []GenFault {
+	byAt := func(fs []GenFault) {
+		sort.SliceStable(fs, func(i, j int) bool { return fs[i].At < fs[j].At })
+	}
+	byAt(fs)
+	for i := 0; i < len(fs); {
+		open := 0
+		first := 1e18
+		for j := 0; j < i; j++ {
+			if fs[j].Clear > fs[i].At {
+				open++
+				first = min(first, fs[j].Clear)
+			}
+		}
+		if open < maxc {
+			i++
+			continue
+		}
+		hold := fs[i].Clear - fs[i].At
+		fs[i].At = first + 0.5
+		fs[i].Clear = fs[i].At + hold
+		byAt(fs[i:])
+	}
+	return fs
 }
 
 // Scenario turns a plan into a scenario: the setup, then each fault and clear at its time,

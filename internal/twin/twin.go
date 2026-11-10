@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/BudEcosystem/dc-twin/internal/accessor"
 	"github.com/BudEcosystem/dc-twin/internal/adapter"
 	"github.com/BudEcosystem/dc-twin/internal/adapter/netsim"
 	"github.com/BudEcosystem/dc-twin/internal/compile"
@@ -386,6 +387,7 @@ func (t *Twin) Down() {
 	}
 	if t.Engine != nil {
 		t.Engine.Stop()
+		accessor.Forget(t.Engine)
 	}
 	if t.Net != nil {
 		t.Net.Close()

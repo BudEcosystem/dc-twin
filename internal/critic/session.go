@@ -124,6 +124,9 @@ func (s *Sampler) sample() {
 		if _, ok := e.Data["cleared"]; ok {
 			if x := faults[id]; x != nil {
 				x.cleared = time.Now()
+				if t, err := time.Parse(time.RFC3339Nano, e.Wall); err == nil {
+					x.cleared = t
+				}
 			}
 			continue
 		}
@@ -162,7 +165,7 @@ func (s *Sampler) sample() {
 					_, _ = s.ev.truth(c, w, vars)
 				}
 			}
-			if p.Then != nil && usesAccessors(p.Then.Recovered) && (recent || !open) {
+			if p.Then != nil && usesAccessors(p.Then.Recovered) && recent {
 				_, _ = s.ev.truth(p.Then.Recovered, w, vars)
 			}
 			for _, a := range append(append([]schema.ActionPattern{}, p.Permits...), p.Forbids...) {
@@ -291,6 +294,9 @@ func RunScenario(ctx context.Context, tw *twin.Twin, sc *schema.Scenario, opt Ru
 	j, err := JudgeRun(tw, runID, res, Options{Fidelity: result.Report, Subject: opt.Subject, Baseline: opt.Baseline, Holdout: opt.Holdout})
 	if err != nil {
 		return result, nil, err
+	}
+	if opt.Holdout {
+		j.Redact()
 	}
 	_ = Save(StateDir(tw), j)
 	return result, j, nil

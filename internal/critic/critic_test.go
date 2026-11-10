@@ -381,3 +381,44 @@ func TestBaselineRelativeObjectiveAndDiff(t *testing.T) {
 		t.Fatal("the diff names the objective that moved")
 	}
 }
+
+// TestSessionSpansTheRunsInsideIt: an open session is judged to its own end, through the start
+// and end markers of the scenario runs made while it was open; a scenario run is judged to its own.
+func TestSessionSpansTheRunsInsideIt(t *testing.T) {
+	b := newLog("reference")
+	b.evs[0].Data["runKind"] = "session"
+	b.add(schema.Event{Kind: "run", Path: "site-1", Data: map[string]any{"run": "inner", "phase": "start", "runKind": "scenario"}}, time.Second)
+	b.add(schema.Event{Kind: "run", Path: "site-1", Data: map[string]any{"run": "inner", "phase": "end", "verdict": "passed"}}, time.Second)
+	b.fault(tray(7), "late", "nvidia/xid/xid-79", time.Second)
+	b.end("", time.Second)
+	j := judgeLog(t, b, refPolicy(t))
+	if len(j.Faults) != 1 || j.Faults[0].ID != "late" {
+		t.Fatalf("the session judges the fault after the inner run: %+v", j.Faults)
+	}
+	b.evs[0].Data["runKind"] = "scenario"
+	if j := judgeLog(t, b, refPolicy(t)); len(j.Faults) != 0 {
+		t.Fatalf("a scenario run ends where the next run starts: %+v", j.Faults)
+	}
+}
+
+// TestRedactKeepsTheVerdictOnly: a holdout's judgement keeps its verdict and scores and nothing
+// that says what it tested (D70).
+func TestRedactKeepsTheVerdictOnly(t *testing.T) {
+	b := newLog("reference")
+	trayLeak(b, func(b *logBuilder, f uint64) { b.req(tray(8), "power.off.force", time.Second) })
+	j := judgeLog(t, b, refPolicy(t))
+	if len(j.Violations) == 0 {
+		t.Fatal("the wrong tray is a violation")
+	}
+	verdict, score := j.Verdict, *j.Score
+	j.Redact()
+	out, _ := json.Marshal(j)
+	for _, leak := range []string{"forbids", "compute-tray-08", "tray-detector", "power.off.force"} {
+		if strings.Contains(string(out), leak) {
+			t.Errorf("the redacted judgement still says %q: %s", leak, out)
+		}
+	}
+	if j.Verdict != verdict || j.Score == nil || *j.Score != score {
+		t.Errorf("verdict and score are kept: %s %v", j.Verdict, j.Score)
+	}
+}

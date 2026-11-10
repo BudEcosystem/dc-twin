@@ -268,6 +268,20 @@ func firstSeq(v Violation) uint64 {
 	return 0
 }
 
+// Redact reduces a holdout's judgement to its verdict and scores (D70): what it tested and how
+// the stack failed it stay out of everything stored or served.
+func (j *Judgement) Redact() {
+	j.Violations, j.Assertions, j.Faults, j.Measures, j.NA, j.Incidents, j.Fidelity = nil, nil, nil, nil, nil, nil, nil
+	j.Coverage = Coverage{}
+	for _, d := range j.Dimensions {
+		d.Items = nil
+	}
+	for i := range j.Objectives {
+		j.Objectives[i].Detail = ""
+	}
+	j.Reason = ""
+}
+
 // offset is seconds since the run started.
 func (jd *judge) offset(t time.Time) float64 {
 	return round3(t.Sub(jd.h.Run.Started).Seconds())

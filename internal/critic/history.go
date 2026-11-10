@@ -137,8 +137,8 @@ func Build(events []schema.Event) (*History, error) {
 			h.Run.EndSeq, h.Run.Ended, h.Run.Finished, h.Run.End = e.Seq, h.time(e), true, e.Data
 			break
 		}
-		if e.Kind == "run" && e.Data["phase"] == "start" && e.Seq != first.Seq {
-			break // the next run begins
+		if e.Kind == "run" && e.Data["phase"] == "start" && e.Seq != first.Seq && h.Run.Kind != "session" {
+			break // the next run begins; an open session spans the runs made inside it
 		}
 		h.Events = append(h.Events, e)
 	}

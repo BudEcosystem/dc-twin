@@ -922,16 +922,18 @@ func (a *Adapter) publishValue(p *point, force bool) {
 		return
 	}
 	prev, seen := a.last[p.valueTopic]
-	if !force && seen && !changed(prev, v, p.def.deadband) {
+	moved := seen && changed(prev, v, p.def.deadband)
+	if !force && seen && !moved {
 		return
 	}
 	a.last[p.valueTopic] = v
 	at := a.now()
 	b, _ := json.Marshal(valueMsg{Value: &v, Timestamp: at.UnixMilli(), Quality: 1})
 	a.publish(p.valueTopic, b, false, "value")
-	if seen && len(p.def.stateText) > 0 && p.source != "" {
+	if moved && len(p.def.stateText) > 0 && p.source != "" {
 		// a discrete point's change pushed to the stack: the critic's evidence that the stack was
-		// told (17 — The five moments of a fault)
+		// told (17 — The five moments of a fault). A periodic republish of an unchanged value
+		// tells the stack nothing new and is not recorded.
 		a.e.Commit(schema.Event{Kind: "observe", Source: schema.EventSource{Class: "twin", Principal: "bms"}, Path: p.source,
 			Message: fmt.Sprintf("BMS pushed %s = %v", p.pointType, v),
 			Data:    map[string]any{"push": true, "protocol": "mqtt", "topic": p.valueTopic, "pointType": p.pointType, "value": v}})
