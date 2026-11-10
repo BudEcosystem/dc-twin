@@ -1203,3 +1203,45 @@ CSI driver makes (D25): `vast/vms`, from vast-csi's source. Its Prometheus expor
 clients read Swordfish, and what a platform calls is its vendor's CSI driver. **Reversed if:** a
 vendor publishes an emulator of its own API that is bound to the model.
 
+
+### D64 — The critic judges only from the event log, the model and declared accessors
+A run is judged from its committed events: the requests the stack made (with their canonical
+names and classes), the state they changed, the faults and their cause chains, the twin's pushes
+to the stack, and every answer the twin read from the stack's accessors, which is committed when it
+changed. A start marker records every device's state, so the run can be rebuilt as of any event.
+Nothing is read from the stack's code, logs or database. **Why:** D10 and G1; it is what makes the
+critic stack-neutral, and a recorded run re-judgeable offline under another policy without running
+the stack again (`dctwin critic judge`). **Reversed if:** a class of defect matters that leaves no
+trace on any device or accessor.
+
+### D65 — The verdict is rule-based; the score never decides it
+A run fails on a failed scenario assertion, a violated key rule or a failed key objective; the
+weighted score of its dimensions is a summary for trends and an optional CI gate. **Why:** a
+weighted mean can average a safety violation away. **Reversed if:** scores prove stable enough
+across seeds to gate on alone.
+
+### D66 — The four results of 08 stand; the critic adds none
+`passed`, `failed`, `not-run`, `impersonated` for scenario, suite and judgement alike; a gate on
+the score is a property of the pipeline (exit code 4), not a fifth verdict.
+
+### D67 — Generic policies apply by default, disabled only by name with a reason
+`generic/safety`, `restraint`, `hygiene`, `liveness` and `allocation` are added to every policy;
+a policy turns one of their rules off with `disable: [{rule, reason}]`, and the reason is printed
+in every judgement. A rule a run cannot judge (no stack installed, an alias not mapped) is `n/a`,
+listed with why, and neither passes nor fails. **Why:** a floor that needs no work from the stack.
+**Reversed if:** they produce false violations on stacks with legitimately different behaviour.
+
+### D68 — The twin's reads of a stack are committed events
+Every accessor read (by a scenario or by the critic's sampler, which evaluates every condition that
+reads the stack while the run goes on) is committed as an `observe` event when its answer differed
+from the last for the same accessor and arguments. **Why:** offline re-judgement and witnesses need
+what the stack said, and when. **Reversed if:** their volume crowds the log (then: a side log with
+the same retention).
+
+### D69 — Timeliness is wall time, and void against a baseline under `timeScale ≠ 1`
+The stack is not time-scaled; a run on the virtual clock (no stack) measures on the twin's clock.
+
+### D70 — Holdout scenarios reveal verdicts only
+A holdout run's judgement keeps its verdict, score and dimensions; its steps, faults and
+violations are withheld from the control API, the CLI and the MCP server. **Why:** a developer or
+an agent iterating against a critic it can read in full fits the critic rather than the software.

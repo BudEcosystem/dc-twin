@@ -18,6 +18,7 @@ documented environment.
 | Profile `behaviours.*.requires` | `device`, `rack`, `estate` |
 | Fault `params` defaults | `device`, `component` |
 | Scenario `wait.for` | `model`, `accessors`, `events`, `clock` |
+| Policy conditions ([17](17-critic.md)) | `event`, `before`, `fault`, `device`, `affected`, `permitted`, `run`, `model`, `events`, `accessors` ([13](13-schemas.md#policy-judgement-campaign-the-critic-17)) |
 
 ### The environment
 
@@ -95,7 +96,15 @@ as `other`.
 | `bmc.reset` · `bmc.defaults` · `bmc.clock` | Manager.Reset, ResetToDefaults; Manager `DateTime` set |
 | `network.read` | Manager and System EthernetInterfaces, NetworkDeviceFunctions, Ports |
 | `erase.start` | SecureErase, Drive.SecureErase |
+| `facility.isolate` · `facility.release` | An integration's request to the BMS to isolate a rack (electrical or liquid), and its release |
 | `other` | anything unmapped |
+
+Every canonical request has a **class** the critic reads ([17](17-critic.md#evidence)), set on
+the event when it is committed (`request.class`): **destructive** for what takes a machine, its
+data or its management controller out of service or cuts a rack's supply (`power.off.*`,
+`power.restart`, `power.cycle`, `ac.cycle`, `erase.start`, `tpm.clear`, `bmc.defaults`,
+`bmc.reset`, `bios.reset`, `firmware.update.*`, `facility.isolate`, `account.delete`); **read** for
+`*.read`, `event.sse` and `task.read`; **other** for `other`; **write** for the rest.
 
 NICo's `libredfish` trait (about 80 operations) maps onto this list without remainder; the mapping
 is the first entry in each NVIDIA dialect's `requests.yaml` ([stack doc](../stacks/nvidia-dsx-os.md#what-nico-asks-a-bmc)).

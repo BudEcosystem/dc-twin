@@ -3,7 +3,7 @@ BIN ?= bin
 # the image the chart runs, tagged with the chart's appVersion
 IMAGE ?= ghcr.io/budecosystem/dc-twin:$(shell sed -n 's/^appVersion: *"\(.*\)"/\1/p' charts/dc-twin/Chart.yaml)
 
-.PHONY: build test test-short e2e assets image compat-libredfish compat-sushy compat-dmtf compat-nico-fabric compat-tinkerbell compat-ironic compat-kai compat-aicr compat-prometheus compat-kueue compat-volcano compat-medik8s e2e-refstack e2e-linux-substrate help
+.PHONY: build test test-short e2e assets image compat-libredfish compat-sushy compat-dmtf compat-nico-fabric compat-tinkerbell compat-ironic compat-kai compat-aicr compat-prometheus compat-kueue compat-volcano compat-medik8s e2e-refstack e2e-linux-substrate critic-mutants critic-campaign help
 
 build: ## build dctwin and the reference stack into $(BIN)/
 	go build -o $(BIN)/dctwin ./cmd/dctwin
@@ -122,6 +122,12 @@ compat-fleet-intelligence: ## NVIDIA Fleet Intelligence agent (fleetint 1.5.0 fr
 
 e2e-refstack: ## the reference stack scenarios through the CLI
 	scripts/e2e-refstack.sh
+
+critic-mutants: ## the critic against every seeded defect of the reference stack (MUTANTS=a,b to pick)
+	go test ./test/e2e/ -run 'TestCriticCatchesEveryMutant|TestCriticOnTwinScenarios' -parallel 10 -v -timeout 40m
+
+critic-campaign: build ## the example campaign: matrix, holdout, generated runs shrunk (needs bin/refstack)
+	bin/dctwin campaign run examples/campaigns/refstack-nightly.yaml --out campaign-out --junit campaign-out/junit.xml --markdown campaign-out/judgement.md
 
 e2e-linux-substrate: ## the TAP substrate and a real NOS (FRR + ISC dhcrelay) with Kea, in privileged Linux containers (needs Docker)
 	scripts/linux-substrate-e2e.sh

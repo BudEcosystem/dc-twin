@@ -26,7 +26,6 @@ import (
 	"github.com/BudEcosystem/dc-twin/internal/engine"
 	"github.com/BudEcosystem/dc-twin/internal/model"
 	"github.com/BudEcosystem/dc-twin/internal/report"
-	"github.com/BudEcosystem/dc-twin/internal/scenario"
 	"github.com/BudEcosystem/dc-twin/internal/schema"
 	"github.com/BudEcosystem/dc-twin/internal/selector"
 	"github.com/BudEcosystem/dc-twin/internal/twin"
@@ -54,6 +53,7 @@ type Server struct {
 	Restart Restarter
 	mu      sync.RWMutex
 
+	crit       criticState
 	genMu      sync.Mutex
 	gen        chan struct{} // closed when a restart begins: event streams end
 	restarting bool
@@ -443,14 +443,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, rep)
 	case p == "/scenarios/run" && r.Method == http.MethodPost:
-		raw, _ := body["_raw"].(string)
-		var sc schema.Scenario
-		if err := schema.Decode([]byte(raw), &sc); err != nil {
-			jsonErr(w, 400, err.Error())
-			return
-		}
-		res := scenario.Run(r.Context(), s.T, &sc, scenario.Options{})
-		writeJSON(w, res)
+		s.runScenario(w, r, body)
+	case strings.HasPrefix(p, "/critic/") && s.criticRoute(w, r, p, body):
 	case p == "/catalogue" && r.Method == http.MethodGet:
 		if q.Get("detail") == "full" {
 			writeJSON(w, s.catalogueFull())

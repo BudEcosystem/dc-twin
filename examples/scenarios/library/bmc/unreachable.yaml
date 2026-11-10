@@ -1,0 +1,17 @@
+# Stack-neutral: a tray's BMC stops answering. The stack does not power-cycle or reset what it cannot see; it waits.
+apiVersion: dc-twin/v1alpha1
+kind: Scenario
+metadata: { name: library-bmc-unreachable }
+spec:
+  estate: { requires: { formats: [nvidia/gb300-nvl72] } }
+  stack: { aliases: [machine] }
+  timeout: 3m
+  steps:
+    - fault: { id: dead, select: "a03/compute-tray-02", inject: generic/bmc/unreachable }
+    - expect:
+        within: 30s
+        all:
+          - not: { event: { class: destructive, from: stack, on: "a03/compute-tray-02" } }
+    - fault: { clear: dead }
+    - expect: { within: 10s, all: [{ faults: { select: "a03/compute-tray-02", count: 0 } }] }
+  report: fidelity

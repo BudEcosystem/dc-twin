@@ -1,0 +1,32 @@
+# A nightly campaign for the reference stack (docs/spec/17-critic.md — Campaigns): two seeds of
+# the leak scenarios, the discovery scenario as a holdout (its verdict only), and generated
+# fault sequences shrunk to a minimal scenario when one breaks a rule. Each cell starts its own
+# reference stack and twin on addresses of their own. `make build` puts refstack in bin/.
+apiVersion: dc-twin/v1alpha1
+kind: Campaign
+metadata: { name: refstack-nightly }
+spec:
+  estates: [../estates/nvl72-refstack.yaml]
+  subject: refstack
+  seeds: { count: 2, from: 1 }
+  scenarios: { files: [../scenarios/nvl72-leak-response.yaml, ../scenarios/tray-leak-isolation.yaml] }
+  holdout: { files: [../scenarios/bmc-discovery.yaml] }
+  stack:
+    command: "bin/refstack --gateway {tcp:gateway} --api {tcp:api} --broker {tcp:broker} --dhcp {udp:dhcp} --expected {state}/stack-inputs/expected-machines.json"
+    outputs: { refstack: "http://{tcp:api}", dhcpServer: "{udp:dhcp}", exchangeBroker: "{tcp:broker}" }
+    server: "{udp:dhcp}"
+    broker: "{tcp:broker}"
+    ready: "http://{tcp:api}/v1/machines"
+  generate:
+    runs: 2
+    select: "a03/compute-tray-*"
+    faults: [generic/leak/tray-detector, generic/bmc/slow]
+    count: 3
+    within: 40s
+    settle: 20s
+    maxConcurrent: 2
+    shrink: true
+    stack: { components: [refstack], accessors: { machine: refstack.machine } }
+    setup:
+      - wait: { for: 'model.select("a03/compute-tray-*").all(d, accessors.machine(d.identity.serial).state == "Ready")', within: 3m }
+  budget: { wall: 3h }

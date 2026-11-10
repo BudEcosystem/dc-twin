@@ -1,0 +1,16 @@
+# Stack-neutral: Xid 79 on one GPU. The stack's Kubernetes node for the host stops taking work. Needs the node alias.
+apiVersion: dc-twin/v1alpha1
+kind: Scenario
+metadata: { name: library-accelerator-xid-79 }
+spec:
+  estate: { requires: { formats: [nvidia/gb300-nvl72] } }
+  stack: { aliases: [node] }
+  timeout: 4m
+  steps:
+    - fault: { id: x79, select: "a03/compute-tray-07/gpu-2", inject: nvidia/xid/xid-79 }
+    - expect:
+        within: 2m
+        all:
+          - accessor: { alias: node, args: { name: a03-compute-tray-07 }, equals: { unschedulable: true } }
+    - fault: { clear: x79 }
+  report: fidelity

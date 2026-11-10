@@ -171,3 +171,23 @@ func (l *eventLog) close() {
 		l.w = nil
 	}
 }
+
+// FlushLog writes what the committed log holds in its buffer, so a reader of the files (the
+// critic judging a run from disk) sees every event committed so far.
+func (e *Engine) FlushLog() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.log != nil && e.log.w != nil {
+		e.log.w.Flush()
+	}
+}
+
+// OldestRetained is the lowest sequence number still held in memory (0 when nothing is).
+func (e *Engine) OldestRetained() uint64 {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	if len(e.events) == 0 {
+		return 0
+	}
+	return e.events[0].Seq
+}

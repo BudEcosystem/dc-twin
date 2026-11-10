@@ -1,0 +1,15 @@
+# Stack-neutral: a tenant's allocation is released and its machines sanitised before reuse. Needs the allocation alias.
+apiVersion: dc-twin/v1alpha1
+kind: Scenario
+metadata: { name: library-lifecycle-release-sanitise }
+spec:
+  estate: { requires: { formats: [nvidia/gb300-nvl72] } }
+  stack: { aliases: [allocation, machine] }
+  timeout: 20m
+  steps:
+    - wait: { for: 'accessors.allocation({"id": "library-tenant"}).state == "Released"', within: 15m }
+    - expect:
+        within: 1m
+        all:
+          - event: { canonical: erase.start, from: stack, on: "a03/compute-tray-*" }
+  report: fidelity

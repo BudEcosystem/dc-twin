@@ -6,16 +6,14 @@ package scenario
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
-	"net/http"
-	"net/url"
 	"reflect"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/BudEcosystem/dc-twin/internal/accessor"
 	"github.com/BudEcosystem/dc-twin/internal/engine"
 	"github.com/BudEcosystem/dc-twin/internal/expr"
 	"github.com/BudEcosystem/dc-twin/internal/model"
@@ -30,6 +28,12 @@ import (
 type Options struct {
 	Log  io.Writer
 	Poll time.Duration
+	// RunID names the run in its start and end markers (17 — Evidence); one is made when empty.
+	RunID string
+	// Subject is the caller's reference for what is being judged (a build, a commit).
+	Subject string
+	// Kind is the run's kind in its markers: scenario (default), campaign-cell, generated.
+	Kind string
 }
 
 type StepResult struct {
@@ -42,6 +46,7 @@ type StepResult struct {
 }
 
 type Result struct {
+	Run      string         `json:"run,omitempty"`
 	Scenario string         `json:"scenario"`
 	Estate   string         `json:"estate"`
 	Verdict  string         `json:"verdict"`
@@ -100,12 +105,30 @@ func Run(ctx context.Context, t *twin.Twin, sc *schema.Scenario, opt Options) *R
 			fmt.Fprintf(opt.Log, f+"\n", a...)
 		}
 	}
-	res := &Result{Scenario: sc.Metadata.Name, Estate: t.Estate.Metadata.Name, Started: r.start.UTC().Format(time.RFC3339)}
+	if opt.RunID == "" {
+		opt.RunID = fmt.Sprintf("run-%d-%s", t.Engine.Seq()+1, sc.Metadata.Name)
+	}
+	if opt.Kind == "" {
+		opt.Kind = "scenario"
+	}
+	res := &Result{Run: opt.RunID, Scenario: sc.Metadata.Name, Estate: t.Estate.Metadata.Name, Started: r.start.UTC().Format(time.RFC3339)}
+	r.startSeq = MarkStart(t, opt.RunID, opt.Kind, sc.Metadata.Name, opt.Subject)
+	r.used.Since = r.startSeq
 	finish := func(verdict, reason string) *Result {
 		res.Verdict, res.Reason, res.Took = verdict, reason, time.Since(r.start).Round(time.Millisecond).String()
 		r.markUsedFromEvents()
 		res.Report = report.Build(t, r.used)
 		res.Report.Scenario = sc.Metadata.Name
+		steps := make([]any, 0, len(res.Steps))
+		for _, st := range res.Steps {
+			steps = append(steps, map[string]any{"index": st.Index, "kind": st.Kind, "name": st.Name, "status": st.Status, "detail": st.Detail, "took": st.Took})
+		}
+		MarkEnd(t, opt.RunID, map[string]any{"verdict": verdict, "reason": reason, "steps": steps})
+		if verdict != "passed" {
+			// after the end marker: the clears are not the run's, and a passing scenario keeps
+			// whatever state it left, as it always has
+			r.cleanup()
+		}
 		return res
 	}
 	if why := r.requirements(); why != "" {
@@ -229,71 +252,45 @@ func Provided(t *twin.Twin) map[string]bool {
 	return out
 }
 
-// bindAccessors maps the scenario's aliases to the installed stack's accessors.
+// bindAccessors maps the scenario's aliases to the installed stack's accessors. Every read is
+// recorded when its answer changed (accessor.Recorder), for the critic.
 func (r *runner) bindAccessors() error {
 	r.accessors = map[string]func(map[string]any) (any, error){}
+	rec := accessor.Shared(r.t.Engine, r.t.Engine.M.Site)
 	for alias, target := range r.sc.Spec.Stack.Accessors {
-		comp, acc, ok := strings.Cut(target, ".")
-		if !ok {
-			return fmt.Errorf("accessor %s: %q is not <component>.<accessor>", alias, target)
+		b, err := accessor.Resolve(r.t.Estate, r.t.Reg.Stacks, target)
+		if err != nil {
+			return fmt.Errorf("accessor %s: %w", alias, err)
 		}
-		var def *schema.Accessor
-		var outputs map[string]string
+		alias := alias
+		r.accessors[alias] = func(args map[string]any) (any, error) { return rec.Read(b, alias, args) }
+	}
+	for _, alias := range r.sc.Spec.Stack.Aliases {
+		if _, ok := r.accessors[alias]; ok {
+			continue
+		}
+		target := ""
 		for _, s := range r.t.Estate.Spec.Stacks {
 			name, _, _ := strings.Cut(s.Name, "@")
-			st := r.t.Reg.Stacks[name]
-			if st == nil {
-				continue
-			}
-			if c, ok := st.Spec.Components[comp]; ok {
-				if a, ok := c.Accessors[acc]; ok {
-					a := a
-					def, outputs = &a, s.Outputs
-				}
+			if st := r.t.Reg.Stacks[name]; st != nil && st.Spec.Critic != nil && st.Spec.Critic.Aliases[alias] != "" {
+				target = st.Spec.Critic.Aliases[alias]
+				break
 			}
 		}
-		if def == nil {
-			return fmt.Errorf("accessor %s: no installed stack declares %s", alias, target)
+		if target == "" {
+			if len(r.t.Estate.Spec.Stacks) == 0 {
+				return fmt.Errorf("the scenario reads the standard alias %s and no stack is installed", alias)
+			}
+			return fmt.Errorf("no installed stack maps the standard alias %s", alias)
 		}
-		d, outs := *def, outputs
-		r.accessors[alias] = func(args map[string]any) (any, error) { return callAccessor(d, comp, outs, args) }
+		b, err := accessor.Resolve(r.t.Estate, r.t.Reg.Stacks, target)
+		if err != nil {
+			return fmt.Errorf("alias %s: %w", alias, err)
+		}
+		alias := alias
+		r.accessors[alias] = func(args map[string]any) (any, error) { return rec.Read(b, alias, args) }
 	}
 	return nil
-}
-
-func callAccessor(a schema.Accessor, comp string, outputs map[string]string, args map[string]any) (any, error) {
-	if a.Kind != "http" {
-		return nil, fmt.Errorf("accessor kind %s is not supported", a.Kind)
-	}
-	ep := a.Endpoint
-	for k, v := range outputs {
-		ep = strings.ReplaceAll(ep, "{"+k+"}", v)
-	}
-	ep = strings.ReplaceAll(ep, "{"+comp+"}", outputs[comp])
-	for k, v := range args {
-		ep = strings.ReplaceAll(ep, "{"+k+"}", url.QueryEscape(fmt.Sprint(v)))
-	}
-	if strings.Contains(ep, "{") {
-		return nil, fmt.Errorf("accessor endpoint %q has unbound placeholders", ep)
-	}
-	req, _ := http.NewRequest("GET", ep, nil)
-	if tok := outputs[comp+".token"]; tok != "" {
-		req.Header.Set("Authorization", "Bearer "+tok)
-	}
-	cl := &http.Client{Timeout: 5 * time.Second}
-	resp, err := cl.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode == 404 {
-		return map[string]any{}, nil
-	}
-	var v any
-	if err := json.NewDecoder(resp.Body).Decode(&v); err != nil {
-		return nil, err
-	}
-	return v, nil
 }
 
 func (r *runner) src() schema.EventSource {
@@ -465,6 +462,9 @@ func (r *runner) fault(f *schema.FaultStep) error {
 	}
 	r.used.Faults[f.Inject] = true
 	for _, x := range fs {
+		r.faultIDs[x.ID] = x.Fault
+	}
+	for _, x := range fs {
 		ds, _ := eng.SelectDevices(x.Target)
 		for _, d := range ds {
 			r.used.Devices[d.Path] = true
@@ -573,6 +573,9 @@ func (r *runner) observe(o schema.Observation) (bool, string) {
 				return false
 			}
 			if ev.Canonical != "" && (e.Request == nil || e.Request.Canonical != ev.Canonical) {
+				return false
+			}
+			if ev.Class != "" && (e.Request == nil || schema.RequestClass(e.Request.Canonical) != ev.Class) {
 				return false
 			}
 			if ev.From != "" && e.Source.Class != ev.From {
@@ -881,5 +884,66 @@ func (r *runner) markUsedFromEvents() {
 			p = p[:i]
 		}
 		r.used.Devices[p] = true
+	}
+}
+
+// MarkStart commits a run's start marker: its id and kind, what it judges, the clock, the stacks
+// installed with how the critic reads them, and every device's state, so a recorded run can be
+// judged from its log alone (17 — Evidence).
+func MarkStart(t *twin.Twin, id, kind, scenario, subject string) uint64 {
+	var stacks []any
+	aliases, stateMap, principals := map[string]any{}, map[string]any{}, map[string]any{}
+	for _, s := range t.Estate.Spec.Stacks {
+		name, _, _ := strings.Cut(s.Name, "@")
+		stacks = append(stacks, s.Name)
+		st := t.Reg.Stacks[name]
+		if st == nil || st.Spec.Critic == nil {
+			continue
+		}
+		for k, v := range st.Spec.Critic.Aliases {
+			aliases[k] = v
+		}
+		for k, v := range st.Spec.Critic.StateMap {
+			stateMap[k] = v
+		}
+		for k, v := range st.Spec.Critic.Principals {
+			principals[k] = map[string]any{"users": v.Users, "addresses": v.Addresses}
+		}
+	}
+	snap := make([]any, 0)
+	for _, d := range t.Engine.Snapshot() {
+		snap = append(snap, d)
+	}
+	// the run's first read of each accessor is recorded, changed or not (D68)
+	accessor.ResetShared(t.Engine)
+	clock := "wall"
+	if t.Engine.Virtual() {
+		clock = "virtual"
+	}
+	return t.Engine.Commit(schema.Event{Kind: "run", Source: schema.EventSource{Class: "scenario", Principal: scenario}, Path: t.Engine.M.Site,
+		Message: "run " + id + " started",
+		Data: map[string]any{"run": id, "phase": "start", "runKind": kind, "scenario": scenario, "subject": subject, "estate": t.Estate.Metadata.Name,
+			"clock": clock, "timeScale": t.Engine.Scale(), "seed": t.Engine.M.Seed, "stacks": stacks, "aliases": aliases,
+			"stateMap": stateMap, "principals": principals, "snapshot": snap}})
+}
+
+// MarkEnd commits a run's end marker with its result.
+func MarkEnd(t *twin.Twin, id string, data map[string]any) uint64 {
+	if data == nil {
+		data = map[string]any{}
+	}
+	data["run"], data["phase"] = id, "end"
+	return t.Engine.Commit(schema.Event{Kind: "run", Source: schema.EventSource{Class: "scenario"}, Path: t.Engine.M.Site,
+		Message: "run " + id + " ended", Data: data})
+}
+
+// cleanup clears every fault the scenario injected that is still active, so a scenario that stops
+// at a failed step (before its own clears) does not leave its faults to the next run on the estate.
+func (r *runner) cleanup() {
+	eng := r.t.Engine
+	for _, f := range eng.Faults("") {
+		if _, ours := r.faultIDs[f.ID]; ours {
+			_, _ = eng.Clear(f.ID, "", r.src())
+		}
 	}
 }

@@ -1,0 +1,50 @@
+# Things no datacenter software should do to the hardware it manages. A destructive request is
+# one that takes a machine, its data or its management controller out of service, or cuts a
+# rack's supply (schema.RequestClass).
+apiVersion: dc-twin/v1alpha1
+kind: Policy
+metadata: { name: generic/safety, version: 0.1.0 }
+spec:
+  title: Generic safety
+  invariants:
+    - name: no-destructive-on-healthy
+      dimension: safety
+      key: true
+      requires: [stack]
+      message: a destructive request on a device that was on, healthy, and in the reach of no open fault
+      never:
+        event: { kind: request, from: stack, class: destructive }
+        where: 'before.known && !affected && !permitted && before.power == "On" && before.health == "OK"'
+    - name: no-isolation-without-cause
+      dimension: safety
+      key: true
+      requires: [stack]
+      message: a rack isolated from its supply while no fault was open in it
+      never:
+        event: { kind: request, from: stack, canonical: facility.isolate }
+        where: '!permitted && model.openFaults({"rack": event.path}).size() == 0'
+    - name: no-power-on-into-isolated-rack
+      dimension: safety
+      key: true
+      requires: [stack]
+      message: a power-on into a rack the BMS had isolated
+      never:
+        event: { kind: request, from: stack, canonical: power.on }
+        where: 'before.known && before.rackIsolated'
+    - name: no-erase-on-allocated
+      dimension: safety
+      key: true
+      requires: [stack, allocation]
+      message: an erase, TPM clear or BMC factory reset on a machine a tenant holds
+      never:
+        event: { kind: request, from: stack, canonical: "erase.start|tpm.clear|bmc.defaults" }
+        where: 'accessors.allocation({"id": before.serial}).state == "Active"'
+    - name: no-concurrent-firmware-update
+      dimension: safety
+      requires: [stack]
+      message: a firmware update pushed to a BMC that accepted another in the last two minutes
+      never:
+        event: { kind: request, from: stack, canonical: "firmware.update.*" }
+        where: 'events.count({"kind": "request", "from": "stack", "canonical": "firmware.update.*", "on": event.device, "status": "2xx", "within": 120}) > 0'
+  isNot:
+    - "Maintenance a site declares outside the scenario is not known: a destructive request during it is judged as any other."

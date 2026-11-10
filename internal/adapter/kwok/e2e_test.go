@@ -202,11 +202,17 @@ func TestKwokAndMetricsEndToEnd(t *testing.T) {
 			t.Fatalf("%s: not Ready or not marked impersonated: %+v", name, n.Status.Conditions)
 		}
 	}
-	lease, err := cs.CoordinationV1().Leases(corev1.NamespaceNodeLease).Get(ctx, "a01-compute-tray-07", metav1.GetOptions{})
-	if err != nil || lease.Spec.RenewTime == nil {
-		t.Fatalf("node lease: %v %v", lease, err)
-	}
-	first := lease.Spec.RenewTime.Time
+	// the adapter posts a Node's status and then creates its lease in the same pass, so the
+	// lease can trail the conditions waited for above by one write
+	var first time.Time
+	waitFor("the node lease", 5*time.Second, func() bool {
+		l, err := cs.CoordinationV1().Leases(corev1.NamespaceNodeLease).Get(ctx, "a01-compute-tray-07", metav1.GetOptions{})
+		if err != nil || l.Spec.RenewTime == nil {
+			return false
+		}
+		first = l.Spec.RenewTime.Time
+		return true
+	})
 	waitFor("the lease to be renewed", 5*time.Second, func() bool {
 		l, err := cs.CoordinationV1().Leases(corev1.NamespaceNodeLease).Get(ctx, "a01-compute-tray-07", metav1.GetOptions{})
 		return err == nil && l.Spec.RenewTime != nil && l.Spec.RenewTime.Time.After(first)

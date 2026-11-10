@@ -1000,6 +1000,9 @@ type ScenarioEstate struct {
 type ScenarioStack struct {
 	Components []string          `json:"components,omitempty"`
 	Accessors  map[string]string `json:"accessors,omitempty"`
+	// Aliases are standard aliases (17 — Standard aliases) the scenario reads, bound to whichever
+	// installed stack maps them in its critic section; the scenario is not-run when none does.
+	Aliases []string `json:"aliases,omitempty"`
 }
 
 type Chaos struct {
@@ -1095,11 +1098,14 @@ type BMSObs struct {
 
 type EventObs struct {
 	Canonical string `json:"canonical,omitempty"`
-	Kind      string `json:"kind,omitempty"`
-	From      string `json:"from,omitempty"`
-	On        string `json:"on,omitempty"`
-	Field     string `json:"field,omitempty"`
-	To        any    `json:"to,omitempty"`
+	// Class matches a request's class (read, write, destructive; 14), so a scenario can say "no
+	// destructive request" without naming a stack's calls.
+	Class string `json:"class,omitempty"`
+	Kind  string `json:"kind,omitempty"`
+	From  string `json:"from,omitempty"`
+	On    string `json:"on,omitempty"`
+	Field string `json:"field,omitempty"`
+	To    any    `json:"to,omitempty"`
 }
 
 type DomainObs struct {
@@ -1162,6 +1168,7 @@ type StackSpec struct {
 	Impersonators []Impersonator            `json:"impersonators,omitempty"`
 	Components    map[string]StackComponent `json:"components"`
 	Scenarios     []string                  `json:"scenarios"`
+	Critic        *StackCritic              `json:"critic,omitempty"`
 	IsNot         IsNot                     `json:"isNot"`
 }
 
@@ -1231,7 +1238,9 @@ type EventRequest struct {
 	Method    string `json:"method,omitempty"`
 	Target    string `json:"target,omitempty"`
 	Canonical string `json:"canonical"`
-	Status    int    `json:"status,omitempty"`
+	// Class is the canonical request's class (read, write, destructive, other; 17).
+	Class  string `json:"class,omitempty"`
+	Status int    `json:"status,omitempty"`
 }
 
 type EventState struct {

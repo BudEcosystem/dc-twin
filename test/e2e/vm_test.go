@@ -35,9 +35,16 @@ func TestVMFidelity(t *testing.T) {
 	if testing.Short() {
 		t.Skip("boots a virtual machine")
 	}
-	inst, err := qemu.Find("aarch64", "", false)
+	// DCTWIN_ALLOW_TCG=1 runs the aarch64 tray emulated on a host of another architecture (09): slower,
+	// and labelled so in the fidelity report, but the same protocol and power checks
+	tcg := os.Getenv("DCTWIN_ALLOW_TCG") == "1"
+	slow := time.Duration(1) // emulated firmware and kernel boot many times slower than accelerated ones
+	if tcg {
+		slow = 8
+	}
+	inst, err := qemu.Find("aarch64", "", tcg)
 	if err != nil {
-		t.Skipf("vm fidelity needs QEMU for an accelerated aarch64 guest: %v", err)
+		t.Skipf("vm fidelity needs QEMU for an accelerated aarch64 guest (DCTWIN_ALLOW_TCG=1 accepts an emulated one): %v", err)
 	}
 	g := vm.Guests["aarch64"]
 	if g.Present(vm.GuestDir(twin.AssetsDir(), "", g)) != nil {
@@ -45,7 +52,7 @@ func TestVMFidelity(t *testing.T) {
 			t.Skipf("vm fidelity needs the twin's guest image %s (from %s): %v", g.Name, g.Source, err)
 		}
 	}
-	tw := up(t, "../../examples/estates/gb300-vm.yaml", []string{"redfish", "ipmi", "vm"}, nil)
+	tw := upWith(t, "../../examples/estates/gb300-vm.yaml", []string{"redfish", "ipmi", "vm"}, tcg)
 	va := tw.Adapter("vm").(*vm.Adapter)
 	d := tw.Engine.M.DeviceBy[vmTray]
 	for _, mi := range va.Machines() {
@@ -54,7 +61,7 @@ func TestVMFidelity(t *testing.T) {
 	t.Logf("QEMU %s at %s, accelerator %s, firmware %s", inst.Version, inst.Binary, inst.Accel, inst.Code)
 
 	// the estate starts the tray on: the machine boots, and the model learns it from QEMU
-	waitBooted(t, tw, va, "os", 120*time.Second)
+	waitBooted(t, tw, va, "os", slow*120*time.Second)
 	t.Logf("QEMU command line: %s", va.Machines()[0].CommandLine)
 
 	rf := tw.Adapter("redfish").(*rfa.Adapter)
@@ -137,7 +144,7 @@ func TestVMFidelity(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitPower(t, tw, since, model.On)
-	waitBooted(t, tw, va, "os", 120*time.Second)
+	waitBooted(t, tw, va, "os", slow*120*time.Second)
 	agree(t, tw, va, c, sys, ipmi, model.On)
 
 	// Redfish PowerCycle: off, then on again — a new process on the same NVRAM
@@ -152,7 +159,7 @@ func TestVMFidelity(t *testing.T) {
 	if ev := waitPower(t, tw, since, model.On); ev.Data["reset"] != true {
 		t.Fatalf("the power-on of a cycle is a reset (device.reset fires): %v", ev.Data)
 	}
-	waitBooted(t, tw, va, "os", 120*time.Second)
+	waitBooted(t, tw, va, "os", slow*120*time.Second)
 	if _, pid2, _ := va.Status(vmTray); pid2 == pid || pid2 == 0 {
 		t.Fatalf("a power cycle runs a new process: %d → %d", pid, pid2)
 	}
@@ -164,11 +171,11 @@ func TestVMFidelity(t *testing.T) {
 	if err := sys.Reset(redfish.ForceRestartResetType); err != nil {
 		t.Fatal(err)
 	}
-	reset := waitEvent(t, tw, since, func(e schema.Event) bool { return e.State != nil && e.State.Field == "reset" }, 30*time.Second)
+	reset := waitEvent(t, tw, since, func(e schema.Event) bool { return e.State != nil && e.State.Field == "reset" }, slow*30*time.Second)
 	if reset.State.To != "host-qmp-system-reset" || reset.Source.Class != "observer" {
 		t.Fatalf("ForceRestart should be observed as QEMU's system reset: %+v", reset)
 	}
-	waitEvent(t, tw, reset.Seq, func(e schema.Event) bool { return e.State != nil && e.State.Field == "boot" && e.State.To == "os" }, 120*time.Second)
+	waitEvent(t, tw, reset.Seq, func(e schema.Event) bool { return e.State != nil && e.State.Field == "boot" && e.State.To == "os" }, slow*120*time.Second)
 	if _, pid2, _ := va.Status(vmTray); pid2 != pid {
 		t.Fatalf("a restart resets the machine; the process changed %d → %d", pid, pid2)
 	}
@@ -184,7 +191,7 @@ func TestVMFidelity(t *testing.T) {
 		t.Fatalf("a graceful restart is the guest shutting down first: %v", off.Data)
 	}
 	waitPower(t, tw, off.Seq, model.On)
-	waitBooted(t, tw, va, "os", 120*time.Second)
+	waitBooted(t, tw, va, "os", slow*120*time.Second)
 	agree(t, tw, va, c, sys, ipmi, model.On)
 
 	// Redfish GracefulShutdown: the ACPI power button; the guest decides, and here powers off
@@ -212,7 +219,7 @@ func TestVMFidelity(t *testing.T) {
 
 	rep := report.Build(tw, nil)
 	text := rep.Text()
-	for _, want := range []string{"1 vm (os: twin)", "power observed from QEMU", "UEFI NVRAM", "QEMU user-mode networking",
+	for _, want := range []string{"1 vm (os: twin)", "power observed from QEMU", "UEFI NVRAM", "cabled to leaf-a01-1:eth1", // its NICs on the twin's switch ports (D48)
 		"Grace is QEMU aarch64"} { // the profile's isNot at vm, beside its model one
 		if !strings.Contains(text, want) {
 			t.Fatalf("the fidelity report does not say %q:\n%s", want, text)
@@ -368,4 +375,23 @@ func ipmitoolOrSkip(tw *twin.Twin, path string) func(...string) string {
 		out, _ := cmd.CombinedOutput()
 		return string(out)
 	}
+}
+
+// upWith is up with TCG accepted for a guest of another architecture.
+func upWith(t *testing.T, estate string, adapters []string, allowTCG bool) *twin.Twin {
+	t.Helper()
+	reg, err := compile.Registry()
+	if err != nil {
+		t.Fatal(err)
+	}
+	est, _, err := compile.LoadEstate(estate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tw, err := twin.UpEstate(est, estate, reg, twin.Options{StateDir: t.TempDir(), Adapters: adapters, AllowTCG: allowTCG})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(tw.Down)
+	return tw
 }

@@ -1,0 +1,34 @@
+# What the reference stack promises: NICo's documented leak policies (docs/stacks/nvidia-dsx-os.md
+# — The two leak paths), as a playbook the critic judges it by (docs/spec/17-critic.md).
+apiVersion: dc-twin/v1alpha1
+kind: Policy
+metadata: { name: reference/default, version: 0.1.0 }
+spec:
+  title: The reference stack's leak playbook
+  extends: [generic/safety, generic/restraint, generic/hygiene, generic/liveness, generic/allocation]
+  playbook:
+    # Path 1: a tray's own leak detector. Shut that tray down, and no other; above the threshold,
+    # ask the BMS to isolate the rack.
+    - on: generic/leak/tray-detector
+      acknowledged: 'accessors.machine({"id": fault.serial}).leak_status == "Leaking"'
+      mitigated: 'model.device(fault.device).power == "Off"'
+      within: 45s
+      permits:
+        - { canonical: power.off.graceful, on: fault.device }
+        - { canonical: facility.isolate, on: fault.rack, when: 'model.openFaults({"fault": "generic/leak/tray-detector", "rack": fault.rack}).size() > 2' }
+      forbids:
+        - { class: destructive, on: 'fault.rack + "/**"', except: fault.device }
+    # Path 2: a BMS rack leak point. Raise an alert that blocks allocation; power nothing off.
+    - on: generic/leak/rack-point
+      acknowledged: 'accessors.alerts({"rack": fault.rackName}).exists(a, a.kind == "RackLeak" && a.preventAllocations)'
+      mitigated: 'accessors.alerts({"rack": fault.rackName}).exists(a, a.kind == "RackLeak" && a.preventAllocations)'
+      within: 30s
+      forbids:
+        - { class: destructive, on: 'fault.rack + "/**"' }
+  objectives:
+    - { name: tray-leak-shutdown, measure: fault.mitigated, where: 'fault.fault == "generic/leak/tray-detector"', pass: "<=20s", warn: "<=45s" }
+    - { name: leak-exposed, measure: fault.exposed, where: 'fault.catalogue == "generic/leak"', pass: "<=5s", warn: "<=15s" }
+    - { name: rack-leak-alert, measure: fault.acknowledged, where: 'fault.fault == "generic/leak/rack-point"', pass: "<=10s", warn: "<=30s" }
+    - { name: no-collateral, measure: response.collateral.devices, pass: "==0", key: true, dimension: safety }
+  isNot:
+    - "The reference stack is not NICo: its playbook is NICo's documented leak policy, not NICo's code."
