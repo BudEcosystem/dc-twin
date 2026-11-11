@@ -140,7 +140,7 @@ func run(estatePath, expectedPath, out string, reserve int) error {
 		kinds[rack][kind] = true
 	}
 	skipped := map[string]int{}
-	var noNVOS, zeroDPU []string
+	var noNVOS, zeroDPU, dpuManaged []string
 	paths := make([]string, 0, len(list))
 	for _, e := range list {
 		paths = append(paths, e.Path)
@@ -162,7 +162,12 @@ func run(estatePath, expectedPath, out string, reserve int) error {
 				"bmc_mac_address": e.BMCMAC, "bmc_username": e.User, "bmc_password": e.Password,
 				"chassis_serial_number": e.Serial, "rack_id": e.Rack, "metadata": meta,
 			}
-			if nic := bootNIC(m, d); nic != nil {
+			if hbnDPU(d) {
+				// a host whose BlueField's data plane the twin emulates (D71) is DPU-managed, as
+				// NICo manages one: its DPU is found from its own BMC and paired with it, and NICo
+				// boots it through the DPU
+				dpuManaged = append(dpuManaged, p)
+			} else if nic := bootNIC(m, d); nic != nil {
 				// A host that boots for real (vm fidelity, os: stack) is ingested as a zero-DPU
 				// host: its BlueField is a model device with no DPU OS for NICo to provision, so
 				// the operator declares it ignored, and declares the host's boot NIC (the
@@ -278,6 +283,9 @@ func run(estatePath, expectedPath, out string, reserve int) error {
 	fmt.Printf("segments: %s\n", strings.Join(segs, "; "))
 	fmt.Printf("expected: %d machines, %d power shelves, %d switches, %d racks; not NICo expected entities: %s\n",
 		len(machines), len(shelves), len(switches), len(rackList), strings.Join(sk, ", "))
+	if len(dpuManaged) > 0 {
+		fmt.Printf("DPU-managed hosts, their BlueFields' HBN emulated (D71): %s\n", strings.Join(dpuManaged, ", "))
+	}
 	if len(zeroDPU) > 0 {
 		fmt.Printf("zero-DPU hosts: %s\n", strings.Join(zeroDPU, ", "))
 	}
@@ -291,6 +299,16 @@ func run(estatePath, expectedPath, out string, reserve int) error {
 // bootNIC is the port a vm host with the stack's OS network-boots from: its first Ethernet port
 // (or a sub-device's at model fidelity, as the host sees a BlueField's ports) on a provisioning
 // network whose DHCP is the stack's. Other hosts are not booted by the stack, and have none.
+// hbnDPU is whether a host has a DPU whose HBN the twin emulates (spec.adapters.network.hbn).
+func hbnDPU(d *model.Device) bool {
+	for _, ch := range d.Children {
+		if ch.HBN {
+			return true
+		}
+	}
+	return false
+}
+
 func bootNIC(m *model.Model, d *model.Device) *model.Port {
 	if d.Fidelity != "vm" || d.OS != "stack" {
 		return nil

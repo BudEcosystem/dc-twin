@@ -3,6 +3,7 @@ package redfish
 import (
 	"fmt"
 	"hash/fnv"
+	"regexp"
 	"strings"
 	"sync"
 
@@ -278,12 +279,13 @@ func (r *renderer) firmwareBootDoc(path string) (map[string]any, bool) {
 		if b.optionID(e.id) == id {
 			h := fnv.New32a()
 			h.Write([]byte(e.id + "|" + e.description + "|" + e.devicePath))
-			name := e.description
+			desc := b.dpuBootName(e)
+			name := desc
 			if bare {
 				name = e.id // the DGX's BMC names an option by its variable
 			}
 			doc := map[string]any{"@odata.id": path, "@odata.type": "#BootOption.v1_0_3.BootOption", "@odata.etag": fmt.Sprintf(`W/"%d"`, h.Sum32()),
-				"Id": id, "Name": name, "BootOptionReference": e.id, "DisplayName": e.description, "Description": e.description,
+				"Id": id, "Name": name, "BootOptionReference": e.id, "DisplayName": desc, "Description": desc,
 				"BootOptionEnabled": e.active}
 			if e.devicePath != "" {
 				doc["UefiDevicePath"] = e.devicePath
@@ -295,4 +297,46 @@ func (r *renderer) firmwareBootDoc(path string) (map[string]any, bool) {
 		}
 	}
 	return nil, false
+}
+
+// firmwareMAC is the MAC a firmware boot option names (UEFI's "(MAC:B83FD2E00965)").
+var firmwareMAC = regexp.MustCompile(`MAC:([0-9A-Fa-f]{12})`)
+
+// dpuBootName is a boot option's name as the BMC gives it: the dialect's DPUBootName for a
+// network boot option of a NIC that is one of the host's DPUs' host PF (D71), else the
+// firmware's description.
+func (b *bmc) dpuBootName(e firmwareOption) string {
+	tmpl := b.dialect.Spec.DPUBootName
+	m := firmwareMAC.FindStringSubmatch(e.description)
+	if tmpl == "" || m == nil {
+		return e.description
+	}
+	compact := strings.ToUpper(m[1])
+	pf := false
+	for _, d := range b.dpus {
+		if p := d.PortBy["pf0hpf"]; p != nil && strings.EqualFold(strings.ReplaceAll(p.MAC, ":", ""), compact) {
+			pf = true
+		}
+	}
+	if !pf {
+		return e.description
+	}
+	var proto string
+	switch d := strings.ToUpper(e.description); {
+	case strings.Contains(d, "HTTP"):
+		proto = "HTTP"
+	case strings.Contains(d, "PXE"):
+		proto = "PXE"
+	default:
+		return e.description
+	}
+	ip := "IPv4"
+	if strings.Contains(strings.ToUpper(e.description), "V6") {
+		ip = "IPv6"
+	}
+	var colon []string
+	for i := 0; i < 12; i += 2 {
+		colon = append(colon, compact[i:i+2])
+	}
+	return strings.NewReplacer("{proto}", proto, "{ip}", ip, "{mac}", strings.Join(colon, ":"), "{compact}", compact).Replace(tmpl)
 }

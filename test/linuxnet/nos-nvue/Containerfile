@@ -2,12 +2,13 @@
 # from, from Debian bookworm, configured as Cumulus is. FRR is Cumulus's routing suite and
 # frr-reload.py (frr-pythontools) how NVUE applies a configuration to it; ifupdown2 is Cumulus's
 # interface manager, and `ifreload -a` how NVUE applies /etc/network/interfaces; ISC dhcrelay its
-# relay, here UNPATCHED. NVUE itself is the twin's: it renders those files and runs those tools.
+# relay, here UNPATCHED; nftables what NVUE's ACLs render to. NVUE itself is the twin's: it renders
+# those files and runs those tools.
 #
 # The twin creates one container per switch with no network, moves the switch's ports into it as
 # swp<n> (n the port's place on the front panel) and runs the start script it renders.
 FROM debian:bookworm-slim
 RUN apt-get update \
  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-      frr frr-pythontools ifupdown2 bridge-utils isc-dhcp-relay iproute2 procps tcpdump python3 \
+      frr frr-pythontools ifupdown2 bridge-utils isc-dhcp-relay iproute2 procps tcpdump python3 nftables \
  && rm -rf /var/lib/apt/lists/*

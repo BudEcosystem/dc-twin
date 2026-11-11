@@ -1,6 +1,7 @@
 package netsim
 
 import (
+	"context"
 	"errors"
 	"net"
 	"net/netip"
@@ -145,3 +146,30 @@ func (m *multiListener) Close() error {
 }
 
 func (m *multiListener) Addr() net.Addr { return m.ls[0].Addr() }
+
+// HBNAgents is a substrate that runs NICo's own DPU agent and DHCP server in an emulated
+// BlueField's HBN (D71). NICo's DPU-software stand-in (D58) boots the DPU and runs NICo's image,
+// then hands the DPU over to it, as the installed DPU OS starts NICo's agent.
+type HBNAgents interface {
+	// StartHBNAgent starts NICo's agent and DHCP server in the DPU's emulated HBN; again, it
+	// restarts them with the new installation.
+	StartHBNAgent(dpu string, a HBNAgent) error
+	// StopHBNAgent stops them (the DPU powered off or reset).
+	StopHBNAgent(dpu string)
+}
+
+// HBNAgent is what the agent is started with: what NICo's image installed on the DPU, and the
+// DPU's own out-of-band path to NICo.
+type HBNAgent struct {
+	// APIURL is nico-api's URL (the image's server_uri); PXEHost is the PXE service's host, which
+	// carbide-pxe.forge names.
+	APIURL, PXEHost string
+	// RootCA is the site's root CA (PEM).
+	RootCA []byte
+	// Discovery is the DPU's DiscoveryInfo, as DPF's init container saves it
+	// (/data/hw_output.json).
+	Discovery []byte
+	// Dial carries each of the agent's connections to NICo over the DPU's out-of-band NIC, so
+	// NICo sees the DPU's own address and MAC.
+	Dial func(ctx context.Context, network, addr string) (net.Conn, error)
+}

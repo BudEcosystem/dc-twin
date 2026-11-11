@@ -206,6 +206,10 @@ spec:
     - { name: bmc0, kind: ethernet, speed: 1G, role: management }
     - { name: p0, kind: ethernet, speed: 200G, role: provisioning }
     - { name: p1, kind: ethernet, speed: 200G, role: frontend }
+    # the host's physical function 0: its MAC is the BaseMAC the BMC serves, by which NICo pairs
+    # the DPU with its host; a host's NIC only when the DPU's HBN is emulated (D71), and cabled by
+    # no fabric
+    - { name: pf0hpf, kind: ethernet, speed: 200G, role: host-pf }
   power: { standbyW: 10, idleW: 60, maxW: 150 }
   cooling: { kind: liquid, loop: rack-manifold }
   firmware:

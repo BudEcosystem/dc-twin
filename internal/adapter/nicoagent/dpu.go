@@ -45,6 +45,10 @@ func (b *dpu) runDPU(ctx context.Context, why string) {
 		return
 	}
 	b.end("booted the installed DPU OS (" + why + ")")
+	if hh := b.hbnAgents(); hh != nil {
+		b.retry(ctx, func() error { return b.handOff(ctx, in, hh) })
+		return
+	}
 	b.retry(ctx, func() error { return b.runAgent(ctx, in) })
 }
 

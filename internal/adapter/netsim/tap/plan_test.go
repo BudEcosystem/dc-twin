@@ -10,6 +10,7 @@ import (
 	"github.com/BudEcosystem/dc-twin/internal/compile"
 	"github.com/BudEcosystem/dc-twin/internal/model"
 	"github.com/BudEcosystem/dc-twin/internal/nos"
+	"github.com/BudEcosystem/dc-twin/internal/nos/nvue"
 	"github.com/BudEcosystem/dc-twin/internal/schema"
 )
 
@@ -431,6 +432,98 @@ func TestPlanHostPortsAreHostsOnly(t *testing.T) {
 	for why := range p.Skipped {
 		if strings.Contains(why, "vm host") {
 			t.Errorf("a BMC port skipped as %q", why)
+		}
+	}
+}
+
+// With spec.adapters.network.hbn, each BlueField under a vm host is a NOS of its own (D71): its
+// uplinks are its leaf's routed, unnumbered ports carrying EVPN, every switch carries EVPN, its
+// host's only data NIC through it is its host PF on pf0hpf_if, and it has no AS, loopback or
+// startup routing of the twin's (NICo's agent gives it those through NVUE).
+func TestPlanHBN(t *testing.T) {
+	est := loadEstate(t, "tap-dpu.yaml")
+	m := compileModelFor(t, est, "x86_64")
+	p, err := BuildPlan(m, est, nil, "x86_64")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var dpus, leaves []*SwitchPlan
+	for _, sp := range p.Switches {
+		switch {
+		case sp.NOS.Name == nos.HBN:
+			dpus = append(dpus, sp)
+		case len(sp.Config.Unnumbered) > 0:
+			leaves = append(leaves, sp)
+		}
+		if sp.NOS.Name != nos.HBN && !sp.Config.EVPN {
+			t.Errorf("%s does not carry EVPN", sp.Config.Hostname)
+		}
+	}
+	if len(dpus) != 3 || len(leaves) != 2 {
+		t.Fatalf("%d emulated BlueFields and %d leaves facing them, want 3 and 2", len(dpus), len(leaves))
+	}
+	for _, sp := range dpus {
+		c := sp.Config
+		if !c.Native || c.Build != "HBN 3.2.3-doca3.2.3" || c.ASN != 0 || c.Loopback.IsValid() || len(c.Routed) != 0 || sp.Image != nos.HBNImage {
+			t.Errorf("%s: %+v", c.Hostname, c)
+		}
+		if sp.NOS.Interface(c, "p0") != "p0_if" || sp.NOS.Interface(c, "pf0hpf") != "pf0hpf_if" {
+			t.Errorf("%s: p0 is %q", c.Hostname, sp.NOS.Interface(c, "p0"))
+		}
+		script, err := sp.NOS.StartScript(c)
+		if err != nil {
+			t.Error(err)
+		}
+		if !strings.Contains(script, `want="p0_if p1_if pf0hpf_if"`) || strings.Contains(script, "ip link add pf0hpf_if") || !strings.Contains(script, "ip link add pf0vf0_if type dummy") {
+			t.Errorf("%s: the start script waits for the wrong ports or makes a cabled one a dummy:\n%s", c.Hostname, script)
+		}
+	}
+	for _, sp := range leaves {
+		if sp.Config.ASN < 65101 || len(sp.Config.Unnumbered) < 2 {
+			t.Errorf("%s: AS %d, %d unnumbered ports", sp.Config.Hostname, sp.Config.ASN, len(sp.Config.Unnumbered))
+		}
+		for _, u := range sp.Config.Unnumbered {
+			if !strings.Contains(u.PeerName, "-bf3-0:p") {
+				t.Errorf("%s: unnumbered %+v", sp.Config.Hostname, u)
+			}
+		}
+	}
+	dpuLinks := 0
+	for _, lp := range p.Links {
+		if lp.A.NOS.Name == nos.HBN || lp.B.NOS.Name == nos.HBN {
+			dpuLinks++
+		}
+	}
+	if dpuLinks != 6 {
+		t.Errorf("%d cables from BlueFields to leaves, want 6", dpuLinks)
+	}
+	pf := 0
+	for _, hp := range p.HostPorts {
+		if hp.Switch.NOS.Name == nos.HBN {
+			pf++
+			if hp.SwitchIf != "pf0hpf_if" || !strings.HasSuffix(hp.Ref, "/bf3-0:pf0hpf") || hp.Port.MAC != hp.Dev.Children[0].PortBy["pf0hpf"].MAC {
+				t.Errorf("host PF %+v", hp)
+			}
+		}
+		if strings.HasSuffix(hp.Ref, ":p0") || strings.HasSuffix(hp.Ref, ":p1") {
+			t.Errorf("%s: a BlueField uplink is its host's NIC", hp.Ref)
+		}
+	}
+	if pf != 3 {
+		t.Errorf("%d host PFs spliced onto BlueFields, want 3", pf)
+	}
+	// the leaf's startup configuration: unnumbered sessions with EVPN, accepted from any AS
+	tree, err := nvue.Startup(leaves[0].Config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, err := nvue.Render(tree, leaves[0].Config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{" interface remote-as external\n", "  advertise-all-vni\n", " default-originate\n"} {
+		if !strings.Contains(f.FRR, want) {
+			t.Errorf("leaf frr.conf lacks %q:\n%s", want, f.FRR)
 		}
 	}
 }

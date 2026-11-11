@@ -80,6 +80,8 @@ type Adapter struct {
 	// The agents' polling intervals (fields so a test can shorten them): forge-dpu-agent's and
 	// scout's defaults are of this order.
 	controlEvery, networkEvery, discoveryRetry time.Duration
+	// hbn runs NICo's agent in emulated BlueFields (D71): the substrate's, when it does, or a test's
+	hbn netsim.HBNAgents
 	// bootRetry is how long a machine's firmware waits after a network boot that failed (no
 	// DHCP answer, a boot service down) before it tries again, as UEFI cycles its boot options
 	bootRetry time.Duration

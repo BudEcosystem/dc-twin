@@ -1,0 +1,64 @@
+# NICo against a DPU-managed host whose BlueField's data plane the twin emulates (D71): one
+# Supermicro SYS-821GE-TNHR with a BlueField-3 at vm fidelity (os: stack: its firmware boots NICo's
+# iPXE and scout from the network, through its DPU), its BlueField at model with its HBN emulated
+# (the twin's NVUE over FRR in a container, NICo's own forge-dpu-agent and forge-dhcp-server in it,
+# handed the DPU by the stand-in that impersonates its boot, D58), on a generic/nvue-frr frontend
+# (one leaf, one spine) the BlueField's uplinks are unnumbered eBGP ports of. The BMCs and the
+# BlueField's out-of-band port are on the model OOB network, relayed to NICo's DHCP server and
+# routed into NICo's namespace by the twin (siteNetwork). NICo's namespace is also cabled to the
+# spine: the spine routes NICo's service network (10.90.0.0/24) into the fabric, and the namespace
+# routes the admin network (hosts behind DPUs), the DPUs' loopbacks and the VPCs' leaked host routes
+# back through it.
+# compat/nico/run.sh substitutes SVC_NS, HBN_BINARIES and the ports (`run.sh dpu`).
+apiVersion: dc-twin/v1alpha1
+kind: Estate
+metadata: { name: supermicro-nico-dpu }
+spec:
+  seed: 1771
+  clock: wall
+  timeScale: 0.05
+  packs: [generic@0.1.0, nvidia@0.1.0, oem-supermicro@0.1.0]
+  fidelity:
+    default: model
+    overrides:
+      - { select: "b01/server-01", level: vm, os: stack }
+      - { select: "b01/server-01/bf3-0", level: model }
+  adapters:
+    vm: { memoryMB: 2048, cpus: 2 }
+    network:
+      substrate: tap
+      hbn: true
+      nos: { hbnBinaries: HBN_BINARIES, memory: 512m }
+      attach:
+        - { netns: SVC_NS, port: "spine-1:eth63", address: 10.91.0.20/24, gateway: 10.91.0.1, interface: fab0,
+            routes: [192.168.252.0/24, 10.180.62.0/24, 10.255.0.0/16, 10.200.0.0/16], serves: [10.90.0.0/24] }
+  sites:
+    - name: site-1
+      halls:
+        - name: hall-a
+          rows:
+            - name: a
+              positions: 10
+              racks:
+                - { name: a10, position: 10, format: generic/network-rack }
+            - name: b
+              positions: 2
+              racks:
+                - { name: b01, position: 1, format: generic/hgx-8gpu, params: { server: oem-supermicro/sys-821ge-tnhr-bf3, servers: 1 } }
+  networks:
+    oob:          { role: management,   dhcp: stack, cidr: 10.30.0.0/16, fabric: oob, server: "127.0.0.1:26767" }
+    provisioning: { role: provisioning, dhcp: none,  cidr: 10.40.0.0/16, fabric: frontend }
+    frontend:     { role: frontend,     dhcp: none,  cidr: 10.50.0.0/16, fabric: frontend }
+    service:      { role: service,      cidr: 10.90.0.0/24, dhcp: none }
+  fabrics:
+    - { name: oob,      template: oob-flat,   nos: none }
+    - { name: frontend, template: clos-2tier, nos: generic/nvue-frr, params: { leafsPerRack: 1, spines: 1 }, placeIn: a10 }
+  facility:
+    power: { feeds: [{ name: A, capacityW: 100000 }, { name: B, capacityW: 100000 }] }
+    bms: { dialect: nvidia/dsx-exchange }
+  stacks:
+    - name: nvidia-dsx-os@0.1.0
+      impersonators: [nico-dpu-agent]
+      outputs:
+        bmsConsumerMirror: "nico-legacy,nico-api"
+        siteNetwork: "prefix=10.90.0.0/24 gateway=10.90.0.1 link=127.0.0.1:17800"

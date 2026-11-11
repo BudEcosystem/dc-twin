@@ -88,8 +88,11 @@ func (m *machine) observeNVRAM(mtime time.Time) {
 		map[string]any{"bootOrder": order, "entries": entries, "bootNext": nv.BootNext})
 }
 
-// desiredBootOrder is the model's boot order when it is an order of the load options the store
-// holds and differs from the store's (a boot order set through Redfish, not yet in NVRAM).
+// desiredBootOrder is the model's boot order, as the store's BootOrder, when it orders load
+// options the store holds and differs from the store's (a boot order set through Redfish, not
+// yet in NVRAM). Options the firmware added after the client read the order (it enumerates a
+// host's NICs as it boots) follow the client's, in the store's order, as a UEFI BootOrder that
+// names some options leaves the rest after them.
 func (m *machine) desiredBootOrder() []string {
 	var want []string
 	m.a.rt.Engine.Read(func(mm *model.Model) {
@@ -98,20 +101,30 @@ func (m *machine) desiredBootOrder() []string {
 	m.mu.Lock()
 	nv := m.nv.last
 	m.mu.Unlock()
-	if nv == nil || len(want) != len(nv.BootOrder) || reflect.DeepEqual(want, nv.BootOrder) {
+	if nv == nil || len(want) == 0 {
 		return nil
 	}
 	have := map[string]bool{}
 	for _, id := range nv.BootOrder {
 		have[id] = true
 	}
+	named := map[string]bool{}
 	for _, id := range want {
-		if !have[id] {
+		if !have[id] || named[id] {
 			return nil
 		}
-		delete(have, id)
+		named[id] = true
 	}
-	return want
+	full := append([]string{}, want...)
+	for _, id := range nv.BootOrder {
+		if !named[id] {
+			full = append(full, id)
+		}
+	}
+	if reflect.DeepEqual(full, nv.BootOrder) {
+		return nil
+	}
+	return full
 }
 
 // applyBootOrder writes a pending boot order into the store before the machine starts.
