@@ -753,10 +753,12 @@ func (m *machine) startTPM() (string, error) {
 		}
 		m.mu.Unlock()
 	}
+	logf := filepath.Join(m.dir, "swtpm.log")
+	ownTPMFiles(state, logf)
 	sock := filepath.Join(m.run, "swtpm.sock")
 	_ = os.Remove(sock)
 	cmd := exec.Command(bin, "socket", "--tpm2", "--tpmstate", "dir="+state, "--ctrl", "type=unixio,path="+sock,
-		"--log", "file="+filepath.Join(m.dir, "swtpm.log")+",level=1", "--terminate")
+		"--log", "file="+logf+",level=1", "--terminate")
 	if err := cmd.Start(); err != nil {
 		return "", fmt.Errorf("swtpm: %w", err)
 	}
@@ -768,7 +770,7 @@ func (m *machine) startTPM() (string, error) {
 		}
 		select {
 		case <-done:
-			b, _ := os.ReadFile(filepath.Join(m.dir, "swtpm.log"))
+			b, _ := os.ReadFile(logf)
 			return "", fmt.Errorf("swtpm exited: %s", strings.TrimSpace(string(b)))
 		case <-time.After(20 * time.Millisecond):
 		}

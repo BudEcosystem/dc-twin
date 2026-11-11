@@ -156,6 +156,11 @@ func (m *machine) syncLinks(q linkSetter, all bool) {
 				want = eng.PortUp(peer)
 			}
 		}
+		if n.port.Link == nil && n.port.Device.HBN {
+			// the host PF of a DPU whose HBN is emulated: no cable, a PCIe function, up while
+			// the DPU is (D71)
+			want = eng.PortUp(n.port)
+		}
 		if had, ok := m.links[i]; ok && had == want {
 			continue
 		}

@@ -131,6 +131,7 @@ func Compile(est *schema.Estate, reg *pack.Registry, opt Options) (*Result, erro
 	c.powerChain()
 	c.networks()
 	c.storageSystems()
+	c.hbn()
 	c.domains()
 	c.loops()
 	c.validate()
@@ -719,13 +720,14 @@ func BMCPort(d *model.Device) *model.Port { return bmcPort(d) }
 // HostPorts are the Ethernet ports the host's OS sees: its own, other than the BMC's, and
 // those of sub-devices that are not machines of their own (a DPU or NIC at model fidelity
 // presents its ports to the host as PCIe functions). They are a `vm` host's NICs (D48), and the
-// ports the TAP substrate splices onto a real NOS's (D57).
+// ports the TAP substrate splices onto a real NOS's (D57). A DPU whose HBN is emulated presents
+// its host PF instead, the host's only path through it (D71); otherwise its host PF is not one.
 func HostPorts(d *model.Device) []*model.Port {
 	var out []*model.Port
 	bmc := bmcPort(d)
 	add := func(dev *model.Device, skip *model.Port) {
 		for _, p := range dev.Ports {
-			if p.Kind != "ethernet" || p.MAC == "" || p == skip || p.Role == "management" {
+			if p.Kind != "ethernet" || p.MAC == "" || p == skip || p.Role == "management" || p.Role == "host-pf" {
 				continue
 			}
 			out = append(out, p)
@@ -737,12 +739,46 @@ func HostPorts(d *model.Device) []*model.Port {
 		add(d, nil)
 	}
 	for _, ch := range d.Children {
-		if ch.Fidelity != "vm" {
+		switch {
+		case ch.Fidelity == "vm":
+		case ch.HBN:
+			if p := ch.PortBy[HostPFPort]; p != nil && p.MAC != "" {
+				out = append(out, p)
+			}
+		default:
 			add(ch, bmcPort(ch))
 		}
 	}
 	return out
 }
+
+// hbn marks the DPUs whose data plane the TAP substrate emulates (D71): with
+// spec.adapters.network.hbn, every DPU at model fidelity that has a host PF port, under a host at
+// vm, on the tap substrate.
+func (c *compiler) hbn() {
+	opts := c.est.Spec.Adapters.Network
+	if !opts.HBN {
+		return
+	}
+	if opts.Substrate != "tap" {
+		c.errf("spec.adapters.network.hbn: an emulated HBN runs on the tap substrate (substrate: tap)")
+		return
+	}
+	n := 0
+	for _, d := range c.m.Devices {
+		if d.BaseClass != "dpu" || d.Fidelity != "model" || d.Parent == nil || d.Parent.Fidelity != "vm" || d.PortBy[HostPFPort] == nil {
+			continue
+		}
+		d.HBN = true
+		n++
+	}
+	if n == 0 {
+		c.warnf("spec.adapters.network.hbn: no DPU at model fidelity under a host at vm; nothing is emulated")
+	}
+}
+
+// HostPFPort is a DPU's host physical function: the host's NIC when the DPU's HBN is emulated.
+const HostPFPort = "pf0hpf"
 
 func (c *compiler) addPort(d *model.Device, comp *model.Component, name string, ps schema.PortSpec) {
 	if _, dup := d.PortBy[name]; dup {

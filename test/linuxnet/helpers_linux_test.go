@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"runtime"
@@ -27,6 +28,7 @@ import (
 	"github.com/BudEcosystem/dc-twin/internal/compile"
 	"github.com/BudEcosystem/dc-twin/internal/model"
 	"github.com/BudEcosystem/dc-twin/internal/nos"
+	"github.com/BudEcosystem/dc-twin/internal/nos/nvue"
 	"github.com/BudEcosystem/dc-twin/internal/schema"
 	"github.com/BudEcosystem/dc-twin/internal/twin"
 )
@@ -335,4 +337,22 @@ func sortedKeys[V any](m map[string]V) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// nvueInProcess and inProcessClient reach an NVUE server without a network: requests go to its
+// handler directly.
+func nvueInProcess() tap.SwitchInput {
+	return tap.SwitchInput{Hostname: "in-process", NVUE: "nvue.invalid", NVUEUser: nvue.User}
+}
+
+type handlerTransport struct{ h http.Handler }
+
+func (h handlerTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	rec := httptest.NewRecorder()
+	h.h.ServeHTTP(rec, r)
+	return rec.Result(), nil
+}
+
+func inProcessClient(srv *nvue.Server) *http.Client {
+	return &http.Client{Transport: handlerTransport{srv}}
 }

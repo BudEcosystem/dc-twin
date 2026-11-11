@@ -155,7 +155,7 @@ func TestTenantRenders(t *testing.T) {
 	}
 	bad = Clone(tree)
 	Patch(bad, []string{"interface", "vlan2001", "ip", "vrf"}, "tenant-b")
-	if _, err := Render(bad, sw); err == nil || !strings.Contains(err.Error(), "vrf tenant-b does not exist") {
+	if f, err := Render(bad, sw); err != nil || !strings.Contains(f.Interfaces, "iface tenant-b\n    vrf-table auto") {
 		t.Errorf("an SVI in a missing VRF: %v", err)
 	}
 	bad = Clone(tree)
@@ -176,7 +176,8 @@ func TestValidate(t *testing.T) {
 		{[]string{"evpn", "enable"}, "maybe", false},
 		{[]string{"router", "ospf"}, map[string]any{"enable": "on"}, false},
 		{[]string{"vrf", "red", "router", "bgp", "neighbor", "10.0.0.2", "remote-as"}, "external", true},
-		{[]string{"vrf", "red", "router", "bgp", "neighbor", "swp51"}, map[string]any{}, false},
+		{[]string{"vrf", "red", "router", "bgp", "neighbor", "swp51"}, map[string]any{"type": "unnumbered"}, true},
+		{[]string{"vrf", "red", "router", "bgp", "neighbor", "not/a-peer"}, map[string]any{}, false},
 		{nil, map[string]any{"qos": map[string]any{}}, false},
 		{[]string{"bridge", "domain", "br_default", "vlan", "10", "vni"}, map[string]any{"10": nil}, true},
 	} {
@@ -384,5 +385,18 @@ func TestVRFStanzas(t *testing.T) {
 	}
 	if !strings.Contains(ApplyScript, VRFStanzas) || strings.Index(ApplyScript, "vtysh -f") > strings.Index(ApplyScript, "frr-reload.py --reload") {
 		t.Error("the apply does not give vtysh the VRFs' stanzas before frr-reload")
+	}
+}
+
+// A VLAN that carries another VNI after a revision (a VRF given another L3 VNI on the same
+// reserved VLAN) has its SVI and VXLAN devices made again.
+func TestRecreateOnVNIChange(t *testing.T) {
+	old := Files{Interfaces: "iface vni5002\n    vxlan-id 5002\n    bridge-access 4024\n\niface vlan4024\n    vlan-id 4024\n"}
+	new := Files{Interfaces: "iface vni5001\n    vxlan-id 5001\n    bridge-access 4024\n\niface vlan4024\n    vlan-id 4024\n"}
+	if got := strings.Join(recreate(old, new), " "); got != "vlan4024 vni5001 vni5002" {
+		t.Errorf("recreate: %q", got)
+	}
+	if got := recreate(new, new); len(got) != 0 {
+		t.Errorf("recreate with no change: %v", got)
 	}
 }

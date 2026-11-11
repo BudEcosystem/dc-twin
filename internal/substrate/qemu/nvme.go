@@ -65,9 +65,12 @@ func rootPort(i int) string { return fmt.Sprintf("rpnvme%d", i) }
 
 func subsysID(i int) string { return fmt.Sprintf("nvmesubsys%d", i) }
 
-// blockdev is the drive's block node as -blockdev and blockdev-add take it.
+// blockdev is the drive's block node as -blockdev and blockdev-add take it. Both nodes unmap:
+// QEMU drops a write-zeroes' may-unmap at a node opened with discard=ignore (-blockdev's default),
+// and the zeroes are then allocated, so a guest's NVMe Format or Write Zeroes (NICo scout's
+// sanitise formats every drive) would fill the host's disk with the drive's whole capacity.
 func (d Drive) blockdev(id string) map[string]any {
-	return map[string]any{"driver": "raw", "node-name": id + "-disk",
+	return map[string]any{"driver": "raw", "node-name": id + "-disk", "discard": "unmap",
 		"file": map[string]any{"driver": "file", "filename": d.Path, "discard": "unmap"}}
 }
 

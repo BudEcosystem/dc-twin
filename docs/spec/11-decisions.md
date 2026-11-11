@@ -1203,3 +1203,36 @@ CSI driver makes (D25): `vast/vms`, from vast-csi's source. Its Prometheus expor
 clients read Swordfish, and what a platform calls is its vendor's CSI driver. **Reversed if:** a
 vendor publishes an emulator of its own API that is bound to the model.
 
+
+### D71 — A BlueField's HBN is emulated over FRR; NICo's own DPU agent configures it
+*Built (2026-11-10): the emulated HBN, its wiring, NICo's agent in it and the stand-in's hand-off
+to it; in the agent's test a Forge API harness stands in for NICo's control plane, and on
+compat/nico's DPU path real NICo drives a DPU-managed host to Ready and through a tenant
+instance in an FNN VPC. The design, its decisions and phases, and what building it
+changed are in [the DPU isolation design](../reviews/2026-11-10-dpu-isolation.md), section 10.*
+A BlueField at `model` whose host is at `vm` on the TAP substrate may be given an emulated data
+plane, when the estate enables it: one container in its own network namespace, built on
+`generic/nvue-frr`'s image (D56), on its host's only path to the frontend. The host's NIC is
+spliced onto `pf0hpf_if` in it (D57's splice); the BlueField's `p0` and `p1` are TAPs that are leaf
+ports (D45), named `p0_if` and `p1_if`; the leaf renders those ports as routed, unnumbered eBGP
+interfaces carrying EVPN; and `compile.HostPorts` gives such a host the BlueField's host function,
+not its uplinks. NICo's own `forge-dpu-agent` and `forge-dhcp-server`, built from NICo's source at
+the pinned commit (D13), run in the container as DPF runs the agent
+(`AGENT_PLATFORM_TYPE=containerized`, `HBN_CONFIG_MODE=nvue-rest`). The agent's identity is the
+`DiscoveryInfo` the twin writes from the model to `/data/hw_output.json`, as D58's stand-in sends
+it in `DiscoverMachine`, and it configures the container's NVUE, which the twin extends to the
+schema NICo's FNN and ETV templates write (neighbours named by interface and unnumbered, peer
+groups, route targets, route policy, static routes in VRFs, ACLs rendered to nftables) and refuses
+beyond it by name. supervisord runs FRR, rsyslog, the DHCP server and an `nl2doca` that does
+nothing; `crictl` answers for the container itself, so the agent's health checks read real FRR and
+ifupdown2 state. D58's stand-in keeps the DPU's boot and install and hands over to the real agent
+where the installed DPU OS would start. Every NVUE revision a client creates, changes or applies,
+on a DPU or a switch, is a committed `request` event. **Why:** a DPU-managed NICo site isolates
+tenants through its DPUs, and NVIDIA's HBN cannot run on the twin without the ConnectX its
+`nl2doca` and SFs need (Q1). The agent's containerized mode and NVUE REST path, both NICo's own,
+put the boundary at an interface the twin already emulates, so NICo's code computes, applies and
+acknowledges each VPC and the kernel's VRFs enforce it, at a few hundred MB per DPU rather than an
+Arm of 10 GB or more. **Costs:** HBN is the twin's NVUE over FRR, not NVIDIA's; nothing is
+offloaded, and each spliced cable copies frames in userspace; the agent does not run in a DPU OS.
+**Refines:** D52, D56, D57, D58. **Reversed if:** a BlueField at `vm` has a ConnectX its DPU OS
+can use (Q1); then NVIDIA's HBN runs on the Arm in its place.

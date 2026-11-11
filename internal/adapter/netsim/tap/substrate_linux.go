@@ -50,6 +50,7 @@ import (
 	"github.com/BudEcosystem/dc-twin/internal/model"
 	"github.com/BudEcosystem/dc-twin/internal/nos"
 	"github.com/BudEcosystem/dc-twin/internal/nos/nvue"
+	"github.com/BudEcosystem/dc-twin/internal/schema"
 	"github.com/BudEcosystem/dc-twin/internal/twin"
 )
 
@@ -57,8 +58,10 @@ func init() { twin.RegisterNetworkSubstrate("tap", New) }
 
 // Substrate is the running TAP substrate.
 type Substrate struct {
-	plan   *Plan
-	eng    *engine.Engine
+	plan *Plan
+	eng  *engine.Engine
+	// agents are NICo's DPU agents running in emulated BlueFields (D71), by DPU path
+	agents map[string]*hbnAgent
 	log    *slog.Logger
 	nsName string
 	ns     netns.NsHandle
@@ -467,9 +470,13 @@ func (s *Substrate) addHostPort(hp *HostPortPlan) error {
 		if err != nil {
 			return err
 		}
-		if mac, err := net.ParseMAC(hp.Peer.MAC); err == nil && hp.Peer.MAC != "" {
-			if err := nh.LinkSetHardwareAddr(l, mac); err != nil {
-				return err
+		// the switch port's MAC; a BlueField's host PF representor (D71) has no model port behind
+		// it and keeps the TAP's
+		if hp.Peer != nil && hp.Peer.MAC != "" {
+			if mac, err := net.ParseMAC(hp.Peer.MAC); err == nil {
+				if err := nh.LinkSetHardwareAddr(l, mac); err != nil {
+					return err
+				}
 			}
 		}
 		if err := nh.LinkSetNsFd(l, int(sw.ns)); err != nil {
@@ -894,7 +901,8 @@ func (s *Substrate) startSwitches() error {
 			return err
 		}
 		labels := map[string]string{"dc-twin.estate": s.plan.Estate, "dc-twin.switch": sp.Device.Path, "dc-twin.nos": e.Name}
-		var vols, binds []string
+		var vols []string
+		binds := append([]string{}, sp.Binds...)
 		for _, m := range e.Shared {
 			v := unsafeName.ReplaceAllString(sp.Container+"-"+strings.Trim(m.Path, "/"), "-")
 			if err := d.CreateVolume(ctx, v, labels); err != nil {
@@ -903,8 +911,19 @@ func (s *Substrate) startSwitches() error {
 			s.volumes = append(s.volumes, v)
 			vols, binds = append(vols, v), append(binds, v+":"+m.Path)
 		}
+		sysctls := e.Sysctls
+		if len(sp.Config.Unnumbered) > 0 {
+			// an unnumbered session runs over the port's IPv6 link-local address (RFC 5549)
+			sysctls = map[string]string{}
+			for k, v := range e.Sysctls {
+				sysctls[k] = v
+			}
+			sysctls["net.ipv6.conf.all.disable_ipv6"], sysctls["net.ipv6.conf.default.disable_ipv6"] = "0", "0"
+			sysctls["net.ipv6.conf.all.forwarding"] = "1"
+			sysctls["net.ipv6.conf.all.ignore_routes_with_linkdown"], sysctls["net.ipv6.conf.default.ignore_routes_with_linkdown"] = "1", "1"
+		}
 		c, err := d.Run(ctx, nos.Spec{Name: sp.Container, Image: sp.Image, Hostname: sp.Config.Hostname,
-			Entrypoint: nos.Entrypoint, Cmd: []string{script}, Labels: labels, Sysctls: e.Sysctls,
+			Entrypoint: nos.Entrypoint, Cmd: []string{script}, Labels: labels, Sysctls: sysctls,
 			Platform: e.Platform, Privileged: e.Privileged, Binds: binds})
 		if err != nil {
 			return err
@@ -1041,13 +1060,57 @@ func (s *Substrate) startNVUE(sw *nosSwitch) error {
 		return out, nil
 	}
 	sw.nvue = nvue.NewServer(sw.plan.Config, sw.nvuePassword, apply)
+	sw.nvue.SetRunner(func(ctx context.Context, args ...string) (string, error) {
+		out, code, err := s.docker.Exec(ctx, id, args...)
+		if err == nil && code != 0 {
+			err = fmt.Errorf("%s: exit %d: %s", strings.Join(args, " "), code, strings.TrimSpace(out))
+		}
+		return out, err
+	})
+	// every write a client makes is a request event: a VPC applied to a DPU, a port moved on a
+	// switch (D71, I-07)
+	path := sw.plan.Device.Path
+	sw.nvue.OnWrite(func(ev nvue.Event) {
+		if s.eng == nil {
+			return
+		}
+		canonical := map[string]string{"revision.create": "network.config.revision", "revision.change": "network.config.change",
+			"revision.delete": "network.config.discard", "revision.apply": "network.config.apply"}[ev.Op]
+		status := 200
+		if ev.Op == "revision.apply" && ev.State != "applied" {
+			status = 500
+		}
+		target := "/nvue_v1/revision/" + ev.Revision
+		if ev.Path != "" {
+			target = "/nvue_v1" + ev.Path + "?rev=" + ev.Revision
+		}
+		user, addr, _ := strings.Cut(ev.Client, "@")
+		s.eng.LogRead(engine.Request{Path: path, Canonical: canonical, Protocol: "nvue", Method: ev.Op, Target: target,
+			Source: schema.EventSource{Class: "stack", Principal: user, Address: addr}}, status)
+	})
 	ctx, cancel := context.WithTimeout(s.ctx, 5*time.Minute)
 	defer cancel()
 	if err := sw.nvue.ApplyStartup(ctx); err != nil {
 		return fmt.Errorf("switch %s: NVUE: %w", sw.plan.Device.Path, err)
 	}
 	s.log.Info("tap: NVUE applied the startup configuration", "switch", sw.plan.Device.Path)
+	if sw.plan.Config.Native {
+		var reps []string
+		for _, p := range sw.plan.Config.Panel {
+			if n := p.If(); strings.HasPrefix(n, "pf") && !strings.HasPrefix(n, "pf0dpu") {
+				reps = append(reps, n)
+			}
+		}
+		if err := trapDHCP(sw.ns, reps); err != nil {
+			return fmt.Errorf("switch %s: %w", sw.plan.Device.Path, err)
+		}
+	}
 	lo := sw.plan.Config.Loopback
+	if sw.plan.Config.Native {
+		// a BlueField's HBN: NVUE answers in the DPU's own namespace, where NICo's agent runs
+		// beside it (NVUE_HTTPS_ADDRESS=127.0.0.1:8765, D71)
+		lo = netip.MustParseAddr("127.0.0.1")
+	}
 	if s.ca == nil || !lo.IsValid() {
 		return nil
 	}
@@ -1068,6 +1131,34 @@ func (s *Substrate) startNVUE(sw *nosSwitch) error {
 		_ = sw.nvueHTTP.Serve(tls.NewListener(ln, &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12}))
 	}()
 	return nil
+}
+
+// SwitchNetns is a real switch's network namespace (its container's), for a test or a stack that
+// cables something into it; the handle stays the substrate's.
+func (s *Substrate) SwitchNetns(switchPath string) (netns.NsHandle, bool) {
+	sw := s.realSwitch(switchPath)
+	if sw == nil {
+		return netns.None(), false
+	}
+	return sw.ns, true
+}
+
+// DialIn dials a TCP address from inside a real switch's network namespace: a client beside the
+// NOS, as NICo's agent is beside an emulated HBN's NVUE (D71).
+func (s *Substrate) DialIn(switchPath string) func(ctx context.Context, network, addr string) (net.Conn, error) {
+	return func(ctx context.Context, network, addr string) (net.Conn, error) {
+		sw := s.realSwitch(switchPath)
+		if sw == nil {
+			return nil, fmt.Errorf("%s is not a real switch", switchPath)
+		}
+		var c net.Conn
+		err := inNS(sw.ns, func() error {
+			var err error
+			c, err = (&net.Dialer{}).DialContext(ctx, network, addr)
+			return err
+		})
+		return c, err
+	}
 }
 
 // NVUE is a real switch's NVUE, nil when its NOS has none.
@@ -1120,6 +1211,9 @@ type SwitchInput struct {
 	NVUEUser     string `json:"nvueUser,omitempty"`
 	NVUEPassword string `json:"nvuePassword,omitempty"`
 	ASN          uint32 `json:"asn"`
+	// Container is the NOS's container, for an emulated BlueField HBN whose NVUE answers on
+	// its own loopback, in its namespace, as HBN's does to the agent beside it (D71).
+	Container string `json:"container,omitempty"`
 }
 
 // writeSwitchInputs writes stack-inputs/switches.json and, when a switch serves gNMI, a client
@@ -1147,6 +1241,10 @@ func (s *Substrate) writeSwitchInputs() error {
 		}
 		if sw.nvueHTTP != nil {
 			in.NVUE, in.NVUEUser, in.NVUEPassword = netip.AddrPortFrom(c.Loopback, nvue.APIPort).String(), nvue.User, sw.nvuePassword
+			if c.Native {
+				in.NVUE = netip.AddrPortFrom(netip.MustParseAddr("127.0.0.1"), nvue.APIPort).String()
+				in.Container = sw.plan.Container
+			}
 		}
 		list = append(list, in)
 	}
@@ -1298,8 +1396,16 @@ func (s *Substrate) attach(at *AttachPlan) error {
 	if err := th.LinkSetUp(l); err != nil {
 		return err
 	}
-	if err := th.RouteReplace(&netlink.Route{LinkIndex: l.Attrs().Index, Gw: at.Gateway.AsSlice()}); err != nil {
-		return fmt.Errorf("default route via %s: %w", at.Gateway, err)
+	if len(at.Routes) == 0 {
+		if err := th.RouteReplace(&netlink.Route{LinkIndex: l.Attrs().Index, Gw: at.Gateway.AsSlice()}); err != nil {
+			return fmt.Errorf("default route via %s: %w", at.Gateway, err)
+		}
+	}
+	for _, r := range at.Routes {
+		dst := &net.IPNet{IP: r.Addr().AsSlice(), Mask: net.CIDRMask(r.Bits(), 32)}
+		if err := th.RouteReplace(&netlink.Route{LinkIndex: l.Attrs().Index, Dst: dst, Gw: at.Gateway.AsSlice()}); err != nil {
+			return fmt.Errorf("route %s via %s: %w", r, at.Gateway, err)
+		}
 	}
 	name := at.Container
 	if name == "" {
@@ -1650,6 +1756,15 @@ func (s *Substrate) Report() netsim.L2Report {
 	if len(s.plan.HostPorts) > 0 {
 		r.Lines = append(r.Lines, fmt.Sprintf("tap: %d vm host data ports are their real switches' ports (D57): each a TAP moved into its NOS, the guest's NIC spliced onto it frame for frame, so the switch's VLAN, relay and routing carry the guest; the twin relays and routes nothing for them.", len(s.plan.HostPorts)))
 	}
+	hbn := 0
+	for _, sw := range s.switches {
+		if sw.plan.NOS.Name == nos.HBN {
+			hbn++
+		}
+	}
+	if hbn > 0 {
+		r.Lines = append(r.Lines, fmt.Sprintf("tap: %d BlueFields' HBN is EMULATED (D71): each a container of the twin's NVUE over FRR, ifupdown2 and nftables with HBN's interface names, its host's NIC its host PF on pf0hpf_if, its uplinks unnumbered eBGP leaf ports; not NVIDIA's HBN, no ConnectX and no offload (the kernel forwards), the BlueField itself at model fidelity.", hbn))
+	}
 	emulated, relays := map[string]int{}, 0
 	for _, sw := range s.switches {
 		if sw.plan.Emulated {
@@ -1751,6 +1866,12 @@ func (s *Substrate) Close() error {
 	if s.cancel != nil {
 		s.cancel()
 	}
+	s.mu.Lock()
+	for _, h := range s.agents {
+		h.close()
+	}
+	s.agents = nil
+	s.mu.Unlock()
 	s.wg.Wait()
 	s.mu.Lock()
 	for _, p := range s.ports {

@@ -47,6 +47,21 @@
 #       frontend addresses routed across the fabric, a pulled cable, and a tenant VRF with an L3 VNI
 #       through NVUE. Opt-in (RUN=TestVMHostsOnRealNOS MODE=native): it needs /dev/kvm, QEMU and the
 #       twin's x86_64 guest image (dctwin assets fetch; DCTWIN_ASSETS, default ~/.cache/dc-twin/assets).
+#   (g) TestDPUIsolation: three x86_64 vm hosts behind BlueFields whose HBN is emulated (D71): each
+#       BlueField a container running the twin's NVUE over FRR with HBN's interface names, its
+#       host's NIC its host PF on pf0hpf_if, its uplinks unnumbered eBGP leaf ports with EVPN; each
+#       configured through NVUE as NICo's agent configures it (FNN VPCs, an ACL, an ETV segment):
+#       VPC isolation on a shared leaf and across racks, uplink failover, events. Opt-in
+#       (RUN=TestDPUIsolation MODE=native), with what (f) needs.
+#   (h) TestHBNAppliesNICoConfigs: every NVUE configuration NICo's agent is tested to produce,
+#       applied to one emulated BlueField container through its NVUE; FRR, ifupdown2 and nftables
+#       accept each (D71's P1 exit). Opt-in (RUN=TestHBNAppliesNICoConfigs); no KVM needed.
+#   (i) TestDPUAgent: (g)'s estate with NICo's own forge-dpu-agent and forge-dhcp-server in each
+#       BlueField (HBN_BINARIES: compat/nico/hbn-build.sh's output), configured by a Forge API test
+#       harness: the agent registers, renders and pushes its FNN configuration through the emulated
+#       NVUE, acknowledges it, the host leases its address from the DPU's DHCP server, VPCs isolate,
+#       a re-tenanted host is reconfigured and a pulled uplink is reported. Opt-in
+#       (RUN=TestDPUAgent MODE=native HBN_BINARIES=...).
 #   NOS_MEMORY=512m: every container the twin and the tests create gets that memory limit, with no
 #     swap beyond it (spec.adapters.network.nos.memory), for a host with a memory budget.
 #
@@ -63,7 +78,7 @@ mode=${MODE:-container}
 work=$(mktemp -d "${TMPDIR:-/tmp}/dctwin-linuxnet.XXXXXX")
 log="$work/linux-substrate-e2e.log"
 name=dctwin-linuxnet-$$
-estates='linuxnet-nos linuxnet-model linuxnet-sonic linuxnet-nvue linuxnet-vm-nos'
+estates='linuxnet-nos linuxnet-model linuxnet-sonic linuxnet-nvue linuxnet-vm-nos linuxnet-dpu linuxnet-dpu-agent'
 
 case $mode in
   container)
@@ -196,7 +211,8 @@ case $run in *Sonic*)
   sonic_artifact "$sonic_gnmi" "$sonic_gnmi_url" "$sonic_gnmi_sha256" docker-sonic-gnmi
 ;; esac
 case $run in TestSonicVS) ;; *) image dctwin-nos-frr-dhcrelay:bookworm "$root/test/linuxnet/nos/Containerfile" "$root/test/linuxnet/nos" ;; esac
-case $run in *TestNVUE*|*TestVMHosts*) image dctwin-nos-nvue-frr:bookworm "$root/test/linuxnet/nos-nvue/Containerfile" "$root/test/linuxnet/nos-nvue" ;; esac
+case $run in *TestNVUE*|*TestVMHosts*|*TestDPU*|*TestHBN*) image dctwin-nos-nvue-frr:bookworm "$root/test/linuxnet/nos-nvue/Containerfile" "$root/test/linuxnet/nos-nvue" ;; esac
+case $run in *TestDPU*|*TestHBN*) image dctwin-nos-hbn:bookworm "$root/test/linuxnet/nos-hbn/Containerfile" "$root/test/linuxnet/nos-hbn" ;; esac
 
 (cd "$root" && CGO_ENABLED=0 GOOS=linux GOARCH=$goarch go test -c -o "$work/linuxnet.test" ./test/linuxnet/)
 
@@ -220,8 +236,9 @@ set +e
 if [ "$mode" = native ]; then
   mkdir -p "$work/test/linuxnet"
   cp -R "$root/test/linuxnet/testdata" "$work/test/linuxnet/"
+  cp -R "$root/internal/nos/nvue/testdata/nico" "$work/test/linuxnet/testdata/"
   # its own network namespace, loopback up: the twin's loopback endpoints are not the host's
-  sudo env DCTWIN_LINUXNET=1 DCTWIN_NOS_MEMORY="${NOS_MEMORY:-}" DCTWIN_ASSETS="${DCTWIN_ASSETS:-$HOME/.cache/dc-twin/assets}" DOCKER_HOST="$engine_host" PATH="$testpath" unshare --net sh -c \
+  sudo env DCTWIN_LINUXNET=1 DCTWIN_HOLD="${HOLD:-}" DCTWIN_HBN_BINARIES="${HBN_BINARIES:-}" DCTWIN_NOS_MEMORY="${NOS_MEMORY:-}" DCTWIN_ASSETS="${DCTWIN_ASSETS:-$HOME/.cache/dc-twin/assets}" DOCKER_HOST="$engine_host" PATH="$testpath" unshare --net sh -c \
     'ip link set lo up && cd "$1" && exec "$2" -test.v -test.count=1 -test.timeout=45m -test.run "$3"' \
     sh "$work/test/linuxnet" "$work/linuxnet.test" "$run" 2>&1 | tee "$log"
   rc=${PIPESTATUS[0]}
@@ -235,6 +252,7 @@ else
     /work/linuxnet.test -test.v -test.count=1 -test.timeout=45m -test.run "$run" >/dev/null
   docker cp "$work/linuxnet.test" "$name:/work/linuxnet.test"
   docker cp "$root/test/linuxnet/testdata" "$name:/work/test/linuxnet/testdata"
+  docker cp "$root/internal/nos/nvue/testdata/nico" "$name:/work/test/linuxnet/testdata/nico"
   docker start -a "$name" 2>&1 | tee "$log"
   rc=${PIPESTATUS[0]}
 fi

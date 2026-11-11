@@ -26,6 +26,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -34,6 +35,7 @@ import (
 	"github.com/BudEcosystem/dc-twin/internal/compile"
 	"github.com/BudEcosystem/dc-twin/internal/model"
 	"github.com/BudEcosystem/dc-twin/internal/nos"
+	"github.com/BudEcosystem/dc-twin/internal/nos/nvue"
 	"github.com/BudEcosystem/dc-twin/internal/schema"
 	"github.com/BudEcosystem/dc-twin/internal/twin"
 )
@@ -111,6 +113,8 @@ type SwitchPlan struct {
 	NOS       nos.Entry
 	Image     string
 	Container string
+	// Binds are host paths mounted in the container ("<host path>:<path>:ro").
+	Binds []string
 	// Emulated: the image is not built for the host's architecture and runs under the Docker
 	// host's binary translation for its platform (SONiC-VS's linux/amd64 on aarch64).
 	Emulated bool
@@ -136,6 +140,8 @@ type AttachPlan struct {
 	SwitchIf  string // the port as the switch's container names it
 	Address   netip.Prefix
 	Gateway   netip.Addr
+	// Routes are what the host routes through the port (none: a default route).
+	Routes []netip.Prefix
 }
 
 // kernelProbes are the overlay devices a NOS that provides VRFs creates, and how to make one.
@@ -208,6 +214,33 @@ func BuildPlan(m *model.Model, est *schema.Estate, outputs map[string]string, ho
 			Config:    nos.Switch{Path: d.Path, Hostname: host, Profile: d.ProfileName, MAC: switchMAC(d), Panel: frontPanel(d)}}
 		p.Switches = append(p.Switches, sp)
 		byDev[d] = sp
+	}
+	// BlueFields whose HBN is emulated (D71): a NOS instance each, unconfigured until NICo's
+	// agent (or a client) configures it through NVUE
+	hbn := map[*SwitchPlan]bool{}
+	var hbnDevs []*model.Device
+	for _, d := range m.Devices {
+		if d.HBN {
+			hbnDevs = append(hbnDevs, d)
+		}
+	}
+	sort.Slice(hbnDevs, func(i, j int) bool { return hbnDevs[i].Path < hbnDevs[j].Path })
+	for _, d := range hbnDevs {
+		e, _ := nos.Lookup(nos.HBN)
+		host := Hostname(d.Parent) + "-" + d.Name
+		sp := &SwitchPlan{Device: d, NOS: e, Image: e.Image,
+			Container: unsafeName.ReplaceAllString("dctwin-"+est.Metadata.Name+"-"+host, "-"),
+			Config:    nvue.HBNSwitch(d.Path, host)}
+		sp.Config.Profile, sp.Config.MAC = d.ProfileName, switchMAC(d)
+		if dir := opts.NOS.HBNBinaries; dir != "" {
+			if !filepath.IsAbs(dir) {
+				return nil, fmt.Errorf("spec.adapters.network.nos.hbnBinaries %q: an absolute path on the Docker host", dir)
+			}
+			sp.Binds = append(sp.Binds, dir+":/opt/forge/bin:ro")
+		}
+		p.Switches = append(p.Switches, sp)
+		byDev[d] = sp
+		hbn[sp] = true
 	}
 
 	// every BMC's management port on a DHCP network, cabled to a switch
@@ -313,8 +346,20 @@ func BuildPlan(m *model.Model, est *schema.Estate, outputs map[string]string, ho
 	sort.Slice(links, func(i, j int) bool { return links[i].ID < links[j].ID })
 	asn := map[*SwitchPlan]uint32{}
 	leaf := uint32(0)
+	// a switch cabled to an emulated BlueField is a leaf, whatever else it carries
+	facesDPU := map[*SwitchPlan]bool{}
+	for _, l := range links {
+		a, b := byDev[l.A.Device], byDev[l.B.Device]
+		if a != nil && b != nil && hbn[a] != hbn[b] {
+			facesDPU[a], facesDPU[b] = !hbn[a], !hbn[b]
+		}
+	}
 	for _, sp := range p.Switches {
-		if len(sp.Config.Vlans) > 0 {
+		if hbn[sp] {
+			continue // its AS is NICo's (the fnn-asn pool), set through NVUE
+		}
+		sp.Config.EVPN = len(hbn) > 0
+		if len(sp.Config.Vlans) > 0 || facesDPU[sp] {
 			asn[sp] = 65101 + leaf // a leaf: its own AS (RFC 7938)
 			leaf++
 		} else {
@@ -339,6 +384,21 @@ func BuildPlan(m *model.Model, est *schema.Estate, outputs map[string]string, ho
 			return nil, fmt.Errorf("fabric link %s: %s or %s is not a front-panel port its NOS can carry", l.ID, l.A.Ref, l.B.Ref)
 		}
 		p.Links = append(p.Links, lp)
+		if hbn[a] || hbn[b] {
+			// a BlueField's uplink: an unnumbered eBGP session the leaf accepts from any AS (NICo's
+			// DPUs take theirs from its fnn-asn pool), carrying IPv4 and EVPN (D71)
+			switch {
+			case hbn[a] && hbn[b]:
+				return nil, fmt.Errorf("fabric link %s: two BlueFields cabled to each other", l.ID)
+			case hbn[a]:
+				a.Config.Cabled = append(a.Config.Cabled, l.A.Name)
+				b.Config.Unnumbered = append(b.Config.Unnumbered, nos.Unnumbered{Port: l.B.Name, PeerName: a.Config.Hostname + ":" + lp.APort})
+			default:
+				b.Config.Cabled = append(b.Config.Cabled, l.B.Name)
+				a.Config.Unnumbered = append(a.Config.Unnumbered, nos.Unnumbered{Port: l.A.Name, PeerName: b.Config.Hostname + ":" + lp.BPort})
+			}
+			continue
+		}
 		a.Config.Routed = append(a.Config.Routed, nos.Routed{Port: l.A.Name, Addr: netip.PrefixFrom(v4(off), 31), Peer: v4(off + 1),
 			PeerASN: asn[b], PeerName: b.Config.Hostname + ":" + l.B.Name})
 		b.Config.Routed = append(b.Config.Routed, nos.Routed{Port: l.B.Name, Addr: netip.PrefixFrom(v4(off+1), 31), Peer: v4(off),
@@ -389,8 +449,24 @@ func BuildPlan(m *model.Model, est *schema.Estate, outputs map[string]string, ho
 		if swIf == "" {
 			return nil, fmt.Errorf("spec.adapters.network.attach[%d]: %s is not a front-panel port %s can carry", i, mp.Ref, sp.NOS.Name)
 		}
-		p.Attach = append(p.Attach, &AttachPlan{Container: at.Container, Netns: at.Netns, Interface: ifname, Switch: sp, Port: portName, SwitchIf: swIf, Address: addr, Gateway: gw})
-		sp.Config.Service = append(sp.Config.Service, nos.Service{Port: portName, Gateway: netip.PrefixFrom(gw, addr.Bits())})
+		ap := &AttachPlan{Container: at.Container, Netns: at.Netns, Interface: ifname, Switch: sp, Port: portName, SwitchIf: swIf, Address: addr, Gateway: gw}
+		svc := nos.Service{Port: portName, Gateway: netip.PrefixFrom(gw, addr.Bits())}
+		for _, r := range at.Routes {
+			pfx, err := netip.ParsePrefix(r)
+			if err != nil || !pfx.Addr().Is4() {
+				return nil, fmt.Errorf("spec.adapters.network.attach[%d].routes %q: an IPv4 prefix", i, r)
+			}
+			ap.Routes = append(ap.Routes, pfx.Masked())
+		}
+		for _, r := range at.Serves {
+			pfx, err := netip.ParsePrefix(r)
+			if err != nil || !pfx.Addr().Is4() {
+				return nil, fmt.Errorf("spec.adapters.network.attach[%d].serves %q: an IPv4 prefix", i, r)
+			}
+			svc.Serves = append(svc.Serves, nos.Static{Prefix: pfx.Masked(), Via: addr.Addr()})
+		}
+		p.Attach = append(p.Attach, ap)
+		sp.Config.Service = append(sp.Config.Service, svc)
 	}
 	// every real switch's Loopback0, its router id, from the top of the underlay down: where its
 	// management interfaces answer in band (and a VTEP's source), reached across the fabric as a
@@ -403,9 +479,14 @@ func BuildPlan(m *model.Model, est *schema.Estate, outputs map[string]string, ho
 		return nil, fmt.Errorf("the underlay %s holds too few addresses for %d fabric links and %d loopbacks", ul, len(p.Links), n)
 	}
 	top := first + size - 2 // the last host address
-	for i, sp := range p.Switches {
+	i := 0
+	for _, sp := range p.Switches {
+		if hbn[sp] {
+			continue // a DPU's loopback is NICo's (its lo-ip pool), set through NVUE
+		}
 		lo := v4(uint32(top - uint64(i)))
 		sp.Config.Loopback, sp.Config.RouterID = lo, lo
+		i++
 	}
 	for _, sp := range p.Switches {
 		if _, err := sp.NOS.StartScript(sp.Config); err != nil {
@@ -466,6 +547,25 @@ func planHostPorts(p *Plan, m *model.Model, byDev map[*model.Device]*SwitchPlan,
 	segs := map[string]map[string]dhcp.Segment{} // network -> rack path -> segment
 	for _, d := range devs {
 		for _, port := range compile.HostPorts(d) {
+			if port.Device.HBN {
+				// the host's PF, spliced onto the emulated BlueField's pf0hpf_if (D71)
+				sp := byDev[port.Device]
+				mac, err := net.ParseMAC(port.MAC)
+				if sp == nil || err != nil {
+					p.HostSkipped["a vm host's PF on an emulated BlueField has no NOS or no MAC"]++
+					continue
+				}
+				r := d.RackOf()
+				hp := &HostPortPlan{Index: len(p.HostPorts), Ref: port.Ref, Device: d.Path, MAC: mac, Port: port, Dev: d, Switch: sp,
+					SwitchIf: sp.NOS.Interface(sp.Config, port.Name)}
+				sp.Config.Cabled = append(sp.Config.Cabled, port.Name)
+				if r != nil {
+					hp.Rack = r.Path
+				}
+				hp.TapIf = fmt.Sprintf("h%05x", hp.Index)
+				p.HostPorts = append(p.HostPorts, hp)
+				continue
+			}
 			if port.Link == nil {
 				p.HostSkipped["a vm host's port is not cabled"]++
 				continue

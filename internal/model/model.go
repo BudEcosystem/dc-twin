@@ -140,18 +140,21 @@ type Device struct {
 	BaseClass      string
 	Fidelity       string
 	OS             string
-	Identity       Identity
-	Components     []*Component
-	Ports          []*Port
-	PortBy         map[string]*Port
-	Parent         *Device
-	Children       []*Device
-	Generated      string // fabric name for template-generated devices
-	Dialect        string
-	Input          *PowerInput // the rack input that supplies it, if any
-	Outlets        map[int]*Device
-	State          DeviceState
-	Endpoint       Endpoint
+	// HBN: a DPU at model fidelity whose host is at vm, whose data plane the TAP substrate
+	// emulates (spec.adapters.network.hbn, D71): its host's traffic crosses it.
+	HBN        bool
+	Identity   Identity
+	Components []*Component
+	Ports      []*Port
+	PortBy     map[string]*Port
+	Parent     *Device
+	Children   []*Device
+	Generated  string // fabric name for template-generated devices
+	Dialect    string
+	Input      *PowerInput // the rack input that supplies it, if any
+	Outlets    map[int]*Device
+	State      DeviceState
+	Endpoint   Endpoint
 }
 
 type Identity struct {

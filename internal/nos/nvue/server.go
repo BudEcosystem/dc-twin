@@ -26,6 +26,22 @@ const User = "cumulus"
 // the relay. It returns what they printed, and an error when one of them failed.
 type Applier func(ctx context.Context, f Files) (output string, err error)
 
+// Runner runs a command in the switch and returns its standard output: how NVUE reads the
+// switch's operational state (FRR's BGP sessions, the bridge's MAC table). Nil: NVUE serves its
+// configuration only.
+type Runner func(ctx context.Context, args ...string) (string, error)
+
+// Event is one NVUE write a client made, for the twin's event log (D71, I-07): what it did (the
+// revision's state change, or a change made in it), the revision, the client, and the result.
+type Event struct {
+	Op       string // revision.create, revision.change, revision.delete, revision.apply
+	Revision string
+	Path     string
+	Client   string
+	State    string // the revision's state after it
+	Issue    string
+}
+
 // revision states, as NVUE names them
 const (
 	statePending   = "pending"
@@ -59,10 +75,14 @@ type Server struct {
 	password string
 	apply    Applier
 
+	run    Runner
+	notify func(Event)
+
 	applyMu sync.Mutex // one apply at a time, as NVUE serialises them
 	mu      sync.Mutex // the state below; never held while the switch applies
 	startup Tree
 	applied Tree
+	files   Files // the applied configuration's
 	revs    map[string]*revision
 	next    int
 }
@@ -99,6 +119,24 @@ func (s *Server) newID() string {
 	return id
 }
 
+// SetRunner gives NVUE the switch's operational state, read by running commands in it.
+func (s *Server) SetRunner(r Runner) { s.run = r }
+
+// OnWrite makes every write a client makes an Event.
+func (s *Server) OnWrite(f func(Event)) { s.notify = f }
+
+func (s *Server) emit(r *http.Request, e Event) {
+	if s.notify == nil {
+		return
+	}
+	if u, _, ok := r.BasicAuth(); ok {
+		e.Client = u + "@" + r.RemoteAddr
+	} else {
+		e.Client = r.RemoteAddr
+	}
+	s.notify(e)
+}
+
 // Applied is a copy of the applied configuration.
 func (s *Server) Applied() Tree {
 	s.mu.Lock()
@@ -131,6 +169,9 @@ func (s *Server) applyRevision(ctx context.Context, r *revision) {
 	var out string
 	var aerr error
 	if rerr == nil {
+		s.mu.Lock()
+		files.Recreate = recreate(s.files, files)
+		s.mu.Unlock()
 		out, aerr = s.apply(ctx, files)
 	}
 	s.mu.Lock()
@@ -141,10 +182,16 @@ func (s *Server) applyRevision(ctx context.Context, r *revision) {
 		r.state, r.issue = stateInvalid, rerr.Error()
 	case aerr != nil:
 		r.state, r.issue = stateApplyFail, aerr.Error()
-		s.applied = Clone(t)
+		s.applied, s.files = Clone(t), files
 	default:
 		r.state, r.issue = stateApplied, ""
-		s.applied = Clone(t)
+		prev := s.applied
+		s.applied, s.files = Clone(t), files
+		if s.run != nil {
+			if out := s.reimport(ctx, prev, t); out != "" {
+				r.output += out
+			}
+		}
 	}
 }
 
@@ -191,6 +238,18 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) get(w http.ResponseWriter, r *http.Request, path []string) {
+	if v, ok, err := s.operational(r, path); ok {
+		if err != nil {
+			problem(w, http.StatusServiceUnavailable, "Service Unavailable", err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, v)
+		return
+	}
+	if base := r.URL.Query().Get("diff"); base != "" {
+		s.diff(w, r, base, path)
+		return
+	}
 	s.mu.Lock()
 	var t Tree
 	switch rev := r.URL.Query().Get("rev"); rev {
@@ -229,6 +288,11 @@ func (s *Server) change(w http.ResponseWriter, r *http.Request, path []string) {
 	id := r.URL.Query().Get("rev")
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	defer func() {
+		if rv := s.revs[id]; rv != nil {
+			s.emit(r, Event{Op: "revision.change", Revision: id, Path: "/" + strings.Join(path, "/"), State: rv.state})
+		}
+	}()
 	rv := s.revs[id]
 	switch {
 	case id == "":
@@ -301,6 +365,7 @@ func (s *Server) revision(w http.ResponseWriter, r *http.Request, rest []string)
 			id := s.newID()
 			rv := &revision{tree: Clone(s.applied), state: statePending}
 			s.revs[id] = rv
+			s.emit(r, Event{Op: "revision.create", Revision: id, State: rv.state})
 			writeJSON(w, http.StatusOK, map[string]any{id: status(rv)})
 		default:
 			w.Header().Set("Allow", "GET, POST")
@@ -323,8 +388,11 @@ func (s *Server) revision(w http.ResponseWriter, r *http.Request, rest []string)
 			return
 		}
 		delete(s.revs, id)
+		s.emit(r, Event{Op: "revision.delete", Revision: id})
 		writeJSON(w, http.StatusOK, map[string]any{})
 	case http.MethodPatch:
+		// NICo's client also sends "auto-prompt" (ays_yes, ignore_fail_no): the twin's NVUE
+		// never prompts, and fails a revision whose apply fails, which is what it asks
 		var body struct {
 			State string `json:"state"`
 		}
@@ -343,6 +411,7 @@ func (s *Server) revision(w http.ResponseWriter, r *http.Request, rest []string)
 		s.applyRevision(ctx, rv)
 		cancel()
 		s.mu.Lock()
+		s.emit(r, Event{Op: "revision.apply", Revision: id, State: rv.state, Issue: rv.issue})
 		writeJSON(w, http.StatusOK, status(rv))
 	default:
 		w.Header().Set("Allow", "GET, PATCH, DELETE")
@@ -360,4 +429,55 @@ func problem(w http.ResponseWriter, code int, title, detail string) {
 	w.Header().Set("Content-Type", "application/problem+json")
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(map[string]any{"status": code, "title": title, "detail": detail})
+}
+
+// reimport makes bgpd import its EVPN routes again into each VRF whose L3 VNI a revision made or
+// changed, by taking the VRF's import route targets away and giving them back: bgpd imports the
+// routes it holds into a new VRF as soon as the VRF's BGP exists, and when that is before zebra
+// has the new L3 VNI up (the fabric's sessions already established, unlike at a switch's first
+// configuration), it never gives zebra their router MACs and the VRF routes into a black hole
+// (FRR 8.4). It runs with the state lock held, after the switch's tools have applied.
+func (s *Server) reimport(ctx context.Context, prev, next Tree) string {
+	var out strings.Builder
+	asn := str(next, "router", "bgp", "autonomous-system")
+	for _, v := range keys(sub(next, "vrf")) {
+		if v == "default" {
+			continue
+		}
+		vni := keys(sub(next, "vrf", v, "evpn", "vni"))
+		if len(vni) == 0 || fmt.Sprint(keys(sub(prev, "vrf", v, "evpn", "vni"))) == fmt.Sprint(vni) {
+			continue
+		}
+		bgp := sub(next, "vrf", v, "router", "bgp")
+		if !on(bgp, "enable") {
+			continue
+		}
+		a := asn
+		if x := str(bgp, "autonomous-system"); x != "" {
+			a = x
+		}
+		var rts []string
+		for _, rt := range keys(sub(bgp, "route-import", "from-evpn", "route-target")) {
+			if rt != "auto" {
+				rts = append(rts, rt)
+			}
+		}
+		if len(rts) == 0 || a == "" {
+			continue
+		}
+		time.Sleep(2 * time.Second) // zebra takes the new devices in
+		args := []string{"vtysh", "-c", "configure terminal", "-c", "router bgp " + a + " vrf " + v, "-c", "address-family l2vpn evpn"}
+		for _, rt := range rts {
+			args = append(args, "-c", "no route-target import "+rt)
+		}
+		for _, rt := range rts {
+			args = append(args, "-c", "route-target import "+rt)
+		}
+		o, err := s.run(ctx, args...)
+		fmt.Fprintf(&out, "== vrf %s: EVPN routes imported again (its L3 VNI is new)\n%s", v, o)
+		if err != nil {
+			fmt.Fprintf(&out, "%v\n", err)
+		}
+	}
+	return out.String()
 }

@@ -14,7 +14,11 @@ to compile on macOS, and on Linux nothing is patched ([below](#the-one-macos-pat
 `run.sh all`, from empty containers and a fresh twin: **22 PASS, 0 FAIL, 3 KNOWN**
 ([run.sh's own table](#runsh-passfail-table)). On x86_64 Linux, `run.sh ready` drives a DGX H100
 virtual machine through NICo's whole host lifecycle to **Ready**: **16 PASS, 0 FAIL, 1 KNOWN**
-([the Ready path](#the-ready-path-a-zero-dpu-host-that-boots-nicos-scout)). NICo runs with its deployment defaults where the
+([the Ready path](#the-ready-path-a-zero-dpu-host-that-boots-nicos-scout)), and `run.sh dpu` a
+Supermicro host with a BlueField-3, its HBN emulated and NICo's own DPU agent on it, to **Ready**
+and through a tenant instance in an FNN VPC and its release
+([the DPU path](#the-dpu-path-a-dpu-managed-host-to-ready-and-a-tenant-vpc-with-nicos-own-dpu-software)).
+NICo runs with its deployment defaults where the
 twin can serve them: DPU-managing ingestion (`dpu_policy = "manage"`) and the Rack Management
 Service as the NVLink-switch and power-shelf backend (the twin's RMS adapter).
 
@@ -554,6 +558,101 @@ estate's BlueFields run, since the impersonated DPU image installs no bundle (NI
 servers lease from NICo and are answered `exit` (NICo creates no machine for them on this estate);
 only the aarch64 iPXE is served, so an x86 server's scout is not reached here.
 
+## The DPU path: a DPU-managed host to Ready and a tenant VPC, with NICo's own DPU software
+
+`run.sh dpu` (x86_64 Linux with KVM, passwordless sudo; estate `supermicro-nico-dpu`) runs
+NICo as the Ready path does, against one Supermicro SYS-821GE-TNHR at `vm` fidelity whose
+BlueField-3 is at `model` with its data plane emulated (D71). The BlueField is a container of the
+twin's NVUE over FRR with HBN's interface names, its uplinks unnumbered eBGP ports of a
+`generic/nvue-frr` leaf (one leaf, one spine), the host's PF spliced onto its `pf0hpf_if`.
+NICo's own `forge-dpu-agent` (containerized, configuring HBN through NVUE's REST API) and
+`forge-dhcp-server` run in it, built at the pin by `hbn-build.sh`, handed the DPU by the stand-in
+that impersonates its boot (`nico-dpu-agent`, D58). NICo's namespace is cabled to the spine: the
+spine routes NICo's service network into the fabric, and the namespace routes the admin network,
+the DPUs' loopbacks and the VPCs' leaked host routes back through it.
+
+```bash
+NICO_SRC=… BOOT_ARTIFACTS=… HBN_BINARIES=… QEMU_DIR=… compat/nico/run.sh dpu
+```
+
+`dpu` is `fetch build up pxe nico load dhcp border host tenant report down`. `HBN_BINARIES` holds
+NICo's agent and DHCP server (`hbn-build.sh`); `QEMU_DIR` a QEMU whose NVMe controller implements
+namespace management (`scripts/qemu/build.sh`), as scout's drive sanitise needs. The `tenant` step
+creates a tenant (`CreateTenant`, through `forgecall`, a Forge client compiled from NICo's
+`forge.proto`, since the admin CLI has no tenant command), an FNN VPC and VPC prefix (admin CLI),
+places an instance on the host (`AllocateInstance`), checks NICo's agent's configuration on the
+DPU and the fabric's routes, releases the instance and deletes the VPC.
+
+NICo's FNN configuration (`dpu_fnn_config`): VPC prefixes from `10.200.0.0/16`, DPU ASNs from a
+pool, and an `INTERNAL` routing profile tenants take by default that leaks the underlay's default
+route into a VPC and the VPC's host routes out (`leak_default_route_from_underlay`,
+`leak_tenant_host_routes_to_underlay`). Without the leaks an instance never becomes Ready: NICo
+boots the instance's host through its discovery image from carbide-pxe while it provisions
+(`Assigned/BootingWithDiscoveryImage`), and the host leases its tenant address on the DPU with no
+route to carbide-pxe.
+
+### Result (2026-11-10, x86_64 Linux, NICo at 02b92f18)
+
+A clean `run.sh dpu` (fresh state and evidence, binaries from the first build, `QEMU_DIR` the
+patched QEMU 11.1.2): **22 PASS, 0 FAIL, 1 KNOWN** in under an hour, 30 minutes of it the host's way to Ready.
+
+```
+fetch               PASS   NICo 02b92f18fed776c8ef0056803338707c5e6bcb6b; temporal 1.9.1
+build               PASS   nico-api, forge-dhcp-server, admin-cli and carbide-pxe for linux/amd64 at 02b92f18
+up                  PASS   postgres (TLS), vault, twin with 10 endpoints
+pxe                 PASS   carbide-pxe at 10.90.0.17:80 and :8080 in NICo's namespace, linked to the twin's routed site network
+nico-api            PASS   listening on 10.90.0.20 in NICo's namespace; 2 segments, one per twin rack and network
+load                PASS   1 expected machine
+tpm-ca              PASS   the estate CA, which signed the vm host's EK certificates, loaded as a TPM CA
+dhcp                PASS   6 of 6 BMC ports leased by NICo's forge-dhcp-server through the twin relay
+ipmi                PASS   the host's BMC answers IPMI (lanplus, cipher suite 17) at its lease, where NICo's ipmitool reaches it
+ready-machine       PASS   the host is a DPU-managed NICo machine paired with its BlueField (the boot NIC is the DPU's host PF)
+border              PASS   the spine routes NICo's admin network to the host behind its DPU: 192.168.252.5/32, the DPU's BGP route through its leaf
+ready-dhcp          PASS   the guest (b8:3f:d2:81:67:ca) leased 192.168.252.5 on its DPU's host PF from NICo's forge-dhcp-server on the DPU
+                           (router 192.168.252.1, the DPU's SVI), boot file http://10.90.0.17:8080/public/blobs/internal/x86_64/ipxe.efi
+ready-boot          PASS   carbide-pxe served ipxe.efi (16), the iPXE boot script (10) and scout.efi (4); scout fetched the root CA (11)
+ready-discovery     PASS   scout's DiscoverMachine: SMBIOS serials = the BMC's (S061394X7536094), Supermicro SYS-821GE-TNHR; boot NIC the
+                           DPU's host PF; TPM EK certificate reported, its CA found
+ready-validation    KNOWN  machine validation skipped ([machine_validation_config] enabled = false, NICo's default)
+ready-state         PASS   Ready in 30 min: DPU discovery, DPU init (WaitingForNetworkConfig left on NICo's agent's acknowledgement),
+                           host init (SetBootOrder DPU first, discovery, cleanup with NVMe sanitise, UEFI setup, lockdown), BOM validation
+tenant              PASS   tenant-a (CreateTenant), FNN VPC, VPC prefix 10.200.1.0/24, instance on the host (AllocateInstance)
+tenant-synced       PASS   the instance's network synced in FNN VPC VNI 2024532, acknowledged by the DPU's own agent
+tenant-ready        PASS   instance Ready: its host booted NICo's discovery image and the tenant's OS in the VPC, through its DPU
+tenant-vrf          PASS   the DPU holds VRF vpc_2024532 (L3 VNI 2024532) with the host's interface in it, as NICo's agent configured it
+tenant-isolated     PASS   the fabric's default VRF holds of 10.200.0.0/16 only 10.200.1.0/31, the instance's host route NICo's agent
+                           leaks (ALLOW_TO_UNDERLAY, the internal profile), not the VPC's prefix
+tenant-released     PASS   released: the DPU's agent removed VRF vpc_2024532 and put the host back on NICo's admin network
+tenant-vpc-deleted  PASS   VPC prefix and VPC deleted (DeleteVpcPrefix, DeleteVpc)
+```
+
+#### The runs that got there
+
+The first runs stopped at `HostInitializing/PollingBiosSetup` (item 21), then at
+`HostInitializing/SetBootOrder` (item 20), then in cleanup at `Failed/NVMECleanFailed`: scout's
+sanitise rebuilds each drive's namespaces (`delete-ns`, `create-ns`, `attach-ns`), which the
+host's QEMU 8.2 refuses (`Invalid Command Opcode`; S-15, `QEMU_DIR`). With QEMU 11.1.2 patched,
+the sanitise passed and filled the host's disk (item 22). The instance then stayed in
+`Assigned/BootingWithDiscoveryImage` until the routing profile leaked the underlay into the VPC;
+the admin CLI found no host to allocate (item 23).
+
+NICo took the host from `DPUDiscovering` through `DPUInitializing` (platform power cycle, BIOS
+setup, `WaitingForNetworkConfig`, which it left on NICo's own agent's acknowledgement) and
+`HostInitializing` (`SetBootOrder` DPU first, discovery, cleanup with NVMe sanitise, UEFI setup,
+lockdown) and BOM validation to `Ready`. The host leased on its DPU's host PF from NICo's DHCP
+server on the DPU, and its UEFI booted NICo's iPXE and scout through it. With the instance, NICo's
+agent put the host's interface into VRF `vpc_<VNI>` (the VPC's L3 VNI, EVPN type-5 towards the
+leaf), the host booted the discovery image and its OS (an iPXE script that exits) in the VPC, and
+NICo reported the instance Ready. The fabric's default VRF held of the VPC only the instance's
+link, the host route NICo's agent leaks for an internal profile (its `ALLOW_TO_UNDERLAY` list).
+On release NICo's agent removed the VRF and put the host back on NICo's admin network.
+
+What this path does not cover: the admin CLI's `instance allocate` (it picks hosts and interfaces
+by their discovered NICs' Mellanox PCI vendor; the host PF is a virtio NIC in the guest, item 23),
+so `AllocateInstance` is called directly with the host's physical interface, which NICo places on
+the primary DPU; two tenants on one fabric (`TestDPUIsolation` and `TestDPUAgent` cover VPC-to-VPC
+isolation with NICo's agent and a Forge API harness); and the DPU's own boot, impersonated (D58).
+
 ## Twin bugs and missing features
 
 1. **BMC clocks are frozen.** Every Manager's `DateTime` is served from the captured tree
@@ -739,6 +838,29 @@ Found on the trays path ([above](#the-trays-path-a-gb300-nvl72-rack-to-ready-wit
     boot options; a DHCP server or boot service that answers late left the machine with no OS.
     **Fixed:** a boot with no answer is tried again after 30 s.
 
+Found on the DPU path ([above](#the-dpu-path-a-dpu-managed-host-to-ready-and-a-tenant-vpc-with-nicos-own-dpu-software)):
+
+20. **The Supermicro BMC did not name a host's boot options for its DPU.** NICo's
+    `set_boot_order_dpu_first` (libredfish) looks for the option whose display name holds
+    `UEFI HTTP IPv4 Mellanox Network Adapter` and the DPU's host PF MAC; the twin named the
+    firmware's options as OVMF does, and the host stopped at `HostInitializing/SetBootOrder`
+    (`No match for Mellanox HTTP adapter boot`). **Fixed:** a dialect names a vm host's network
+    boot options on a DPU's host PF (`spec.dpuBootName`; Supermicro's
+    `UEFI {proto} {ip} Mellanox Network Adapter - {mac}(MAC:{compact})`; `TestDPUBootOptionNames`).
+21. **A vm host's TPM state could not be read by swtpm after the harness chowned the state
+    directory** (AppArmor's swtpm profile opens only files swtpm owns); the host stopped at
+    `PollingBiosSetup`. **Fixed:** the vm adapter gives the TPM's state and log back to the user
+    swtpm runs as before it starts (`ownTPMFiles`); `run.sh` no longer chowns `state/vm`.
+22. **A guest's zeroes filled the host's disk.** The drives' raw block node was opened with
+    QEMU's default `discard=ignore`, which drops a write-zeroes' may-unmap, so the guest's NVMe
+    Format (scout sanitises all eight 3.84 TB drives) allocated each sparse backing: 673 GB in two
+    runs before the host's disk was full. **Fixed:** both nodes unmap (`TestDriveZeroesStaySparse`,
+    which fails with the raw node at `ignore`); the drives stayed at 0 KiB through scout's sanitise.
+    On macOS QEMU writes the zeroes, as the fidelity report now says.
+23. **Not fixed: the host PF is a virtio NIC in the guest.** QEMU has no ConnectX: scout reports
+    the host's boot NIC with Red Hat's PCI vendor, so the admin CLI's `instance allocate` finds no
+    host with a Mellanox NIC. The path calls `AllocateInstance` itself.
+
 Since fixed: the BlueField-3, GB200 tray and DL385 profiles stated firmware levels their BMCs did
 not serve (the capture seeds them); they now state the capture's, and a GB300 tray, whose BMC
 presents the GB200 capture, serves its profile's (D35, clarified). A GB tray's GPU firmware and
@@ -841,22 +963,23 @@ Found on the Ready path ([below](#the-ready-path-a-zero-dpu-host-that-boots-nico
 
 ## What this does not show
 
-- A host with DPUs reaching `Ready` with NICo's own machine software: on the trays path the
-  GB300 trays reach `Ready` with that software impersonated (D58); without the impersonators
-  they stop in DPU discovery, the DPU OS not being modelled (Q1). The OEM hosts
+- A host with DPUs reaching `Ready` with NICo's own DPU software is shown on the DPU path, with
+  the DPU's boot impersonated (D58) and its data plane emulated (D71); a DPU OS is not modelled
+  (Q1). On the trays path the GB300 trays reach `Ready` with that software impersonated (D58);
+  without the impersonators they stop in DPU discovery. The OEM hosts
   of `nvl72-nico` are explored, preingested and powered by NICo but not ingested there (they are at
   `model` fidelity). The zero-DPU DGX of the Ready path reaches `Ready` with: a scout image
   assembled from NICo's pieces rather than NICo's own (which NICo does not publish; without
   NVIDIA's driver, DCGM and MFT), machine validation skipped (NICo's default; its tests need
   GPUs), attestation and SPDM off (NICo's defaults), and a TPM whose EK chain is the estate CA's.
-  Nothing after `Ready` (an instance, an OS install) is exercised.
+  After `Ready`, only the DPU path places an instance (an iPXE script that exits: no OS install).
 - NICo's own NSM and PSM: the twin's RMS stands where NICo's deployment puts RMS, which is what
   NICo talks to; nv-rms's own drive of the trays (NVOS over SSH) is not exercised.
 - nico-api releasing an isolated rack, and the consumer keeping a leak override through a
   sibling point's Clear (both KNOWN, NICo-side).
 - Everything else the stack document lists: attestation, firmware updates, NMX-C through NICo's
   nvlink-manager (`compat/nico-fabric` runs NICo's `libnmxc` against the twin instead), UFM
-  through NICo, HBN.
+  through NICo.
 
 ## run.sh PASS/FAIL table
 
@@ -939,4 +1062,7 @@ ready-state       PASS   site-1/hall-a/b01/server-01 reached Ready in 7 min: con
 | `svcnet/` | Go, Linux: the routed site network's far end, a TAP in a network namespace (or a container) carrying the twin's frame link, with TCP forwards in and out, and UDP relays at an estate address (a BMC's IPMI) |
 | `ready.py` | the Ready path's evidence: NICo's record of the host (its state history) and the twin's events and logs, as result rows |
 | `pkg-config-sysroot.py` | a minimal pkg-config for `rust-cross` (a target sysroot copied from the build container) |
+| `forgecall/` | Go: one Forge method with a JSON request, compiled from NICo's `forge.proto` (the DPU path's tenant, instance and VPC calls) |
+| `hbn-build.sh` | NICo's `forge-dpu-agent` and `forge-dhcp-server` built at the pin on bookworm, for the emulated HBN |
+| `../../examples/estates/supermicro-nico-dpu.yaml` | the DPU path's estate: a SYS-821GE-TNHR with a BlueField-3 (`oem-supermicro/sys-821ge-tnhr-bf3`) at `vm`, its HBN emulated, on a one-leaf, one-spine real-NOS frontend cabled to NICo's namespace |
 | `../../examples/estates/dgx-nico-ready.yaml` | the Ready path's estate: a DGX H100 at `vm` fidelity, its network rack, NICo's DHCP on both networks, the routed site network |

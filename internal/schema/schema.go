@@ -110,6 +110,10 @@ type NetworkOptions struct {
 	// Attach wires hosts outside the twin (a stack's DHCP server, its controller) into the twin
 	// networks at a real switch's port, as a site cables its management servers.
 	Attach []Attachment `json:"attach,omitempty"`
+	// HBN gives every BlueField at model fidelity whose host is at vm an emulated data plane on
+	// the tap substrate (D71): its HBN is the twin's NVUE over FRR in a container of its own,
+	// its host's NIC is its host PF (pf0hpf_if), and its uplinks are routed, unnumbered leaf ports.
+	HBN bool `json:"hbn,omitempty"`
 }
 
 // NOSOptions are the tap substrate's knobs for real NOS instances.
@@ -124,6 +128,10 @@ type NOSOptions struct {
 	// Memory is every NOS container's memory limit, with no swap beyond it (bytes, or k, m, g:
 	// "512m"); unset, containers are unlimited.
 	Memory string `json:"memory,omitempty"`
+	// HBNBinaries is a directory on the Docker host holding NICo's DPU programs built from its
+	// source (forge-dpu-agent, forge-dhcp-server: compat/nico/hbn-build.sh), mounted read-only at
+	// /opt/forge/bin in every emulated BlueField (D71); unset, none is.
+	HBNBinaries string `json:"hbnBinaries,omitempty"`
 }
 
 // Attachment cables a running container to a real switch's port.
@@ -140,6 +148,12 @@ type Attachment struct {
 	Gateway string `json:"gateway"`
 	// Interface is the host-side interface name (default svc0).
 	Interface string `json:"interface,omitempty"`
+	// Routes are prefixes the host reaches through the port, in place of a default route (a
+	// namespace whose default route is elsewhere: NICo's, routed to the twin's own router).
+	Routes []string `json:"routes,omitempty"`
+	// Serves are prefixes the host answers for besides its address (services on another of its
+	// interfaces): the switch routes them to it and its BGP carries them across the fabric.
+	Serves []string `json:"serves,omitempty"`
 }
 
 type FidelitySpec struct {
@@ -813,6 +827,12 @@ type DialectSpec struct {
 	// serves, so the host's boot option for its DPU and the DPU agree (a stack sets a host to
 	// boot from its DPU by that MAC).
 	DPUHostMACs []string `json:"dpuHostMACs,omitempty"`
+	// DPUBootName is how the BMC names a vm host's firmware boot option for a NIC that is a DPU's
+	// host PF, where it names options by adapter (a Supermicro: "UEFI HTTP IPv4 Mellanox Network
+	// Adapter - <MAC>(MAC:<mac>)", which NICo's libredfish looks for to boot a host from its DPU).
+	// {proto} is HTTP or PXE, {ip} IPv4 or IPv6, {mac} the MAC with colons, {compact} without.
+	// Empty: the firmware's own description.
+	DPUBootName string `json:"dpuBootName,omitempty"`
 	// FirmwareFromProfile keeps the profile's firmware baselines where the capture would seed
 	// them: set by a dialect that presents another product's capture (the GB300 BMC over the
 	// GB200 capture), whose captured levels are that other product's. Without it a dialect serves

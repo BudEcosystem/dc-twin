@@ -91,14 +91,21 @@ BMS_MIRRORS=${BMS_MIRRORS:-nico-legacy,nico-api}
 ESTATE=${ESTATE:-$repo/examples/estates/nvl72-nico.yaml}
 READY_ESTATE=${READY_ESTATE:-$repo/examples/estates/dgx-nico-ready.yaml}
 TRAYS_ESTATE=${TRAYS_ESTATE:-$repo/examples/estates/nvl72-nico-impersonated.yaml}
+DPU_ESTATE=${DPU_ESTATE:-$repo/examples/estates/supermicro-nico-dpu.yaml}
+FORGE_PROTO=${FORGE_PROTO:-$(ls -d "${DCTWIN_ASSETS:-$HOME/.cache/dc-twin/assets}"/nico-forge-proto@* 2>/dev/null | head -1)}
+HBN_BINARIES=${HBN_BINARIES:-}       # the DPU path: NICo's forge-dpu-agent and forge-dhcp-server (hbn-build.sh)
+# QEMU_DIR: the vm hosts' QEMU (spec.adapters.vm.qemu), one whose NVMe controller implements
+# namespace management (scripts/qemu/build.sh, S-15): scout's drive sanitise in cleanup rebuilds
+# each drive's namespaces, which an unpatched QEMU's refuses (Failed/NVMECleanFailed)
+QEMU_DIR=${QEMU_DIR:-}
 TRAYS_WAIT=${TRAYS_WAIT:-7200}
 READY_HOST=${READY_HOST:-b01/server-01}
 SVC_NS=${SVC_NS:-dctwin-nico-svc}
 READY_WAIT=${READY_WAIT:-5400}
 PXE_LINK_PORT=${PXE_LINK_PORT:-17800}
 CLASSIFY_ESTATE=${CLASSIFY_ESTATE:-$repo/examples/estates/lab-model.yaml}
-PG=dctwin-nico-pg
-VAULT=dctwin-nico-vault
+PG=${PG_CONTAINER:-dctwin-nico-pg}          # another NICo on the host: name these apart, and every port
+VAULT=${VAULT_CONTAINER:-dctwin-nico-vault}
 SITE_PASSWORD=vault-password   # the site-wide BMC root password NICo rotates BMCs to
 
 SRC=${NICO_SRC:-$WORK/src/infra-controller}
@@ -210,6 +217,7 @@ step_build() {
     done
     if [ "$DCTWIN" = "$WORK/bin/dctwin" ] || [ ! -x "$DCTWIN" ]; then (cd "$repo" && go build -o "$DCTWIN" ./cmd/dctwin) || die "go build dctwin"; fi
     (cd "$repo" && go build -o "$BIN/nicoinputs" ./compat/nico/nicoinputs) || die "go build nicoinputs"
+    (cd "$repo" && go build -o "$BIN/forgecall" ./compat/nico/forgecall) || die "go build forgecall"
     result build PASS "nico-api, forge-dhcp-server, admin-cli and carbide-pxe for linux/$goarch at $NICO_SHA (boot-artifacts.sh)"
     return
   fi
@@ -254,8 +262,11 @@ twin_up() { # twin_up <name> <estate> <state> <adapters> [gateway]
   local name=$1 estate=$2 state=$3 adapters=$4 gw=${5:-}
   local prev=""; [ -f "$HOME/.dc-twin/current" ] && prev=$(cat "$HOME/.dc-twin/current")
   rm -rf "$state"
-  start_bg "$name" "$DCTWIN" up "$estate" --state "$state" --adapters "$adapters" ${gw:+--gateway "$gw"}
-  wait_for 90 "the twin ($name)" test -s "$state/endpoints.json" || return 1
+  start_bg "$name" ${TWIN_AS:-} "$DCTWIN" up "$estate" --state "$state" --adapters "$adapters" ${gw:+--gateway "$gw"}
+  wait_for 180 "the twin ($name)" sh -c "test -s '$state/endpoints.json' || sudo -n test -s '$state/endpoints.json'" || return 1
+  # a twin run as root (the DPU path) leaves its state root's: the steps after read it. Not the
+  # machines' (state/vm): swtpm, run as root, opens only files it owns (Ubuntu's AppArmor profile)
+  [ -n "${TWIN_AS:-}" ] && sudo -n find "$state" "$HOME/.dc-twin" -path "$state/vm" -prune -o -exec chown "$(id -u):$(id -g)" {} + 2>/dev/null
   sleep 2
   # dctwin up records itself as the current estate; leave whatever was current before
   if [ -n "$prev" ]; then echo "$prev" >"$HOME/.dc-twin/current"; fi
@@ -352,14 +363,30 @@ step_up() {
   # the twin: its BMC network is relayed to NICo's dhcp-server on DHCP_PORT, and its BMS mirrors
   # the shapes NICo's consumer and nico-api parse (quoted: a bare comma ends a flow-mapping entry)
   # the Ready path's estate also names nico-api's port, and the routed site network's link
-  local est=$ESTATE; ready && est=$READY_ESTATE; trays && est=$TRAYS_ESTATE
+  local est=$ESTATE; ready && est=$READY_ESTATE; trays && est=$TRAYS_ESTATE; dpu && est=$DPU_ESTATE
   sed -E -e "s|server: \"127.0.0.1:26767\"|server: \"127.0.0.1:$DHCP_PORT\"|" \
       -e "s#bmsConsumerMirror: (\"[^\"]*\"|[^,} ]*)#bmsConsumerMirror: \"$BMS_MIRRORS\"#" \
       -e "s|nico-api@10.90.0.20:11079=127.0.0.1:11079|nico-api@10.90.0.20:$API_PORT=127.0.0.1:$API_PORT|" \
-      -e "s|link=127.0.0.1:17800|link=127.0.0.1:$PXE_LINK_PORT|" "$est" >"$WORK/estate.yaml"
+      -e "s|link=127.0.0.1:17800|link=127.0.0.1:$PXE_LINK_PORT|" \
+      -e "s|netns: SVC_NS|netns: $SVC_NS|" -e "s|hbnBinaries: HBN_BINARIES|hbnBinaries: $HBN_BINARIES|" \
+      -e "${QEMU_DIR:+s|vm: \{ memoryMB|vm: { qemu: $QEMU_DIR, memoryMB|}" "$est" >"$WORK/estate.yaml"
   local adapters=redfish,dhcp,bms,nvue
   ready && adapters=redfish,dhcp,bms,vm,ipmi
   trays && adapters=redfish,dhcp,bms,nvue,nmxc,nicoagent
+  dpu && adapters=redfish,dhcp,bms,vm,ipmi,nicoagent
+  if dpu; then
+    # the TAP substrate (the emulated HBN, its real-NOS fabric) runs as root, its NOS containers
+    # in this user's rootless Podman (served for it on a socket); NICo's namespace exists first,
+    # as the estate cables it to the spine
+    [ -n "$HBN_BINARIES" ] && [ -x "$HBN_BINARIES/forge-dpu-agent" ] || die "HBN_BINARIES must hold forge-dpu-agent and forge-dhcp-server (compat/nico/hbn-build.sh)"
+    stop_bg podman-api
+    start_bg podman-api podman system service --time=0 "unix://$WORK/podman.sock"
+    wait_for 30 "the Podman API" test -S "$WORK/podman.sock" || die "podman system service"
+    sudo -n ip netns del "$SVC_NS" 2>/dev/null || true
+    sudo -n ip netns add "$SVC_NS" || die "ip netns add $SVC_NS (needs sudo)"
+    sudo -n ip -n "$SVC_NS" link set lo up
+    TWIN_AS="sudo -n env HOME=$HOME DOCKER_HOST=unix://$WORK/podman.sock DCTWIN_ASSETS=${DCTWIN_ASSETS:-$HOME/.cache/dc-twin/assets} PATH=$PATH"
+  fi
   [ "$COMPONENT_BACKEND" = rms ] && ! ready && adapters=$adapters,rms
   twin_up twin "$WORK/estate.yaml" "$STATE" "$adapters" "$GATEWAY" || die "twin"
   if [ "$COMPONENT_BACKEND" = rms ] && ! ready; then
@@ -398,6 +425,7 @@ step_nico() {
   render "$here/nico-api-config.toml.in" "$WORK/nico-api-config.toml"
   cat "$WORK/inputs/nico-site.toml" >>"$WORK/nico-api-config.toml"
   ready && ready_config "$WORK/nico-api-config.toml"
+  dpu && dpu_models_config "$WORK/nico-api-config.toml" && dpu_fnn_config "$WORK/nico-api-config.toml"
   trays && trays_config "$WORK/nico-api-config.toml"
   local db="postgresql://postgres:admin@127.0.0.1:$PG_PORT"
   DATABASE_URL=$db "$BIN/carbide-api" migrate >"$LOGS/migrate.log" 2>&1 || { tail "$LOGS/migrate.log"; die "migrations"; }
@@ -685,6 +713,7 @@ step_consumer() {
 # namespace).
 ready() { [ "${READY:-}" = 1 ]; }
 trays() { [ "${TRAYS:-}" = 1 ]; }
+dpu() { [ "${DPU:-}" = 1 ]; }  # the DPU path is the Ready path with the host's BlueField managed (D71)
 netns() { ready || trays; }  # NICo's PXE service and API run in the site network's namespace
 
 # trays_config <config>: the trays path's changes to nico-api's configuration. As on the Ready
@@ -699,13 +728,32 @@ trays_config() {
     -e "s|certs/localhost.crt|certs/nico-api-site.crt|" -e "s|certs/localhost.key|certs/nico-api-site.key|" "$f" && rm -f "$f.bak"
   awk '{print} /^\[machine_state_controller\]$/ {print "failure_retry_time = \"15m\""}' "$f" >"$f.tmp" && mv "$f.tmp" "$f"
   printf '\n[nvlink_config]\nenabled = true\nallow_insecure = false\nnmx_c_tls_ca_cert_path = "%s"\n' "$STATE/estate-ca.pem" >>"$f"
+  dpu_models_config "$f"
+}
+
+# dpu_fnn_config <config>: the DPU path's FNN, NICo's VRF-per-VPC virtualization (D71): an
+# internal routing profile tenants take by default, the fabric prefixes VPC prefixes come from, and
+# the pool each DPU's AS is taken from (api-core cfg/file.rs; NICo's [fnn] is required for an FNN
+# VPC's DPU configuration). The internal profile leaks the underlay's default route into a VPC and
+# the VPC's host routes out to the underlay: an instance's host boots NICo's discovery image from
+# carbide-pxe on the site network while it is provisioned and released (BootingWithDiscoveryImage),
+# so its VPC must reach NICo's services and be reached back.
+dpu_fnn_config() {
+  local f=$1
+  # top-level keys go before the first table
+  awk 'BEGIN { done = 0 } /^\[/ && !done { print "default_tenant_routing_profile_type = \"INTERNAL\""; print "site_fabric_prefixes = [\"10.200.0.0/16\"]"; print ""; done = 1 } { print }' "$f" >"$f.tmp" && mv "$f.tmp" "$f"
+  printf '\n[fnn]\nuse_vpc_vrf_loopback = false\n\n[fnn.routing_profiles.INTERNAL]\ninternal = true\naccess_tier = 0\nleak_default_route_from_underlay = true\nleak_tenant_host_routes_to_underlay = true\n\n[pools.fnn-asn]\ntype = "integer"\nranges = [{ start = "4268000000", end = "4268000100" }]\n' >>"$f"
+}
+
+# dpu_models_config <config>: the BlueField firmware catalog (trays and DPU paths).
+dpu_models_config() {
   # The BlueField bundle NICo's DPU image installs carries the DPUs' BMC, ERoT and NIC firmware,
   # and an operator keeps nico-api's dpu_models catalog in step with it (NICo's
   # docs/operations/firmware-updates/configuration.md). On this path the image is impersonated
   # and installs nothing, so the bundle's firmware is what the estate's BlueFields run: the
   # catalog names the versions the twin's BlueField BMCs serve (read from the first one), and
   # NICo's DPU firmware check (DPUInitializing/WaitingForPlatformConfiguration) finds them in place.
-  local dpu v_bmc v_cec v_nic v_uefi
+  local f=$1 dpu v_bmc v_cec v_nic v_uefi
   dpu=$(jq -r '[.[] | select(.path | test("/bf3-[0-9]+$")) | .path][0] // empty' "$WORK/credentials.json" 2>/dev/null)
   [ -n "$dpu" ] || dpu=$(twin get '?class=dpu' --json 2>/dev/null | jq -r '.[0].path // empty')
   fwv() { twin inspect "$dpu" "/redfish/v1/UpdateService/FirmwareInventory/$1" 2>/dev/null | jq -r '.Version // empty'; }
@@ -763,7 +811,7 @@ ready_ipmi() {
   for p in "$SITE_PASSWORD" "$pass"; do
     ok=$(sudo -n ip netns exec "$SVC_NS" sudo -n -u "$(id -un)" ipmitool -I lanplus -C 17 -H "$ip" -U "$user" -P "$p" chassis power status 2>/dev/null) && break
   done
-  if [ -n "$ok" ]; then result ipmi PASS "the DGX's BMC answers IPMI (lanplus, cipher suite 17) at its lease $ip:623 in $SVC_NS, where NICo's ipmitool reaches it: \"$ok\""
+  if [ -n "$ok" ]; then result ipmi PASS "the host's BMC answers IPMI (lanplus, cipher suite 17) at its lease $ip:623 in $SVC_NS, where NICo's ipmitool reaches it: \"$ok\""
   else result ipmi FAIL "no IPMI answer at $ip:623 in $SVC_NS (logs/ipmi-relay.log)"; fi
 }
 
@@ -798,8 +846,10 @@ step_pxe() {
   say "the site network's namespace $SVC_NS: svcnet, NICo's PXE service at 10.90.0.17 (nico-api comes at 10.90.0.20)"
   [ "$uname_s" = Linux ] || die "the Ready and trays paths run on Linux"
   stop_bg pxe-80; stop_bg pxe-8080; stop_bg svcnet
-  sudo -n ip netns del "$SVC_NS" 2>/dev/null || true
-  sudo -n ip netns add "$SVC_NS" || die "ip netns add $SVC_NS (needs sudo)"
+  if ! dpu; then # on the DPU path the namespace was made before the twin, which cabled it to the spine
+    sudo -n ip netns del "$SVC_NS" 2>/dev/null || true
+    sudo -n ip netns add "$SVC_NS" || die "ip netns add $SVC_NS (needs sudo)"
+  fi
   # a service in the namespace may bind port 80 as the user (this namespace's sysctl only)
   sudo -n ip netns exec "$SVC_NS" sysctl -qw net.ipv4.ip_unprivileged_port_start=0
   local broker; broker=$(cat "$WORK/broker" 2>/dev/null)
@@ -808,6 +858,9 @@ step_pxe() {
   # the trays path: the DPUs' out-of-band addresses (the BMC network) and the trays' admin
   # addresses are routed in too, and NICo's RMS backend is the twin's RMS on this host
   local routes="-route 10.40.0.0/16"
+  # the DPU path: the BMC network (and the BlueFields' out-of-band ports) through the twin's router;
+  # hosts behind DPUs come in through the fabric (the estate's attachment routes them)
+  dpu && routes="-route 10.30.0.0/16"
   if trays; then
     routes="$routes -route 10.30.0.0/16 -route 192.168.252.0/24"
     local rms; rms=$(sed -E 's|^https?://||; s|/.*$||' "$WORK/rms-url" 2>/dev/null)
@@ -836,6 +889,14 @@ step_pxe() {
     done
   else
     cp "$BOOT/ipxe.efi" "$BOOT/scout.efi" "$static/blobs/internal/$arch/"
+    if dpu; then
+      # the BlueField's UEFI HTTP boot of NICo's aarch64 iPXE; its DPU image is impersonated (D58)
+      [ -n "${IPXE_AARCH64:-}" ] || die "the DPU path needs IPXE_AARCH64 (NICo's aarch64 iPXE)"
+      mkdir -p "$static/blobs/internal/aarch64" && cp "$IPXE_AARCH64" "$static/blobs/internal/aarch64/ipxe.efi"
+      for f in carbide.efi carbide.root; do
+        echo "dc-twin: NICo's $f is impersonated on this path (D58); the DPU OS's agent is NICo's own (D71)" >"$static/blobs/internal/aarch64/$f"
+      done
+    fi
   fi
   local p
   for p in 80 8080; do
@@ -912,7 +973,8 @@ step_host() {
     ready_evidence ""
     return 1
   fi
-  result ready-machine PASS "$(host_path) is NICo machine $id, created as a zero-DPU host (its expected machine: dpu_policy ignore, the boot NIC primary on the HostInband segment)"
+  if dpu; then result ready-machine PASS "$(host_path) is NICo machine $id, a DPU-managed host paired with its BlueField (its expected machine names no NICs; the boot NIC is the DPU's host PF)"
+  else result ready-machine PASS "$(host_path) is NICo machine $id, created as a zero-DPU host (its expected machine: dpu_policy ignore, the boot NIC primary on the HostInband segment)"; fi
   # follow the host's state until Ready, recording each state; give up after READY_WAIT, or once
   # one state has held for READY_STALL (longer than NICo's retry after a failure, 15 minutes here)
   local end=$((SECONDS + READY_WAIT)) since=$SECONDS
@@ -1043,12 +1105,131 @@ step_report() {
   echo "  evidence: $OUT, logs: $LOGS"
 }
 
+# step_border: the fabric carries NICo's admin network (D71). NICo's DPU template routes a host
+# behind a DPU itself: the host's admin address is the DPU's, a /32 its BGP advertises to its
+# leaves (its SVI's subnet is kept out of the underlay, FORGE_TO_UNDERLAY), so NICo's namespace,
+# cabled to the spine, reaches each host through the DPU it is behind. This checks the spine holds
+# that route, once NICo has given the host's DPU its admin configuration. It runs in the
+# background while the host steps follow the host.
+step_border() {
+  local spine i r=""
+  spine=$(jq -r '[.[] | select(.path | test("/spine-"))][0].container // empty' "$STATE/stack-inputs/switches.json")
+  [ -n "$spine" ] || spine=$(podman ps --format '{{.Names}}' | grep -- '-spine-' | head -1)
+  for i in $(seq 1 360); do
+    r=$(podman exec "$spine" vtysh -c 'show ip route 192.168.252.0/24 longer-prefixes' 2>/dev/null | grep -Eo '192\.168\.252\.[0-9]+/32' | head -1)
+    [ -n "$r" ] && break
+    sleep 10
+  done
+  if [ -n "$r" ]; then result border PASS "the spine routes NICo's admin network to the host behind its DPU: $r, the DPU's BGP route through its leaf"
+  else result border FAIL "the spine never learned a host's admin route (192.168.252.0/24 /32s) from a DPU"; fi
+}
+
+# step_tenant: a tenant on the DPU-managed host (D71): NICo's tenant, an FNN VPC and a prefix in
+# it, an instance allocated on the Ready host; its DPU's agent acknowledges the instance's network
+# (NICo reports it synced), the DPU holds the VPC's VRF with the host's interface in it, the fabric
+# carries the VPC only as EVPN (no tenant route in the spine's default VRF), and NICo's namespace no
+# longer reaches the host; released, the host is back on NICo's admin network.
+fcall() { "$BIN/forgecall" -proto "$FORGE_PROTO" -addr "localhost:$API_PORT" -ca "$CERTS/ca.crt" -cert "$CERTS/client.crt" -key "$CERTS/client.key" "$@"; }
+step_tenant() {
+  say "a tenant: an FNN VPC and an instance on the host, through its DPU"
+  local id dpuid vpc vni pfx inst o synced spine dpu dpw tip t
+  id=$(host_id)
+  case $(host_state "$id") in Ready | Ready/* | READY*) ;; *) result tenant FAIL "the host is not Ready ($(host_state "$id")): no instance to place"; return 1 ;; esac
+  dpuid=$(admin -f json machine show "$id" | jq -r '[.. | objects | .associated_dpu_machine_ids? // empty | .[]?][0] // empty' 2>/dev/null)
+  [ -n "$dpuid" ] || dpuid=$(admin machine show | grep -Eo 'fm100d[0-9a-z]+' | head -1)
+  # (a tenant an earlier run of this step created stays: tenants are not deleted)
+  fcall CreateTenant '{"organization_id":"tenant-a","metadata":{"name":"tenant-a"},"routing_profile_type":"INTERNAL"}' >"$OUT/tenant.json" 2>&1 ||
+    grep -qiE 'already exists|tenants_pkey' "$OUT/tenant.json" || { result tenant FAIL "CreateTenant: $(cat "$OUT/tenant.json")"; return 1; }
+  admin --cloud-unsafe-op=dctwin -f json vpc create --name vpc-a --org-id tenant-a --virtualization-type fnn >"$OUT/vpc.json"
+  vpc=$(jq -r '.id | if type == "object" then .value else . end // empty' "$OUT/vpc.json" 2>/dev/null | head -1)
+  [ -n "$vpc" ] || { result tenant FAIL "vpc create: $(head -c 400 "$OUT/vpc.json")"; return 1; }
+  admin --cloud-unsafe-op=dctwin -f json vpc-prefix create --vpc-id "$vpc" --prefix 10.200.1.0/24 --name pfx-a >"$OUT/vpc-prefix.json"
+  pfx=$(jq -r '.id | if type == "object" then .value else . end // empty' "$OUT/vpc-prefix.json" 2>/dev/null | head -1)
+  [ -n "$pfx" ] || { result tenant FAIL "vpc-prefix create: $(head -c 400 "$OUT/vpc-prefix.json")"; return 1; }
+  # AllocateInstance itself: the host's physical interface on the VPC prefix, on its primary DPU
+  # (no device named). The admin CLI's `instance allocate` picks only hosts whose discovered NICs
+  # have a Mellanox PCI vendor, and its interfaces by those NICs; the vm host's DPU host PF is a
+  # virtio NIC in the guest (README: twin limits)
+  fcall AllocateInstance "$(jq -nc --arg m "$id" --arg p "$pfx" '{machine_id: {id: $m}, metadata: {name: "inst-a"},
+    config: {tenant: {tenant_organization_id: "tenant-a"}, os: {ipxe: {ipxe_script: "#!ipxe\nexit"}, phone_home_enabled: false},
+      network: {interfaces: [{function_type: "PHYSICAL", vpc_prefix_id: {value: $p}}]}}}')" >"$OUT/instance-allocate.json" 2>&1
+  inst=$(jq -r '.id | if type == "object" then .value else . end // empty' "$OUT/instance-allocate.json" 2>/dev/null)
+  [ -n "$inst" ] || { result tenant FAIL "AllocateInstance: $(head -c 600 "$OUT/instance-allocate.json")"; return 1; }
+  result tenant PASS "tenant tenant-a (CreateTenant), FNN VPC $vpc, VPC prefix 10.200.1.0/24, instance $inst on $(host_path) (AllocateInstance)"
+  for t in $(seq 1 90); do
+    o=$(admin instance show "$inst" 2>/dev/null)
+    grep -qiE 'network config synced *\| *synced|synced *: *synced|\| *Synced *\|' <<<"$o" && { synced=1; break; }
+    sleep 10
+  done
+  echo "$o" >"$OUT/instance.txt"
+  vni=$(admin -f json vpc show "$vpc" 2>/dev/null | jq -r '[.. | objects | .vni? // empty | select(. != 0)][0] // empty' 2>/dev/null)
+  if [ -n "${synced:-}" ]; then result tenant-synced PASS "instance $inst in FNN VPC $vpc (VNI $vni): NICo reports its network synced, acknowledged by the DPU's own agent"
+  else result tenant-synced FAIL "instance $inst not synced in 15 min (out/instance.txt)"; fi
+  # the instance is Ready once NICo has booted its host through the discovery image and the
+  # tenant's OS (here an iPXE script that exits), in the VPC
+  local ready=""
+  for t in $(seq 1 120); do
+    o=$(admin instance show "$inst" 2>/dev/null)
+    grep -qE 'TENANT STATE *: *Ready' <<<"$o" && { ready=1; break; }
+    sleep 10
+  done
+  echo "$o" >"$OUT/instance.txt"
+  if [ -n "$ready" ]; then result tenant-ready PASS "instance $inst Ready: its host booted NICo's discovery image and the tenant's OS in the VPC, through its DPU"
+  else result tenant-ready FAIL "instance $inst not Ready in 20 min: $(grep -E 'TENANT STATE' "$OUT/instance.txt" | head -1) (out/instance.txt)"; fi
+  dpu=$(jq -r '[.[] | select(.nos == "emulated/hbn")][0].container' "$STATE/stack-inputs/switches.json")
+  dpw=$(jq -r '[.[] | select(.nos == "emulated/hbn")][0].nvuePassword' "$STATE/stack-inputs/switches.json")
+  podman exec "$dpu" curl -sk -u "cumulus:$dpw" "https://127.0.0.1:8765/nvue_v1/?rev=applied" >"$OUT/dpu-tenant-nvue.json"
+  if jq -e --arg v "vpc_$vni" '.vrf[$v] != null and ([.interface[] | .ip.vrf? // empty] | index($v) != null)' "$OUT/dpu-tenant-nvue.json" >/dev/null 2>&1; then
+    result tenant-vrf PASS "the DPU holds VRF vpc_$vni (L3 VNI $vni) with the host's interface in it, as NICo's agent configured it through NVUE"
+  else result tenant-vrf FAIL "the DPU's applied NVUE has no VRF vpc_$vni holding the host's interface (out/dpu-tenant-nvue.json)"; fi
+  spine=$(podman ps --format '{{.Names}}' | grep -- '-spine-' | head -1)
+  tip=$(grep -Eo '10\.200\.1\.[0-9]+' "$OUT/instance.txt" | head -1)
+  # the internal profile leaks the VPC's host routes, and only those, to the underlay: the spine's
+  # default VRF holds of the site's VPC prefixes exactly what NICo's agent lets out of the DPU's
+  # VRF (its ALLOW_TO_UNDERLAY prefix list: the instance's link), never the VPC's prefix
+  local leaked allowed
+  leaked=$(podman exec "$spine" vtysh -c 'show ip route 10.200.0.0/16 longer-prefixes' 2>/dev/null | grep -Eo '10\.200\.[0-9.]+/[0-9]+' | sort -u | paste -sd' ' -)
+  allowed=$(jq -r '.router.policy["prefix-list"].ALLOW_TO_UNDERLAY_PREFIX_LIST.rule[] | select(.action == "permit") | .match | keys[] | select(startswith("10.200."))' "$OUT/dpu-tenant-nvue.json" 2>/dev/null | sort -u | paste -sd' ' -)
+  if [ -n "$leaked" ] && [ "$leaked" = "$allowed" ]; then
+    result tenant-isolated PASS "the fabric's default VRF holds of 10.200.0.0/16 only $leaked, the instance's host route NICo's agent leaks (ALLOW_TO_UNDERLAY, the internal profile), not the VPC's prefix 10.200.1.0/24: VPC $vni is the DPU's VRF, carried as EVPN"
+  else
+    result tenant-isolated FAIL "the spine's default VRF holds ${leaked:-no route} of 10.200.0.0/16; NICo's agent leaks ${allowed:-nothing} (out/dpu-tenant-nvue.json)"
+  fi
+  admin --cloud-unsafe-op=dctwin instance release --instance "$inst" >"$OUT/instance-release.txt" 2>&1
+  for t in $(seq 1 120); do
+    podman exec "$dpu" curl -sk -u "cumulus:$dpw" "https://127.0.0.1:8765/nvue_v1/?rev=applied" >"$OUT/dpu-released-nvue.json"
+    jq -e --arg v "vpc_$vni" '.vrf[$v] == null and ([.interface[] | .ip.address? // {} | keys[]] | index("192.168.252.1/24") != null)' "$OUT/dpu-released-nvue.json" >/dev/null 2>&1 && break
+    sleep 10
+  done
+  if jq -e --arg v "vpc_$vni" '.vrf[$v] == null' "$OUT/dpu-released-nvue.json" >/dev/null 2>&1; then
+    result tenant-released PASS "instance released: the DPU's agent removed VRF vpc_$vni and put the host back on NICo's admin network"
+  else result tenant-released FAIL "after the release the DPU still holds vpc_$vni (out/dpu-released-nvue.json)"; fi
+  # the VPC goes once its instance has: its prefix, then the VPC once NICo has finished deleting
+  # the prefix (FailedPrecondition until then)
+  local gone=""
+  if fcall DeleteVpcPrefix "{\"id\":{\"value\":\"$pfx\"}}" >"$OUT/vpc-prefix-delete.json" 2>&1; then
+    for t in $(seq 1 30); do
+      fcall DeleteVpc "{\"id\":{\"value\":\"$vpc\"}}" >"$OUT/vpc-delete.json" 2>&1 && { gone=1; break; }
+      sleep 10
+    done
+  fi
+  if [ -n "$gone" ]; then
+    result tenant-vpc-deleted PASS "VPC prefix $pfx and VPC $vpc deleted (DeleteVpcPrefix, DeleteVpc)"
+  else result tenant-vpc-deleted FAIL "$(cat "$OUT/vpc-prefix-delete.json" "$OUT/vpc-delete.json" 2>/dev/null | head -c 400)"; fi
+}
+
 step_down() {
   say "stop everything this script started"
   local p
+  # the twin first: on the DPU path it removes its NOS containers through the Podman API this
+  # script serves, which must still be up
+  for p in "$WORK"/twin*.pid; do [ -f "$p" ] && stop_bg "$(basename "$p" .pid)"; done
   for p in "$WORK"/*.pid; do [ -f "$p" ] && stop_bg "$(basename "$p" .pid)"; done
+  # a twin killed before it finished stopping leaves the estate's containers
+  dpu && docker ps -aq --filter label=dc-twin.estate=supermicro-nico-dpu | xargs -r docker rm -f >/dev/null 2>&1
   docker rm -f "$PG" "$VAULT" >/dev/null 2>&1 || true
   if { [ -f "$WORK/ready-mode" ] || [ -f "$WORK/trays-mode" ]; } && [ "$uname_s" = Linux ]; then sudo -n ip netns del "$SVC_NS" 2>/dev/null || true; fi
+  rm -f "$WORK/dpu-mode"
   echo "  stopped processes; removed containers $PG $VAULT${READY:+ and the namespace $SVC_NS}"
 }
 
@@ -1068,12 +1249,19 @@ if [ "${steps[0]}" = trays ] && [ ${#steps[@]} -eq 1 ]; then
   touch "$WORK/trays-mode"
   steps=(fetch boot build up pxe nico load dhcp trays report down)
 fi
+if [ "${steps[0]}" = dpu ] && [ ${#steps[@]} -eq 1 ]; then
+  touch "$WORK/ready-mode" "$WORK/dpu-mode"
+  steps=(fetch build up pxe nico load dhcp border host tenant report down)
+fi
+[ -f "$WORK/dpu-mode" ] && DPU=1
 [ -f "$WORK/ready-mode" ] && READY=1
 [ -f "$WORK/trays-mode" ] && TRAYS=1
 for s in "${steps[@]}"; do
   case $s in
     help) sed -n '2,/^set -uo pipefail/p' "$0" | sed '$d'; exit 0;;
     fetch|build|classify|up|nico|load|dhcp|discover|health|faults|consumer|report|down) "step_$s";;
+    border) step_border &;;
+    tenant) step_tenant;;
     trays) TRAYS=1; touch "$WORK/trays-mode"; step_trays;;
     boot|pxe) trays || { READY=1; touch "$WORK/ready-mode"; }; "step_$s";;
     host) READY=1; touch "$WORK/ready-mode"; "step_$s";;

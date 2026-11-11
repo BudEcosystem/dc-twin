@@ -239,6 +239,14 @@ func (r *renderer) scrub(v any, path string) {
 			if k == "BaseMAC" { // BlueField's OEM base (host PF) MAC, written without separators
 				if s, ok := val.(string); ok && compactMAC.MatchString(s) {
 					x[k] = b.scrubCompactMAC(s)
+					// the model's host PF port, when the profile has one, is that MAC (D71)
+					if p := b.dev.PortBy["pf0hpf"]; p != nil && p.MAC != "" {
+						m := strings.ReplaceAll(p.MAC, ":", "")
+						if strings.ToUpper(s) == s {
+							m = strings.ToUpper(m)
+						}
+						x[k] = m
+					}
 				}
 				continue
 			}

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -281,6 +282,9 @@ func (a *Adapter) driveReport() (lines, isNot []string) {
 	}
 	if !props["ns-mgmt"] {
 		isNot = append(isNot, "This QEMU's NVMe controller advertises namespace management and implements neither create nor delete, and reports no total capacity: a stack that rebuilds namespaces when it sanitises a drive (NICo's scout) fails; scripts/qemu/build.sh builds one that does (S-15).")
+	}
+	if runtime.GOOS != "linux" {
+		isNot = append(isNot, "On this host QEMU writes a guest's zeroes into the drive's backing rather than unmapping it: a guest that formats or sanitises its drives (NICo's scout) allocates each drive's whole capacity on the host's disk.")
 	}
 	a.cappedMu.Lock()
 	isNot = append(isNot, a.capped...)

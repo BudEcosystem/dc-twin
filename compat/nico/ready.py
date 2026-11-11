@@ -179,15 +179,24 @@ def cmd_evidence(host_json, events, pxe_log, dhcp_log, api_log, expected, path, 
             for i in e.get("interfaces") or []:
                 if i.get("primary"):
                     mac = i.get("mac_address", "").lower()
+    # a DPU-managed host's expected machine names no NICs: its boot NIC is its DPU's host PF, the
+    # host's primary interface in NICo's record
+    if not mac:
+        for v in walk(host):
+            if isinstance(v, dict) and v.get("primary_interface") and isinstance(v.get("mac_address"), str):
+                mac = v["mac_address"].lower()
+                break
     # 1. DHCP: the guest's firmware leased through the twin relay from NICo's server (the twin's
-    # switch port observed the ACK: an observe event, field lease, on the port's path)
+    # switch port observed the ACK: an observe event, field lease, on the port's path); behind a
+    # DPU, from NICo's forge-dhcp-server on the DPU (the lease observed on the DPU's host PF)
     leases = []
     for line in read(state_dir + "/events.jsonl").splitlines():
         e = load(line) or {}
         st = e.get("state") or {}
-        if st.get("field") == "lease" and (e.get("source") or {}).get("principal") == "vm-network" and e.get("path", "").startswith(path + ":"):
+        if st.get("field") == "lease" and (e.get("source") or {}).get("principal") == "vm-network" and (e.get("path", "").startswith(path + ":") or e.get("path", "").startswith(path + "/")):
             leases.append(e)
-    nico = [e for e in leases if (e.get("data") or {}).get("server") == "10.90.0.16"]
+    dpu = [e for e in leases if e.get("path", "").startswith(path + "/")]
+    nico = dpu or [e for e in leases if (e.get("data") or {}).get("server") == "10.90.0.16"]
     if nico:
         ip = nico[0]["data"]["ip"]
         # the boot file NICo named (to the firmware's HTTP boot client), from whichever ACK had one
@@ -207,8 +216,12 @@ def cmd_evidence(host_json, events, pxe_log, dhcp_log, api_log, expected, path, 
             if m and "Decoded DHCP packet" not in l:
                 classes[m.group(1) or "none"] = classes.get(m.group(1) or "none", 0) + 1
         asked = ", ".join("%s %d" % kv for kv in sorted(classes.items()))
-        row("ready-dhcp", "PASS", "the guest (%s) leased %s from NICo's dhcp-server (server id 10.90.0.16) through the twin relay%s, boot file %s; its answers by the client's DHCP vendor class: %s; %d lease events"
-            % (mac, ip, " (circuit id %s)" % circuit if circuit else "", boot or "none", asked or "?", len(leases)))
+        if dpu:
+            row("ready-dhcp", "PASS", "the guest (%s) leased %s on its DPU's host PF (%s) from NICo's forge-dhcp-server on the DPU (server id %s, router %s), boot file %s; %d lease events"
+                % (mac, ip, dpu[0]["path"].rsplit("/", 1)[-1], dpu[0]["data"].get("server", "?"), dpu[0]["data"].get("router", "?"), boot or "none", len(leases)))
+        else:
+            row("ready-dhcp", "PASS", "the guest (%s) leased %s from NICo's dhcp-server (server id 10.90.0.16) through the twin relay%s, boot file %s; its answers by the client's DHCP vendor class: %s; %d lease events"
+                % (mac, ip, " (circuit id %s)" % circuit if circuit else "", boot or "none", asked or "?", len(leases)))
     else:
         row("ready-dhcp", "FAIL", "no lease from NICo on the host's boot NIC %s in the twin's events (%d leases observed)" % (mac, len(leases)))
     # 2. HTTP boot: NICo's iPXE, its script and scout, fetched from NICo's PXE service
@@ -218,7 +231,7 @@ def cmd_evidence(host_json, events, pxe_log, dhcp_log, api_log, expected, path, 
     script = fetched(r"/api/v0/pxe/boot")
     scout = fetched(r"internal/(x86_64|aarch64)/scout\.efi")
     ca = fetched(r"/api/v0/tls/root_ca")
-    peers = sorted(set(re.findall(r"10\.40\.\d+\.\d+", "\n".join(ipxe + script + scout + ca))))
+    peers = sorted(set(re.findall(r"(?:10\.40|192\.168\.252)\.\d+\.\d+", "\n".join(ipxe + script + scout + ca))))
     if ipxe and script and scout:
         row("ready-boot", "PASS", "carbide-pxe served ipxe.efi (%d), the iPXE boot script (%d) and scout.efi (%d), and scout fetched the root CA (%d), to %s (the guest's own lease as the peer)"
             % (len(ipxe), len(script), len(scout), len(ca), ", ".join(peers) or "?"))
@@ -253,7 +266,7 @@ def cmd_evidence(host_json, events, pxe_log, dhcp_log, api_log, expected, path, 
     # 4. machine validation, as NICo's configuration has it (disabled: NICo's default)
     if "Skipping Machine Validation" in api:
         row("ready-validation", "KNOWN", "NICo entered machine validation (Validation/MachineValidation) and skipped it: [machine_validation_config] enabled = false, NICo's default")
-    elif re.search(r"(?i)machine.?validation.*(fail|error)", api):
+    elif any(re.search(r"(?i)machine.?validation.*(fail|error)", l) for l in api.splitlines() if "Using configuration" not in l):
         row("ready-validation", "FAIL", "machine validation failed (nico-api's log)")
 
 

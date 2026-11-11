@@ -1,13 +1,16 @@
 package nvue
 
-import "strings"
+import (
+	"sort"
+	"strings"
+)
 
 // ApplyScript is what applying runs in the switch's container, as `sh -c ApplyScript sh <args>`
 // with ApplyArgs: write /etc/network/interfaces and /etc/frr/frr.conf, reload both with the
 // switch's own tools (ifreload -a, which creates, changes and removes interfaces to match;
 // frr-reload.py, which applies the difference to the running FRR, after the VRFs' own stanzas
-// through vtysh), and restart dhcrelay when its
-// command line changed. It prints what each printed and exits non-zero when one failed; ifupdown2
+// through vtysh), restart dhcrelay when its command line changed, and replace the twin's
+// nftables tables with the ACLs' (nft -f, atomically). It prints what each printed and exits non-zero when one failed; ifupdown2
 // carries on past an interface it cannot create, as it does on a switch.
 const ApplyScript = `set -u
 umask 022
@@ -15,18 +18,46 @@ mkdir -p /run/network /etc/network/interfaces.d
 printf '%s' "$1" > /etc/network/interfaces.dctwin && mv /etc/network/interfaces.dctwin /etc/network/interfaces
 printf '%s' "$2" > /etc/frr/frr.conf.dctwin && chown frr:frr /etc/frr/frr.conf.dctwin && mv /etc/frr/frr.conf.dctwin /etc/frr/frr.conf
 rc=0
+# what the running VRF stanzas have that the new ones do not (a static route, an L3 VNI) is
+# removed through vtysh first, while the VRF still exists (ifreload may remove it)
+` + VRFStanzas + ` < /etc/frr/frr.conf > /run/dctwin-vrfs.conf
+vtysh -c 'show running-config' 2>/dev/null | ` + VRFStanzas + ` > /run/dctwin-vrfs.running
+` + VRFRemovals + ` /run/dctwin-vrfs.conf /run/dctwin-vrfs.running > /run/dctwin-vrfs.del
+if [ -s /run/dctwin-vrfs.del ]; then
+  echo "== vtysh -f (what the VRFs' stanzas no longer have)"
+  vtysh -f /run/dctwin-vrfs.del 2>&1 || rc=1
+fi
+# a VLAN whose VNI changed (a VRF given another L3 VNI on the same reserved VLAN): its SVI and
+# VXLAN devices are made again, as zebra keeps an existing SVI's L3 VNI and VRF (FRR 8.4)
+for d in $5; do
+  echo "== ip link del $d (its VNI changed)"
+  ip link del "$d" 2>&1 || true
+done
 echo "== ifreload -a"
 ifreload -a 2>&1 || rc=1
-# each VRF's stanza (its L3 VNI) first, through vtysh: frr-reload's line-by-line diff can send a
-# new "vrf" line into a router bgp context, where bgpd reads it as vrf-policy (D57)
-` + VRFStanzas + ` < /etc/frr/frr.conf > /run/dctwin-vrfs.conf
+# each VRF's stanza (its L3 VNI, its static routes) next, through vtysh: frr-reload's
+# line-by-line diff can send a "vrf" line into a router bgp context, where bgpd reads it as
+# vrf-policy (D57); with the removals above, frr-reload finds the stanzas equal
 if [ -s /run/dctwin-vrfs.conf ]; then
   echo "== vtysh -f (the VRFs' stanzas)"
   vtysh -f /run/dctwin-vrfs.conf 2>&1 || rc=1
 fi
+# a new AS is a new BGP: FRR starts again from the new configuration, as NVUE restarts BGP for
+# it (frr-reload cannot change a router bgp's AS, and deleting the old instance while VNIs exist
+# crashes bgpd 10 in bgp_evpn_local_vni_add)
+new_as=$(awk '/^router bgp [0-9]+$/ { print $3; exit }' /etc/frr/frr.conf)
+old_as=$(vtysh -c 'show running-config' 2>/dev/null | awk '/^router bgp [0-9]+$/ { print $3; exit }')
+if [ -n "$old_as" ] && [ "$old_as" != "$new_as" ]; then
+  echo "== router bgp $old_as is now ${new_as:-none}: FRR restarts"
+  /usr/lib/frr/frrinit.sh restart 2>&1 || rc=1
+fi
 echo "== frr-reload.py --reload"
 out=$(/usr/lib/frr/frr-reload.py --reload --stdout /etc/frr/frr.conf 2>&1) || rc=1
 printf '%s\n' "$out" | ` + ReloadSummary + `
+# frr-reload can finish without FRR running what it was given: the BGP the file has must run
+if [ -n "$new_as" ] && ! vtysh -c 'show running-config' 2>/dev/null | grep -q "^router bgp $new_as\$"; then
+  echo "FRR does not run router bgp $new_as after the reload"; rc=1
+fi
 echo "== dhcrelay"
 # the switch's start script keeps dhcrelay running with the arguments in /run/dctwin-relay (a
 # process started from here would end with this exec); a change is the file and a restart
@@ -47,8 +78,24 @@ if [ -n "$3" ]; then
     sleep 0.5
   done
 fi
+echo "== nft -f (ACLs)"
+printf '%s' "$4" > /run/dctwin-acl.nft
+if command -v nft >/dev/null 2>&1; then
+  nft -f /run/dctwin-acl.nft 2>&1 || rc=1
+elif grep -q 'jump acl_' /run/dctwin-acl.nft; then
+  echo "ACLs are configured and the switch has no nft"; rc=1
+else
+  echo "no ACLs"
+fi
 exit $rc
 `
+
+// VRFRemovals is, from the new VRF stanzas (its first file) and the running ones (its second),
+// the commands that remove each line a running stanza has and the new one does not.
+const VRFRemovals = `awk 'FILENAME == ARGV[1] { if ($0 ~ /^vrf /) v = $0; else if ($0 !~ /^exit-vrf/) want[v SUBSEP $0] = 1; next }
+/^vrf / { v = $0; next }
+/^exit-vrf/ || /^ *!?$/ { next }
+!((v SUBSEP $0) in want) { sub(/^ +/, ""); printf "%s\n no %s\nexit-vrf\n", v, $0 }'`
 
 // VRFStanzas filters a frr.conf (on stdin) to its VRFs' stanzas, vrf ... exit-vrf, whole.
 const VRFStanzas = `awk '/^vrf / { p = 1 } p { print } /^exit-vrf/ { p = 0 }'`
@@ -62,5 +109,37 @@ END { if (m) { print "(errors)"; for (i = 1; i <= m; i++) print e[i]; print "(la
 
 // ApplyArgs are ApplyScript's arguments for rendered files.
 func ApplyArgs(f Files) []string {
-	return []string{f.Interfaces, f.FRR, strings.Join(f.Relay, " ")}
+	return []string{f.Interfaces, f.FRR, strings.Join(f.Relay, " "), f.ACL, strings.Join(f.Recreate, " ")}
+}
+
+// vniVLANs reads a rendered interfaces file's VXLAN devices: VLAN -> VNI.
+func vniVLANs(interfaces string) map[string]string {
+	out := map[string]string{}
+	var vni string
+	for _, l := range strings.Split(interfaces, "\n") {
+		f := strings.Fields(l)
+		switch {
+		case len(f) == 2 && f[0] == "iface" && strings.HasPrefix(f[1], "vni"):
+			vni = strings.TrimPrefix(f[1], "vni")
+		case len(f) == 2 && f[0] == "iface":
+			vni = ""
+		case len(f) == 2 && f[0] == "bridge-access" && vni != "":
+			out[f[1]] = vni
+		}
+	}
+	return out
+}
+
+// recreate is the devices applying to must make again: the SVI and both VXLAN devices of every
+// VLAN whose VNI the new files change.
+func recreate(old, new Files) []string {
+	was, is := vniVLANs(old.Interfaces), vniVLANs(new.Interfaces)
+	var out []string
+	for vlan, v := range is {
+		if o, ok := was[vlan]; ok && o != v {
+			out = append(out, "vlan"+vlan, "vni"+o, "vni"+v)
+		}
+	}
+	sort.Strings(out)
+	return out
 }

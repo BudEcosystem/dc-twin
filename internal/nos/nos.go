@@ -160,9 +160,29 @@ var registry = map[string]Entry{
 			"Its dhcrelay is unpatched: option 82's circuit id is the interface the request arrived on (the segment's VLAN), the same for every port of a segment, where SONiC's patched build sends hostname:port; no remote id and no link selection.",
 			"BGP is numbered eBGP over /31s on each fabric link; no BGP unnumbered, no EVPN and no LLDP daemon.",
 		}},
+	HBN: {Name: HBN, Real: true, Image: HBNImage, Arch: []string{"aarch64", "x86_64"}, Runnable: true, API: "nvue",
+		Obtain: "build it (test/linuxnet/nos-hbn/Containerfile, on generic/nvue-frr's image; scripts/linux-substrate-e2e.sh does)",
+		Sysctls: map[string]string{"net.ipv4.ip_forward": "1", "net.ipv6.conf.all.disable_ipv6": "0", "net.ipv6.conf.default.disable_ipv6": "0", "net.ipv6.conf.all.forwarding": "1",
+			// a route through a port without carrier is not used, as Cumulus and HBN set it: a
+			// pulled uplink's ECMP path goes at once, not when BGP's hold timer ends
+			"net.ipv4.conf.all.ignore_routes_with_linkdown": "1", "net.ipv4.conf.default.ignore_routes_with_linkdown": "1",
+			"net.ipv6.conf.all.ignore_routes_with_linkdown": "1", "net.ipv6.conf.default.ignore_routes_with_linkdown": "1",
+			// no reverse-path filter, as on a fabric switch: ECMP sends a flow up one uplink and
+			// back down another, and the kernel's loose check fails a route whose next hop is
+			// IPv6 (RFC 5549) on another port
+			"net.ipv4.conf.all.rp_filter": "0", "net.ipv4.conf.default.rp_filter": "0"},
+		StartTimeout: 90 * time.Second,
+		Provides:     []string{"switch/bgp-unnumbered", "switch/evpn", "switch/vrf", "switch/nvue", "switch/acl"},
+		IsNot: []string{
+			"emulated/hbn is not NVIDIA's HBN (doca_hbn), which needs a BlueField's ConnectX, its SFs and DOCA flow offload and is NVIDIA-licensed: it is generic/nvue-frr's emulation (D56) with HBN's interface names (p0_if, p1_if, pf0hpf_if, pf1hpf_if, pf0vf0_if … pf0vf15_if, pf0dpu1_if, pf0dpu3_if), run per BlueField in a container of its own (D71). NVUE reports its build as HBN's (HBNBuild); its schema is what NICo's FNN and Ethernet Virtualizer templates write.",
+			"There is no ConnectX and no offload: the kernel forwards (VRFs, VXLAN, the bridge), nl2doca does nothing, ACLs are nftables in the container's namespace, and each cable is a TAP or a veth with a userspace copy where a guest's NIC is spliced on. The representors the host does not use are dummy interfaces.",
+			"The BlueField's Arm, its DPU OS and its boot are not here: the BlueField stays at model fidelity, its BMC fronted (D51), its install impersonated (D58).",
+		}},
 	NVUEFRR: {Name: NVUEFRR, Real: true, Image: NVUEFRRImage, Arch: []string{"aarch64", "x86_64"}, Runnable: true, API: "nvue",
-		Obtain:       "build it (test/linuxnet/nos-nvue/Containerfile; scripts/linux-substrate-e2e.sh does) or set spec.adapters.network.nos.image",
-		Sysctls:      map[string]string{"net.ipv4.ip_forward": "1", "net.ipv6.conf.all.disable_ipv6": "1", "net.ipv6.conf.default.disable_ipv6": "1"},
+		Obtain: "build it (test/linuxnet/nos-nvue/Containerfile; scripts/linux-substrate-e2e.sh does) or set spec.adapters.network.nos.image",
+		Sysctls: map[string]string{"net.ipv4.ip_forward": "1", "net.ipv6.conf.all.disable_ipv6": "1", "net.ipv6.conf.default.disable_ipv6": "1",
+			"net.ipv4.conf.all.ignore_routes_with_linkdown": "1", "net.ipv4.conf.default.ignore_routes_with_linkdown": "1",
+			"net.ipv4.conf.all.rp_filter": "0", "net.ipv4.conf.default.rp_filter": "0"},
 		StartTimeout: 90 * time.Second,
 		Relay:        Relay{Implementation: "ISC dhcrelay 4.4.3-P1 (Debian bookworm, unpatched; Cumulus Linux patches its own)", Circuit: "interface"},
 		Provides:     []string{"dhcp/relay-giaddr", "switch/bgp-numbered", "switch/evpn", "switch/vrf", "switch/nvue"},
@@ -173,6 +193,13 @@ var registry = map[string]Entry{
 			"Its dhcrelay is unpatched: option 82's circuit id is the interface the request arrived on (the SVI), the same for every port of a segment; no remote id and no link selection.",
 		}},
 }
+
+// HBN is a BlueField's HBN, emulated as generic/nvue-frr is (D71): NVUE over FRR, ifupdown2
+// and the kernel, in a container of the BlueField's own, with HBN's interface names.
+const HBN = "emulated/hbn"
+
+// HBNImage is its container image (test/linuxnet/nos-hbn/Containerfile).
+const HBNImage = "dctwin-nos-hbn:bookworm"
 
 // FRRDHCRelay is the generic NOS the twin can run on any architecture.
 const FRRDHCRelay = "generic/frr-dhcrelay"
@@ -271,6 +298,26 @@ type Switch struct {
 	Vlans   []Vlan
 	Routed  []Routed
 	Service []Service
+	// Unnumbered are fabric ports whose eBGP session is unnumbered (RFC 5549, remote-as external),
+	// carrying IPv4 and EVPN: a leaf's ports facing BlueFields whose HBN is emulated (D71).
+	Unnumbered []Unnumbered
+	// EVPN: every fabric session carries the L2VPN EVPN address family (a fabric with emulated
+	// BlueFields on it, D71).
+	EVPN bool
+	// Native: the panel's names are the NOS's own interface names, every one present whether
+	// cabled or not, as a BlueField's HBN has p0_if, p1_if, pf0hpf_if and its representors (D71).
+	Native bool
+	// Build is what the NOS's NVUE reports as its build (GET /system); "" for a switch.
+	Build string
+	// Cabled are ports the twin moves in that the twin itself configures nothing on: an
+	// emulated BlueField's uplinks and host PF, which NICo's agent configures (D71).
+	Cabled []string
+}
+
+// Unnumbered is a fabric port with an unnumbered eBGP session to whatever is cabled to it.
+type Unnumbered struct {
+	Port     string
+	PeerName string // "<peer>:<peer port>", for the session's description
 }
 
 // TLSFiles is a server's certificate, its key and the CA its clients' certificates must chain to,
@@ -283,6 +330,17 @@ type TLSFiles struct {
 type PanelPort struct {
 	Name  string
 	Speed string
+	// Ifname is the port's interface in a Native NOS ("p0_if" for a BlueField's p0); "" is its
+	// model name.
+	Ifname string
+}
+
+// If is a panel port's interface name in a Native NOS.
+func (p PanelPort) If() string {
+	if p.Ifname != "" {
+		return p.Ifname
+	}
+	return p.Name
 }
 
 // Vlan is an access segment: the bridge a rack segment's ports are members of, with the
@@ -309,6 +367,15 @@ type Routed struct {
 type Service struct {
 	Port    string
 	Gateway netip.Prefix
+	// Serves are prefixes the host answers for, routed to it (static routes the switch's BGP
+	// redistributes).
+	Serves []Static
+}
+
+// Static is a static route.
+type Static struct {
+	Prefix netip.Prefix
+	Via    netip.Addr
 }
 
 // Ports is every interface the twin moves into the switch, sorted.
@@ -325,6 +392,12 @@ func (s Switch) Ports() []string {
 	for _, sv := range s.Service {
 		seen[sv.Port] = true
 	}
+	for _, u := range s.Unnumbered {
+		seen[u.Port] = true
+	}
+	for _, c := range s.Cabled {
+		seen[c] = true
+	}
 	out := make([]string, 0, len(seen))
 	for p := range seen {
 		out = append(out, p)
@@ -338,6 +411,14 @@ func (s Switch) Ports() []string {
 // eth1, eth2, … in panel order (eth0 is its management port). Empty when the NOS has no such
 // port.
 func (e Entry) Interface(sw Switch, port string) string {
+	if sw.Native {
+		for _, p := range sw.Panel {
+			if p.Name == port {
+				return p.If()
+			}
+		}
+		return ""
+	}
 	prefix := ""
 	switch e.Name {
 	case SonicVS:
@@ -379,6 +460,8 @@ func (e Entry) StartScript(sw Switch) (string, error) {
 		return sonicStartScript(sw)
 	case NVUEFRR:
 		return e.nvueStartScript(sw), nil
+	case HBN:
+		return e.hbnStartScript(sw), nil
 	}
 	return "", fmt.Errorf("nos %s: the twin renders no configuration for it", e.Name)
 }
@@ -481,6 +564,51 @@ func (e Entry) nvueStartScript(sw Switch) string {
 	w(") &")
 	w("log started")
 	w("exec sleep infinity")
+	return b.String()
+}
+
+// hbnStartScript brings an emulated BlueField HBN up unconfigured, as HBN starts before NICo's
+// agent configures it: the cabled ports present (p0_if, p1_if, pf0hpf_if), the representors it
+// does not use as dummy interfaces, FRR running with no routing, and supervisord running HBN's
+// other programs (rsyslog, nl2doca, which has nothing to offload to) and whatever is put in
+// /etc/supervisor/conf.d later (NICo's agent and DHCP server, D71).
+func (e Entry) hbnStartScript(sw Switch) string {
+	var b strings.Builder
+	w := func(format string, a ...any) { fmt.Fprintf(&b, format+"\n", a...) }
+	cabled := map[string]bool{}
+	var want []string
+	for _, p := range sw.Ports() {
+		n := e.Interface(sw, p)
+		want = append(want, n)
+		cabled[n] = true
+	}
+	sort.Strings(want)
+	w("#!/bin/sh")
+	w("# dc-twin: %s for %s (%s); configured through NVUE by NICo's agent", e.Name, sw.Hostname, sw.Path)
+	w("log() { echo \"dctwin-nos $(date +%%H:%%M:%%S): $*\"; }")
+	w("want=%q", strings.Join(want, " "))
+	w("n=0")
+	w("for p in $want; do")
+	w("  while [ ! -e /sys/class/net/$p ]; do n=$((n+1)); [ $n -gt 3000 ] && { log \"port $p never arrived\"; exit 1; }; sleep 0.1; done")
+	w("done")
+	w("log \"ports present: $want\"")
+	for _, p := range sw.Panel {
+		if !cabled[p.If()] {
+			w("ip link add %s type dummy 2>/dev/null; ip link set %s up", p.If(), p.If())
+		}
+	}
+	w("ip link set lo up")
+	w("mkdir -p /run/network /etc/network/interfaces.d /var/log/frr /var/run/frr /var/log/supervisor /etc/supervisor/conf.d && chown frr:frr /var/log/frr /var/run/frr")
+	w("printf 'auto lo\\niface lo inet loopback\\n' > /etc/network/interfaces")
+	w("sed -i 's/^bgpd=no/bgpd=yes/' /etc/frr/daemons")
+	w("echo 'service integrated-vtysh-config' > /etc/frr/vtysh.conf")
+	w("printf 'frr defaults datacenter\\nhostname %s\\nlog syslog informational\\nservice integrated-vtysh-config\\n!\\n' > /etc/frr/frr.conf", sw.Hostname)
+	w("chown frr:frr /etc/frr/frr.conf /etc/frr/vtysh.conf")
+	w("/usr/lib/frr/frrinit.sh start")
+	w("if command -v supervisord >/dev/null 2>&1; then supervisord -c /etc/supervisor/supervisord.conf; fi")
+	w("log started")
+	w("# PID 1 reaps the daemons it inherits, so watchfrr can restart one that dies")
+	w("while :; do sleep 60 & wait $!; done")
 	return b.String()
 }
 

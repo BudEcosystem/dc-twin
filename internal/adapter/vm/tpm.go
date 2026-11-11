@@ -80,6 +80,28 @@ func (m *machine) manufactureTPM(state string) (string, error) {
 	return "EK certificates (RSA 2048, ECC) and a platform certificate signed by the estate CA", nil
 }
 
+// ownTPMFiles gives a twin run as root back the files swtpm opens in the state directory: its
+// state, lock and log. Ubuntu confines swtpm by AppArmor, whose profile lets it open files under
+// a home directory only when it owns them (owner @{HOME}/** rwk), so once a harness hands a
+// root twin's state back to its user (compat/nico/run.sh's chown -R) every later power-on failed
+// with "swtpm exited" and an empty log, and pending BIOS settings never applied (NICo's
+// Supermicro host stuck in PollingBiosSetup). As any other user it does nothing.
+func ownTPMFiles(state, logf string) {
+	uid, gid := os.Geteuid(), os.Getegid()
+	if uid != 0 {
+		return
+	}
+	paths := []string{state, logf}
+	if ents, err := os.ReadDir(state); err == nil {
+		for _, e := range ents {
+			paths = append(paths, filepath.Join(state, e.Name()))
+		}
+	}
+	for _, p := range paths {
+		_ = os.Lchown(p, uid, gid) // a missing log is created by swtpm, as root
+	}
+}
+
 func lastLines(s string, n int) string {
 	l := strings.Split(strings.TrimSpace(s), "\n")
 	if len(l) > n {

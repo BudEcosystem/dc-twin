@@ -1,0 +1,23 @@
+# emulated/hbn (internal/nos, D71): a BlueField's HBN as the twin emulates it, on generic/nvue-frr's
+# image (FRR, ifupdown2, nftables; NVUE is the twin's). HBN's container also runs supervisord with
+# rsyslog and nl2doca; here nl2doca is a program that does nothing, as there is no ConnectX to
+# offload to. NICo's DPU agent and DHCP server (built from NICo's source, D71) are put in /opt/forge
+# and given to supervisord at run time; ca-certificates and dnsutils are what they need around them.
+#
+# FRR is FRR's own 10 release (deb.frrouting.org), not bookworm's 8.4.4: on 8.4.4 a DPU that loses
+# one of two equal EVPN paths to a remote VTEP (an uplink pulled) has zebra drop that VTEP's router
+# MAC while bgpd keeps the other path best, and its VPC routes into a black hole (D71).
+FROM dctwin-nos-nvue-frr:bookworm
+RUN apt-get update \
+ && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends curl gnupg ca-certificates \
+ && curl -fsSL https://deb.frrouting.org/frr/keys.gpg -o /usr/share/keyrings/frrouting.gpg \
+ && echo 'deb [signed-by=/usr/share/keyrings/frrouting.gpg] https://deb.frrouting.org/frr bookworm frr-10' > /etc/apt/sources.list.d/frr.list \
+ && apt-get update \
+ && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends -o Dpkg::Options::=--force-confold \
+      frr frr-pythontools supervisor rsyslog dnsutils iputils-ping jq \
+ && rm -rf /var/lib/apt/lists/* \
+ && mkdir -p /opt/forge /data /var/support/forge-dhcp/conf /etc/supervisor/conf.d \
+ && printf '#!/bin/sh\n# nl2doca: HBN programs the ConnectX from the kernel here; the twin has no ConnectX (D71)\nexec sleep infinity\n' > /usr/sbin/nl2doca \
+ && chmod +x /usr/sbin/nl2doca \
+ && printf '[program:rsyslog]\ncommand=/usr/sbin/rsyslogd -n\nautorestart=true\n\n[program:nl2doca]\ncommand=/usr/sbin/nl2doca\nautorestart=true\n' > /etc/supervisor/conf.d/hbn.conf \
+ && sed -i 's/^module(load="imklog"/#&/' /etc/rsyslog.conf

@@ -18,6 +18,8 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/status"
+
+	"github.com/BudEcosystem/dc-twin/internal/adapter/netsim"
 )
 
 // What runs on the DPU once it has booted, impersonated (D58). NICo's DPU image (carbide.efi,
@@ -110,7 +112,77 @@ func (b *dpu) runImage(ctx context.Context, out bootOutcome) error {
 		return err
 	}
 	b.note(fmt.Sprintf("discovered as NICo machine %s (interface %s)", in.MachineID, in.InterfaceID))
+	if hh := b.hbnAgents(); hh != nil {
+		return b.handOff(ctx, in, hh)
+	}
 	return b.runAgent(ctx, in)
+}
+
+// hbnAgents is the substrate that runs NICo's own agent in this DPU's emulated HBN, nil when the
+// DPU's HBN is not emulated (D71).
+func (b *dpu) hbnAgents() netsim.HBNAgents {
+	if !b.dev.HBN {
+		return nil
+	}
+	if b.a.hbn != nil {
+		return b.a.hbn
+	}
+	if b.a.rt.Net == nil {
+		return nil
+	}
+	hh, _ := b.a.rt.Net.L2.(netsim.HBNAgents)
+	return hh
+}
+
+// handOff is the installed DPU OS starting NICo's own forge-dpu-agent in the DPU's emulated HBN
+// (D71, the design's 4.6): the stand-in has booted the DPU and run NICo's image; the agent, real,
+// takes it from here, over the DPU's own out-of-band path, until the DPU powers off or resets.
+// The stand-in's own agent loop (its network status) does not run, nor does its answering of the
+// host's DHCP: NICo's agent and DHCP server in the HBN do those; forge-scout's control loop is
+// still the stand-in's.
+func (b *dpu) handOff(ctx context.Context, in *installed, hh netsim.HBNAgents) error {
+	pxeHost := ""
+	if u, err := url.Parse(in.PXEURL); err == nil {
+		pxeHost = u.Hostname()
+	}
+	info := b.discoveryInfo()
+	// DPF's init container saves DiscoveryInfo as the agent's own types serialise it: the
+	// architecture a number (AARCH64 is 0), every list present
+	hw := obj{"machine_type": info["machine_type"], "machine_arch": 0, "dmi_data": info["dmi_data"], "dpu_info": info["dpu_info"]}
+	for _, k := range []string{"network_interfaces", "infiniband_interfaces", "cpu_info", "block_devices", "nvme_devices", "gpus", "memory_devices"} {
+		hw[k] = []any{}
+	}
+	raw, _ := json.Marshal(hw)
+	ca := in.RootCA
+	if err := hh.StartHBNAgent(b.path, netsim.HBNAgent{APIURL: in.APIURL, PXEHost: pxeHost, RootCA: ca, Discovery: raw,
+		Dial: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			return b.nic.dial(ctx, network, addr)
+		}}); err != nil {
+		return err
+	}
+	defer hh.StopHBNAgent(b.path)
+	b.step(stepOS)
+	b.agentUp.Store(true)
+	defer b.agentUp.Store(false)
+	b.note("the installed DPU OS started NICo's own forge-dpu-agent in the emulated HBN (D71)")
+	// forge-scout on the DPU OS answers NICo's control loop (DiscoveryCompleted, which
+	// DPUInit/Init waits for): that is still the stand-in's, the agent's network work is NICo's own
+	conn, err := b.connect(in)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	control := time.NewTicker(b.a.controlEvery)
+	defer control.Stop()
+	b.agentControl(ctx, conn, in)
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-control.C:
+			b.agentControl(ctx, conn, in)
+		}
+	}
 }
 
 // runAgent is the installed DPU OS's forge-dpu-agent, until the DPU powers off or resets.

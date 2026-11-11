@@ -710,3 +710,150 @@ func TestGBTrayGPUFirmwareFollowsItsGPUs(t *testing.T) {
 		}
 	}
 }
+
+// supermicroSetupAttrs is libredfish's Supermicro machine_setup_attrs (a51ffb1): each wanted
+// attribute by its name without the _XXXX suffix, matched to every key of that name.
+func supermicroSetupAttrs(cur map[string]any) map[string]any {
+	byName := map[string][]string{}
+	for k := range cur {
+		name := k
+		if i := strings.LastIndex(k, "_"); i >= 0 {
+			name = strings.TrimRight(k[:i], "_")
+		}
+		byName[name] = append(byName[name], k)
+	}
+	want := map[string]any{}
+	add := func(name string, v any) {
+		for _, k := range byName[name] {
+			want[k] = v
+		}
+	}
+	add("QuietBoot", false)
+	add("Re-tryBoot", "EFI Boot")
+	add("CSMSupport", "Disabled")
+	add("SecureBootEnable", false)
+	add("TXTSupport", "Enabled")
+	add("DeviceSelect", "TPM 2.0")
+	add("IntelVTforDirectedI/O(VT-d)", "Enable")
+	virt := "Enable"
+	for _, k := range byName["IntelVirtualizationTechnology"] {
+		if v := cur[k]; v == "Enabled" || v == "Disabled" {
+			virt = "Enabled"
+		}
+	}
+	add("IntelVirtualizationTechnology", virt)
+	add("SR-IOVSupport", "Enabled")
+	add("SR_IOVSupport", "Enabled")
+	add("IPv4HTTPSupport", "Enabled")
+	add("IPv4PXESupport", "Disabled")
+	add("IPv6HTTPSupport", "Disabled")
+	add("IPv6PXESupport", "Disabled")
+	for k, v := range cur {
+		if strings.HasPrefix(strings.SplitN(k, "_", 2)[0], "SecurityDeviceSupport") {
+			if v == "Enabled" || v == "Disabled" {
+				add("SecurityDeviceSupport", "Enabled")
+			} else {
+				add("SecurityDeviceSupport", "Enable")
+			}
+			break
+		}
+	}
+	return want
+}
+
+// NICo's Supermicro machine_setup PATCHes the attributes it wants to the BIOS's settings object
+// (/Bios/SD) and powers the host on; is_bios_setup (libredfish's diff_bios_bmc_attr) then wants
+// the serial console fully enabled and every attribute applied in /Bios. Staged on an Off host,
+// the PATCH applies at the power-on, as on a warm reset.
+func TestSupermicroMachineSetupAppliesOnPowerOn(t *testing.T) {
+	tw, a := up(t)
+	d := dev(tw, "site-1/hall-a/b02/server-01")
+	diffs := func() []string {
+		var out []string
+		var sys struct {
+			SerialConsole *struct {
+				MaxConcurrentSessions *int
+				SSH                   struct{ ServiceEnabled bool }
+			}
+		}
+		getJSON(t, a, d, "/redfish/v1/Systems/1", &sys)
+		var coll struct {
+			Members []struct {
+				ID string `json:"@odata.id"`
+			}
+		}
+		getJSON(t, a, d, "/redfish/v1/Managers/1/SerialInterfaces", &coll)
+		if len(coll.Members) == 0 {
+			return []string{"no SerialInterfaces"}
+		}
+		var si map[string]any
+		getJSON(t, a, d, coll.Members[len(coll.Members)-1].ID, &si)
+		def := si["InterfaceEnabled"] == true
+		for k, v := range map[string]string{"SignalType": "Rs232", "BitRate": "115200", "Parity": "None", "DataBits": "8",
+			"StopBits": "1", "FlowControl": "None", "ConnectorType": "RJ45", "PinOut": "Cyclades"} {
+			def = def && si[k] == v
+		}
+		if sc := sys.SerialConsole; sc == nil || !sc.SSH.ServiceEnabled || (sc.MaxConcurrentSessions != nil && *sc.MaxConcurrentSessions == 0) || !def {
+			out = append(out, "serial_console")
+		}
+		var bios struct{ Attributes map[string]any }
+		getJSON(t, a, d, "/redfish/v1/Systems/1/Bios", &bios)
+		for k, v := range supermicroSetupAttrs(bios.Attributes) {
+			exp, _ := json.Marshal(v)
+			act, _ := json.Marshal(bios.Attributes[k])
+			if _, ok := bios.Attributes[k]; !ok || string(exp) != string(act) {
+				out = append(out, fmt.Sprintf("%s: %s, want %s", k, act, exp))
+			}
+		}
+		return out
+	}
+	var bios struct {
+		Settings struct {
+			SettingsObject struct {
+				ID string `json:"@odata.id"`
+			}
+		} `json:"@Redfish.Settings"`
+		Attributes map[string]any
+	}
+	getJSON(t, a, d, "/redfish/v1/Systems/1/Bios", &bios)
+	if bios.Settings.SettingsObject.ID != "/redfish/v1/Systems/1/Bios/SD" {
+		t.Fatalf("Bios settings object %q, want /redfish/v1/Systems/1/Bios/SD", bios.Settings.SettingsObject.ID)
+	}
+	changed := map[string]any{}
+	for k, v := range supermicroSetupAttrs(bios.Attributes) {
+		exp, _ := json.Marshal(v)
+		if act, _ := json.Marshal(bios.Attributes[k]); string(exp) != string(act) {
+			changed[k] = v
+		}
+	}
+	if len(changed) == 0 || len(diffs()) == 0 {
+		t.Fatalf("the capture already has machine_setup's attributes: nothing to test")
+	}
+	if st, _, _ := send(t, a, d, "POST", "/redfish/v1/Systems/1/Actions/ComputerSystem.Reset", `{"ResetType":"ForceOff"}`); st >= 300 {
+		t.Fatalf("ForceOff: %d", st)
+	}
+	body, _ := json.Marshal(map[string]any{"Attributes": changed})
+	if st, _, _ := send(t, a, d, "PATCH", bios.Settings.SettingsObject.ID, string(body)); st >= 300 {
+		t.Fatalf("PATCH %s: %d", bios.Settings.SettingsObject.ID, st)
+	}
+	var sd struct{ Attributes map[string]any }
+	getJSON(t, a, d, "/redfish/v1/Systems/1/Bios/SD", &sd)
+	if len(sd.Attributes) != len(changed) || len(diffs()) == 0 {
+		t.Fatalf("staged %d of %d attributes, or applied before the power-on (%v)", len(sd.Attributes), len(changed), sd.Attributes)
+	}
+	if st, _, _ := send(t, a, d, "POST", "/redfish/v1/Systems/1/Actions/ComputerSystem.Reset", `{"ResetType":"On"}`); st >= 300 {
+		t.Fatalf("On: %d", st)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for tw.Engine.DeviceView(d)["power"] != model.On && time.Now().Before(deadline) {
+		time.Sleep(50 * time.Millisecond)
+	}
+	if got := diffs(); len(got) != 0 {
+		t.Fatalf("is_bios_setup false after the power-on: %v", got)
+	}
+	sd.Attributes = nil
+	getJSON(t, a, d, "/redfish/v1/Systems/1/Bios/SD", &sd)
+	if len(sd.Attributes) != 0 {
+		t.Fatalf("Bios/SD still pending after the power-on: %v", sd.Attributes)
+	}
+}

@@ -167,6 +167,14 @@ func TestBootOptionsAreTheFirmwares(t *testing.T) {
 				}
 			}
 		}
+		// the firmware is still adding options (it enumerates the host's NICs as it boots) until
+		// the order and the options agree: until then, read both again
+		if http4 != "" {
+			doc, _ := rf.Get(h.path, h.system)
+			if order, _ := doc["Boot"].(map[string]any)["BootOrder"].([]any); len(order) != len(ids) {
+				http4 = ""
+			}
+		}
 	}
 	if http4 == "" {
 		t.Fatalf("the BMC serves no boot option %q (options %v)", want, ids)

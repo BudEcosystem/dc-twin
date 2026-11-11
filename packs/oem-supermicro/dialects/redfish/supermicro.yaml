@@ -20,5 +20,9 @@ spec:
     - /redfish/v1/Chassis/1/PCIeDevices/NIC10
     - /redfish/v1/UpdateService/FirmwareInventory/NIC10
     - /redfish/v1/Systems/1/EthernetInterfaces/11
+  # the BMC names a network boot option by its adapter (the capture's own: "UEFI HTTP IPv4 Mellanox
+  # Network Adapter - A0:88:C2:EA:84:D0(MAC:A088C2EA84D0)"), so a vm host's firmware options for its
+  # DPU's host PF are named so
+  dpuBootName: "UEFI {proto} {ip} Mellanox Network Adapter - {mac}(MAC:{compact})"
   isNot: ["Serves NICo's captured SYS-821GE-TNHR tree bound to the model; OEM job queues answer as captured."]
   sources: [{ what: "captured SYS-821GE-TNHR", url: "https://github.com/dsx-ai-factory/libredfish/tree/a51ffb1ffeae15d8f9471224cb799d54007098a2/tests/mockups/supermicro", date: 2026-10-18 }]
