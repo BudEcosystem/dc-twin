@@ -8,12 +8,14 @@ import (
 	"strings"
 )
 
-// ACLTables are the nftables tables the twin's NVUE renders ACLs to; applying replaces them whole
-// and touches no other table.
-const (
-	aclBridgeTable = "dctwin_acl"
-	aclInetTable   = "dctwin_acl"
-)
+// aclTable is the nftables table, in the bridge and inet families, the twin's NVUE renders ACLs
+// to; applying replaces it whole and touches no other table.
+const aclTable = "dctwin_acl"
+
+// routedMark is the mark bit the inet family's forward hook sets on every packet it routes, so an
+// outbound ACL on a bridge port, in the bridge's output hook, filters what the switch routed out
+// of the port and not what the switch itself sends.
+const routedMark = 0x80000000
 
 // renderACL renders the configuration's ACLs, and the interfaces they are bound to, to an
 // nftables ruleset (`nft -f`). An ACL on an interface filters what the switch forwards, as a
@@ -28,10 +30,10 @@ func renderACL(t Tree, ports, bridged map[string]bool) (string, error) {
 	var b strings.Builder
 	w := func(format string, a ...any) { fmt.Fprintf(&b, format+"\n", a...) }
 	// create-then-delete removes the tables whether or not they exist
-	w("table bridge %s", aclBridgeTable)
-	w("delete table bridge %s", aclBridgeTable)
-	w("table inet %s", aclInetTable)
-	w("delete table inet %s", aclInetTable)
+	w("table bridge %s", aclTable)
+	w("delete table bridge %s", aclTable)
+	w("table inet %s", aclTable)
+	w("delete table inet %s", aclTable)
 
 	type bind struct{ iface, acl, dir string }
 	var binds []bind
@@ -80,11 +82,7 @@ func renderACL(t Tree, ports, bridged map[string]bool) (string, error) {
 	}
 	chainName := func(a string) string { return "acl_" + sanitize(a) }
 	for _, family := range []string{"bridge", "inet"} {
-		table := aclBridgeTable
-		if family == "inet" {
-			table = aclInetTable
-		}
-		w("table %s %s {", family, table)
+		w("table %s %s {", family, aclTable)
 		for _, a := range chainOrder {
 			w("  chain %s {", chainName(a))
 			for _, r := range chains[a] {
@@ -123,17 +121,18 @@ func renderACL(t Tree, ports, bridged map[string]bool) (string, error) {
 			w("    type filter hook output priority 0; policy accept;")
 			for _, bd := range binds {
 				if bridged[bd.iface] && bd.dir == "outbound" {
-					w("    oifname %q jump %s", bd.iface, chainName(bd.acl))
+					w("    meta mark & 0x%x == 0x%x oifname %q jump %s", routedMark, routedMark, bd.iface, chainName(bd.acl))
 				}
 			}
 			w("  }")
 		} else {
 			w("  chain forward {")
 			w("    type filter hook forward priority 0; policy accept;")
+			w("    meta mark set meta mark | 0x%x", routedMark)
 			for _, bd := range binds {
 				switch {
 				case bd.dir == "inbound" && bridged[bd.iface]:
-					w("    meta mark 0x%x jump %s", marks[bd.iface], chainName(bd.acl))
+					w("    meta mark & 0x%x == 0x%x jump %s", ^uint32(routedMark), marks[bd.iface], chainName(bd.acl))
 				case bd.dir == "inbound":
 					w("    iifname %q jump %s", bd.iface, chainName(bd.acl))
 				case !bridged[bd.iface]:
@@ -255,14 +254,15 @@ func aclRules(name string, acl map[string]any) ([]string, error) {
 			if proto != "tcp" && proto != "udp" {
 				return fmt.Errorf("%s: %s needs protocol tcp or udp", at, field)
 			}
+			nums := make([]string, 0, len(ps))
 			for _, p := range ps {
-				if n, err := strconv.Atoi(p); err != nil || n < 0 || n > 65535 {
-					if _, _, ok := strings.Cut(p, "-"); !ok {
-						return fmt.Errorf("%s: %s %s", at, field, p)
-					}
+				n, err := portNumber(p)
+				if err != nil {
+					return fmt.Errorf("%s: %s %s: %v", at, field, p, err)
 				}
+				nums = append(nums, n)
 			}
-			parts = append(parts, fmt.Sprintf("%s %s { %s }", proto, nft, strings.Join(ps, ", ")))
+			parts = append(parts, fmt.Sprintf("%s %s { %s }", proto, nft, strings.Join(nums, ", ")))
 			return nil
 		}
 		if err := ports("source-port", "sport"); err != nil {
@@ -297,6 +297,44 @@ func aclRules(name string, acl map[string]any) ([]string, error) {
 		out = append(out, strings.Join(parts, " ")+" counter "+verdict)
 	}
 	return out, nil
+}
+
+// portNumber is an ACL's port as nftables takes it: a number, a range lo-hi, or a service name
+// NVUE knows, by number (the switch need not have /etc/services).
+func portNumber(p string) (string, error) {
+	num := func(s string) (int, error) {
+		if n, ok := portNames[strings.ToLower(s)]; ok {
+			return n, nil
+		}
+		n, err := strconv.Atoi(s)
+		if err != nil || n < 0 || n > 65535 {
+			return 0, fmt.Errorf("not a port number, a range or a service name")
+		}
+		return n, nil
+	}
+	if lo, hi, ok := strings.Cut(p, "-"); ok {
+		l, err := num(lo)
+		if err != nil {
+			return "", err
+		}
+		h, err := num(hi)
+		if err != nil {
+			return "", err
+		}
+		if l > h {
+			return "", fmt.Errorf("a range from high to low")
+		}
+		return fmt.Sprintf("%d-%d", l, h), nil
+	}
+	n, err := num(p)
+	return strconv.Itoa(n), err
+}
+
+// the service names NVUE takes for a port, by number
+var portNames = map[string]int{
+	"ftp": 21, "ssh": 22, "telnet": 23, "smtp": 25, "domain": 53, "dns": 53, "bootps": 67, "bootpc": 68,
+	"tftp": 69, "http": 80, "ntp": 123, "snmp": 161, "snmp-trap": 162, "bgp": 179, "ldap": 389,
+	"https": 443, "syslog": 514, "dhcp6-client": 546, "dhcp6-server": 547, "msdp": 639,
 }
 
 // NVUE's ICMP and ICMPv6 type names, by number (a number is its own name)

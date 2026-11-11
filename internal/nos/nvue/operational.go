@@ -91,36 +91,34 @@ func (s *Server) bgp(ctx context.Context, vrf string) (map[string]any, error) {
 		neighbors = map[string]any{}
 	}
 	established := 0
+	// FRR not answering (restarting for a new AS) is no session established: the configuration
+	// is still served, its neighbours idle
+	var peers map[string]map[string]any
 	if s.run != nil && on(m, "enable") {
-		out, err := s.run(ctx, "vtysh", "-c", "show bgp vrf "+vrf+" neighbors json")
-		if err != nil {
-			return nil, fmt.Errorf("vrf %s: FRR's BGP neighbours: %w", vrf, err)
+		if out, err := s.run(ctx, "vtysh", "-c", "show bgp vrf "+vrf+" neighbors json"); err == nil {
+			_ = json.Unmarshal([]byte(out), &peers)
 		}
-		var peers map[string]map[string]any
-		if err := json.Unmarshal([]byte(out), &peers); err != nil {
-			return nil, fmt.Errorf("vrf %s: FRR's BGP neighbours: %v", vrf, err)
+	}
+	for name, p := range peers {
+		n, _ := neighbors[name].(map[string]any)
+		if n == nil {
+			// a neighbour FRR has that the configuration does not name (a peer group's
+			// dynamic member): NVUE shows it too
+			n = map[string]any{}
+			neighbors[name] = n
 		}
-		for name, p := range peers {
-			n, _ := neighbors[name].(map[string]any)
-			if n == nil {
-				// a neighbour FRR has that the configuration does not name (a peer group's
-				// dynamic member): NVUE shows it too
-				n = map[string]any{}
-				neighbors[name] = n
+		state := strings.ToLower(fmt.Sprint(p["bgpState"]))
+		n["state"] = state
+		if state == "established" {
+			established++
+		}
+		for nv, frr := range map[string]string{"remote-router-id": "remoteRouterId", "remote-hostname": "hostname", "local-ip": "hostLocal", "remote-ip": "hostForeign"} {
+			if x, ok := p[frr]; ok {
+				n[nv] = x
 			}
-			state := strings.ToLower(fmt.Sprint(p["bgpState"]))
-			n["state"] = state
-			if state == "established" {
-				established++
-			}
-			for nv, frr := range map[string]string{"remote-router-id": "remoteRouterId", "remote-hostname": "hostname", "local-ip": "hostLocal", "remote-ip": "hostForeign"} {
-				if x, ok := p[frr]; ok {
-					n[nv] = x
-				}
-			}
-			if up, ok := p["bgpTimerUpMsec"].(float64); ok {
-				n["uptime-msec"] = up
-			}
+		}
+		if up, ok := p["bgpTimerUpMsec"].(float64); ok {
+			n["uptime-msec"] = up
 		}
 	}
 	for _, n := range neighbors {

@@ -155,7 +155,7 @@ func TestTenantRenders(t *testing.T) {
 	}
 	bad = Clone(tree)
 	Patch(bad, []string{"interface", "vlan2001", "ip", "vrf"}, "tenant-b")
-	if f, err := Render(bad, sw); err != nil || !strings.Contains(f.Interfaces, "iface tenant-b\n    vrf-table auto") {
+	if _, err := Render(bad, sw); err == nil || !strings.Contains(err.Error(), "vrf tenant-b does not exist") {
 		t.Errorf("an SVI in a missing VRF: %v", err)
 	}
 	bad = Clone(tree)

@@ -257,6 +257,13 @@ func renderPolicy(w func(string, ...any), pol map[string]any) error {
 					w(" match ip address prefix-list %s", pl)
 				}
 			}
+			if n := str(m, "ip-prefix-len"); n != "" {
+				if str(m, "type") == "ipv6" {
+					w(" match ipv6 address prefix-len %s", n)
+				} else {
+					w(" match ip address prefix-len %s", n)
+				}
+			}
 			if c := str(m, "community-list"); c != "" {
 				w(" match community %s", c)
 			}
@@ -321,7 +328,10 @@ func renderBGP(w func(string, ...any), bgp map[string]any, vrf, asn, rid string,
 		w(" bgp router-id %s", rid)
 	}
 	w(" no bgp ebgp-requires-policy")
-	w(" bgp bestpath as-path multipath-relax")
+	// NVUE's multipath aspath-ignore, on unless turned off
+	if str(bgp, "path-selection", "multipath", "aspath-ignore") != "off" {
+		w(" bgp bestpath as-path multipath-relax")
+	}
 	if str(bgp, "path-selection", "multipath", "bandwidth") == "ignore" {
 		w(" bgp bestpath bandwidth ignore")
 	}
@@ -512,7 +522,13 @@ func familyLines(fam string, af, bgp, groups, neighbors map[string]any, vrf stri
 		switch {
 		case vrf == "default" && evpn:
 			add("advertise-all-vni")
+			if rd := str(bgp, "rd"); rd != "" {
+				add("rd %s", rd)
+			}
 		case vrf != "default":
+			if rd := str(bgp, "rd"); rd != "" {
+				add("rd %s", rd)
+			}
 			if on(v4, "route-export", "to-evpn", "enable") || l3vni && str(v4, "route-export", "to-evpn", "enable") != "off" {
 				add("advertise ipv4 unicast")
 			}

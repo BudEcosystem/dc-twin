@@ -202,12 +202,15 @@ type svi struct {
 // VRF that does not exist, two VNIs on one VLAN.
 func Render(t Tree, sw nos.Switch) (Files, error) {
 	cabled := interfaces(sw)
-	// a VRF an interface is put in exists, as NVUE creates it (NICo's templates name the VRF of
-	// the DPU's own function, pf0dpu1_if, only there)
-	t = Clone(t)
-	for _, name := range keys(sub(t, "interface")) {
-		if v := str(t, "interface", name, "ip", "vrf"); v != "" && v != "default" && sub(t, "vrf", v) == nil {
-			Patch(t, []string{"vrf", v}, Tree{})
+	// on a BlueField's HBN, a VRF an interface is put in exists, as HBN's NVUE creates it (NICo's
+	// templates name the VRF of the DPU's own function, pf0dpu1_if, only there); a switch refuses
+	// a VRF that does not exist
+	if sw.Native {
+		t = Clone(t)
+		for _, name := range keys(sub(t, "interface")) {
+			if v := str(t, "interface", name, "ip", "vrf"); v != "" && v != "default" && sub(t, "vrf", v) == nil {
+				Patch(t, []string{"vrf", v}, Tree{})
+			}
 		}
 	}
 	vrfs := sub(t, "vrf")

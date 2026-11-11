@@ -1218,6 +1218,17 @@ step_tenant() {
   else result tenant-vpc-deleted FAIL "$(cat "$OUT/vpc-prefix-delete.json" "$OUT/vpc-delete.json" 2>/dev/null | head -c 400)"; fi
 }
 
+# border_done: the border check, run in the background, ends before the report: it is stopped if
+# the host steps finished without it, and its row says so
+border_done() {
+  [ -n "${border_pid:-}" ] || return 0
+  if kill -0 "$border_pid" 2>/dev/null; then
+    kill "$border_pid" 2>/dev/null; wait "$border_pid" 2>/dev/null
+    grep -q "^border	" "$RESULTS" 2>/dev/null || result border FAIL "the host steps ended before the spine learned a host's admin route (192.168.252.0/24 /32s) from a DPU"
+  fi
+  border_pid=""
+}
+
 step_down() {
   say "stop everything this script started"
   local p
@@ -1226,7 +1237,8 @@ step_down() {
   for p in "$WORK"/twin*.pid; do [ -f "$p" ] && stop_bg "$(basename "$p" .pid)"; done
   for p in "$WORK"/*.pid; do [ -f "$p" ] && stop_bg "$(basename "$p" .pid)"; done
   # a twin killed before it finished stopping leaves the estate's containers
-  dpu && docker ps -aq --filter label=dc-twin.estate=supermicro-nico-dpu | xargs -r docker rm -f >/dev/null 2>&1
+  local est; est=$(sed -nE 's/^metadata: *\{ *name: *([^ ,}]+).*/\1/p; s/^  name: *([^ ]+)$/\1/p' "$WORK/estate.yaml" 2>/dev/null | head -1)
+  dpu && [ -n "$est" ] && docker ps -aq --filter "label=dc-twin.estate=$est" | xargs -r docker rm -f >/dev/null 2>&1
   docker rm -f "$PG" "$VAULT" >/dev/null 2>&1 || true
   if { [ -f "$WORK/ready-mode" ] || [ -f "$WORK/trays-mode" ]; } && [ "$uname_s" = Linux ]; then sudo -n ip netns del "$SVC_NS" 2>/dev/null || true; fi
   rm -f "$WORK/dpu-mode"
@@ -1259,8 +1271,9 @@ fi
 for s in "${steps[@]}"; do
   case $s in
     help) sed -n '2,/^set -uo pipefail/p' "$0" | sed '$d'; exit 0;;
-    fetch|build|classify|up|nico|load|dhcp|discover|health|faults|consumer|report|down) "step_$s";;
-    border) step_border &;;
+    fetch|build|classify|up|nico|load|dhcp|discover|health|faults|consumer) "step_$s";;
+    report|down) border_done; "step_$s";;
+    border) step_border & border_pid=$!;;
     tenant) step_tenant;;
     trays) TRAYS=1; touch "$WORK/trays-mode"; step_trays;;
     boot|pxe) trays || { READY=1; touch "$WORK/ready-mode"; }; "step_$s";;

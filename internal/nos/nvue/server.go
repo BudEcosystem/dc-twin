@@ -174,6 +174,14 @@ func (s *Server) applyRevision(ctx context.Context, r *revision) {
 		s.mu.Unlock()
 		out, aerr = s.apply(ctx, files)
 	}
+	if rerr == nil && aerr == nil && s.run != nil {
+		// without the state lock: clients read on while it runs (applyMu keeps s.applied the
+		// configuration before this revision)
+		s.mu.Lock()
+		prev := s.applied
+		s.mu.Unlock()
+		out += s.reimport(ctx, prev, t)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	r.tree, r.output = t, out
@@ -185,13 +193,7 @@ func (s *Server) applyRevision(ctx context.Context, r *revision) {
 		s.applied, s.files = Clone(t), files
 	default:
 		r.state, r.issue = stateApplied, ""
-		prev := s.applied
 		s.applied, s.files = Clone(t), files
-		if s.run != nil {
-			if out := s.reimport(ctx, prev, t); out != "" {
-				r.output += out
-			}
-		}
 	}
 }
 
@@ -436,7 +438,7 @@ func problem(w http.ResponseWriter, code int, title, detail string) {
 // routes it holds into a new VRF as soon as the VRF's BGP exists, and when that is before zebra
 // has the new L3 VNI up (the fabric's sessions already established, unlike at a switch's first
 // configuration), it never gives zebra their router MACs and the VRF routes into a black hole
-// (FRR 8.4). It runs with the state lock held, after the switch's tools have applied.
+// (FRR 8.4). It runs after the switch's tools have applied, without the state lock.
 func (s *Server) reimport(ctx context.Context, prev, next Tree) string {
 	var out strings.Builder
 	asn := str(next, "router", "bgp", "autonomous-system")
@@ -465,7 +467,11 @@ func (s *Server) reimport(ctx context.Context, prev, next Tree) string {
 		if len(rts) == 0 || a == "" {
 			continue
 		}
-		time.Sleep(2 * time.Second) // zebra takes the new devices in
+		select { // zebra takes the new devices in
+		case <-time.After(2 * time.Second):
+		case <-ctx.Done():
+			return out.String()
+		}
 		args := []string{"vtysh", "-c", "configure terminal", "-c", "router bgp " + a + " vrf " + v, "-c", "address-family l2vpn evpn"}
 		for _, rt := range rts {
 			args = append(args, "-c", "no route-target import "+rt)

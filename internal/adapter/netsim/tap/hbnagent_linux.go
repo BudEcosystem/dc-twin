@@ -87,6 +87,13 @@ func (s *Substrate) StartHBNAgent(path string, a netsim.HBNAgent) error {
 	}
 	names["carbide-pxe.forge"] = pxeIP
 	h := &hbnAgent{dial: a.Dial}
+	// a restart: the running agent's listeners go first, as the new ones take their addresses
+	s.mu.Lock()
+	if old := s.agents[path]; old != nil {
+		old.close()
+		delete(s.agents, path)
+	}
+	s.mu.Unlock()
 	if err := s.mgmtVRF(sw, []netip.Addr{apiIP, pxeIP, netip.MustParseAddr(hbnDNS)}); err != nil {
 		return fmt.Errorf("%s: its management VRF: %w", path, err)
 	}
@@ -142,9 +149,6 @@ stdout_logfile=/var/log/forge-dpu-agent.log
 		return fmt.Errorf("%s: starting NICo's agent: %w", path, err)
 	}
 	s.mu.Lock()
-	if old := s.agents[path]; old != nil {
-		old.close()
-	}
 	if s.agents == nil {
 		s.agents = map[string]*hbnAgent{}
 	}
