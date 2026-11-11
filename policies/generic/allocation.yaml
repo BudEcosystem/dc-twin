@@ -1,0 +1,16 @@
+# Allocation: what a stack offers tenants. Needs the `allocatable` alias; n/a without it.
+apiVersion: dc-twin/v1alpha1
+kind: Policy
+metadata: { name: generic/allocation, version: 0.1.0 }
+spec:
+  title: Generic allocation
+  invariants:
+    - name: nothing-broken-is-allocatable
+      dimension: safety
+      key: true
+      requires: [stack, allocatable]
+      message: the stack offers a machine that is Critical, off or in an isolated rack
+      always:
+        holds: 'accessors.allocatable({}).all(m, model.bySerial(string(m.serial)).health != "Critical" && model.bySerial(string(m.serial)).power == "On" && !model.bySerial(string(m.serial)).rackIsolated)'
+  isNot:
+    - "What the stack would hand out is sampled, not observed at the moment of an allocation."

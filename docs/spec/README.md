@@ -23,6 +23,7 @@ and what resolved each are in [`docs/reviews/2026-10-18-spec-review.md`](../revi
 | 14 | [Expressions](14-expressions.md) | The one expression language (CEL), its environment, the trigger registry and canonical request names |
 | 15 | [Security](15-security.md) | Threat model, the isolation mechanism behind D10, the install path, users and roles, secrets |
 | 16 | [Verifying the twin](16-testing.md) | Oracles per adapter, cross-projection properties, performance targets, twin incidents, observability, CI |
+| 17 | [The critic](17-critic.md) | **Proposed.** How a run is judged: evidence, invariants, playbooks, measures, the scorecard, judgements, campaigns, and what a stack brings to be judged |
 
 Stack-specific documents live in [`docs/stacks/`](../stacks/), starting with
 [NVIDIA DSX OS](../stacks/nvidia-dsx-os.md). Illustrative estate and scenario files are in

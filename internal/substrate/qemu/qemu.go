@@ -132,9 +132,13 @@ func (c Config) Args() []string {
 	}
 	a = append(a, c.driveArgs()...)
 	if c.TPM != "" {
-		// the sysbus TIS on aarch64 virt, without the physical-presence RAM page: its 1 KiB
-		// mapping is refused by Hypervisor.framework (16 KiB pages) with HV_BAD_ARGUMENT
-		dev := "tpm-tis-device,ppi=off"
+		// the sysbus TIS on aarch64 virt; under Hypervisor.framework without the physical-presence
+		// RAM page, whose 1 KiB mapping it refuses (16 KiB pages) with HV_BAD_ARGUMENT. Only there:
+		// QEMU 8.2's aarch64 TIS lists ppi but refuses it at creation ("Property not found").
+		dev := "tpm-tis-device"
+		if c.Accel == "hvf" {
+			dev += ",ppi=off"
+		}
 		if c.Arch != "aarch64" {
 			dev = "tpm-tis"
 		}

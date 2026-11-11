@@ -1,0 +1,17 @@
+# A CI-sized campaign for the reference stack: one seed of the leak response and the library's
+# tray-leak scenario, judged by the reference stack's policy. Minutes, not hours.
+apiVersion: dc-twin/v1alpha1
+kind: Campaign
+metadata: { name: refstack-smoke }
+spec:
+  estates: [../estates/nvl72-refstack.yaml]
+  subject: refstack
+  seeds: { count: 1, from: 1 }
+  scenarios: { files: [../scenarios/nvl72-leak-response.yaml, ../scenarios/library/leak/tray-detector.yaml] }
+  stack:
+    command: "bin/refstack --gateway {tcp:gateway} --api {tcp:api} --broker {tcp:broker} --dhcp {udp:dhcp} --expected {state}/stack-inputs/expected-machines.json"
+    outputs: { refstack: "http://{tcp:api}", dhcpServer: "{udp:dhcp}", exchangeBroker: "{tcp:broker}" }
+    server: "{udp:dhcp}"
+    broker: "{tcp:broker}"
+    ready: "http://{tcp:api}/v1/machines"
+  budget: { wall: 30m }

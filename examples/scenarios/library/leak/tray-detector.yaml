@@ -1,0 +1,19 @@
+# Stack-neutral: a tray's own leak detector trips; the stack takes that tray down within 45 s and touches no other.
+apiVersion: dc-twin/v1alpha1
+kind: Scenario
+metadata: { name: library-leak-tray-detector }
+spec:
+  estate: { requires: { formats: [nvidia/gb300-nvl72], capabilities: [redfish/leak-detectors] } }
+  stack: { aliases: [machine] }
+  timeout: 6m
+  steps:
+    - wait: { for: 'model.select("a03/compute-tray-*").all(d, accessors.machine(d.identity.serial).state == "Ready")', within: 3m }
+    - fault: { id: leak, select: "a03/compute-tray-05", inject: generic/leak/tray-detector }
+    - expect:
+        within: 45s
+        all:
+          - model: { expr: 'model.device("a03/compute-tray-05").power == "Off"' }
+          - not: { event: { class: destructive, from: stack, on: "a03/compute-tray-{01..04}" } }
+          - not: { event: { class: destructive, from: stack, on: "a03/compute-tray-{06..18}" } }
+    - fault: { clear: leak }
+  report: fidelity

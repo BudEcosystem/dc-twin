@@ -1,0 +1,20 @@
+# Hygiene: what a stack leaves behind on the devices it talks to.
+apiVersion: dc-twin/v1alpha1
+kind: Policy
+metadata: { name: generic/hygiene, version: 0.1.0 }
+spec:
+  title: Generic hygiene
+  invariants:
+    - name: no-secret-in-url
+      dimension: hygiene
+      key: true
+      requires: [stack]
+      message: a credential in a request's URL
+      never:
+        event: { kind: request, from: stack }
+        where: 'string(event.target).matches("(?i)(password|passwd|token|secret)=")'
+  objectives:
+    - { name: sessions-closed, measure: sessions.leaked, pass: "==0", warn: "<=2", dimension: hygiene }
+    - { name: error-ratio, measure: requests.errorRatio, pass: "<=0.05", warn: "<=0.25", dimension: hygiene }
+  isNot:
+    - "Sessions that a BMC expires by itself count as leaked: the twin does not know the stack meant to let them expire."

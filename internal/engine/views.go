@@ -276,3 +276,43 @@ func (e *Engine) Facility() map[string]any {
 	})
 	return map[string]any{"feeds": feeds, "power": e.powerChainView(), "loops": loops, "racks": racks}
 }
+
+// Snapshot is every device's identity and committed state now, for a run's start marker: the
+// critic judges a recorded run from its log alone, and the log holds changes, not the state the
+// run began in (17 — Evidence).
+func (e *Engine) Snapshot() []map[string]any {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	out := make([]map[string]any, 0, len(e.M.Devices))
+	for _, d := range e.M.Devices {
+		acc := 0
+		for _, c := range d.Components {
+			if c.Kind == "accelerator" {
+				acc++
+			}
+		}
+		rack, rackName := "", ""
+		if d.Rack != nil {
+			rack, rackName = d.Rack.Path, d.Rack.Name
+		}
+		v := map[string]any{"path": d.Path, "class": d.Class, "rack": rack, "rackName": rackName, "serial": d.Identity.Serial,
+			"power": d.State.Power, "ac": d.State.AC, "health": e.deviceHealth(d), "fidelity": d.Fidelity}
+		if acc > 0 {
+			v["accelerators"] = acc
+		}
+		if d.Parent != nil {
+			v["parent"] = d.Parent.Path
+		}
+		out = append(out, v)
+	}
+	for _, r := range e.M.Racks {
+		if len(r.Isolated) > 0 {
+			iso := map[string]any{}
+			for k, v := range r.Isolated {
+				iso[k] = v
+			}
+			out = append(out, map[string]any{"path": r.Path, "class": "rack", "rack": r.Path, "rackName": r.Name, "isolated": iso})
+		}
+	}
+	return out
+}

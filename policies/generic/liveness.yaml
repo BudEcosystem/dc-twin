@@ -1,0 +1,19 @@
+# Liveness: a fault should not go unnoticed. A warning, not a failure: the right response to some
+# faults is none, and a stack's own policy says which.
+apiVersion: dc-twin/v1alpha1
+kind: Policy
+metadata: { name: generic/liveness, version: 0.1.0 }
+spec:
+  title: Generic liveness
+  invariants:
+    - name: fault-noticed
+      dimension: correctness
+      severity: warning
+      requires: [stack]
+      message: a fault the stack neither acknowledged nor acted on
+      leadsTo:
+        when: { fault: "*" }
+        then: { moment: "acknowledged|firstAction" }
+        within: 5m
+  isNot:
+    - "A fault the stack noticed and rightly ignored is reported unnoticed unless its policy's playbook says how it acknowledges it."

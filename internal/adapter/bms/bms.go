@@ -922,13 +922,22 @@ func (a *Adapter) publishValue(p *point, force bool) {
 		return
 	}
 	prev, seen := a.last[p.valueTopic]
-	if !force && seen && !changed(prev, v, p.def.deadband) {
+	moved := seen && changed(prev, v, p.def.deadband)
+	if !force && seen && !moved {
 		return
 	}
 	a.last[p.valueTopic] = v
 	at := a.now()
 	b, _ := json.Marshal(valueMsg{Value: &v, Timestamp: at.UnixMilli(), Quality: 1})
 	a.publish(p.valueTopic, b, false, "value")
+	if moved && len(p.def.stateText) > 0 && p.source != "" {
+		// a discrete point's change pushed to the stack: the critic's evidence that the stack was
+		// told (17 — The five moments of a fault). A periodic republish of an unchanged value
+		// tells the stack nothing new and is not recorded.
+		a.e.Commit(schema.Event{Kind: "observe", Source: schema.EventSource{Class: "twin", Principal: "bms"}, Path: p.source,
+			Message: fmt.Sprintf("BMS pushed %s = %v", p.pointType, v),
+			Data:    map[string]any{"push": true, "protocol": "mqtt", "topic": p.valueTopic, "pointType": p.pointType, "value": v}})
+	}
 	if p.legacy != "" {
 		b, _ := json.Marshal(map[string]any{"value": int(v), "timestamp": at.Unix()})
 		a.publish(a.legacyTopic(p, "Value"), b, false, "mirror")
@@ -1095,7 +1104,7 @@ func (a *Adapter) onIntegration(_ paho.Client, msg paho.Message) {
 		}
 		a.e.Commit(schema.Event{Kind: "request", Source: schema.EventSource{Class: "stack", Principal: a.cfg.Integration},
 			Path: p.rack.Path, Message: what,
-			Request: &schema.EventRequest{Protocol: "mqtt", Method: "PUBLISH", Target: topic, Canonical: "other"},
+			Request: &schema.EventRequest{Protocol: "mqtt", Method: "PUBLISH", Target: topic, Canonical: isolationCanonical(p.effect, v)},
 			Data:    data})
 	}
 	if p.effect == "" { // RackLeakDetectTray: informational, no BMS action
@@ -1214,4 +1223,18 @@ func (a *Adapter) runDue() {
 			}
 		}
 	}
+}
+
+// isolationCanonical names an integration's request: asking the BMS to isolate a rack is a
+// destructive request (it cuts the rack's supply), releasing it a write (14, 17).
+func isolationCanonical(effect string, v float64) string {
+	switch {
+	case effect == "":
+		return "other"
+	case v == 1:
+		return "facility.isolate"
+	case v == 0:
+		return "facility.release"
+	}
+	return "other"
 }

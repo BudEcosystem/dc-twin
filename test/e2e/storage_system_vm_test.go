@@ -125,10 +125,10 @@ func TestVMStorageSystem(t *testing.T) {
 	}
 	// what a node restart leaves: the file system's data in the pool, its export's bind mount
 	// gone; the node serves it again
-	// (the NFSv4 server holds the export until it has released the client's state, a moment after
-	// the client unmounts: the unmount is tried again for up to a minute)
-	ctx, cancel = context.WithTimeout(context.Background(), 90*time.Second)
-	out, rc, err = ia.Exec(ctx, fs.Home, "exportfs -ua && for i in $(seq 1 60); do umount /exports/models 2>&1 && exit 0; sleep 1; done; exit 1")
+	ctx, cancel = context.WithTimeout(context.Background(), 30*time.Second)
+	// the kernel's NFS server can hold an unexported bind mount while NFSv4 state from the probe
+	// mount lingers; a restart drops it, so after a short wait the mount is detached lazily
+	out, rc, err = ia.Exec(ctx, fs.Home, "exportfs -ua && for i in 1 2 3 4 5; do umount /exports/models 2>/dev/null && exit 0; sleep 1; done; umount -l /exports/models 2>&1")
 	cancel()
 	if err != nil || rc != 0 {
 		t.Fatalf("unmount the export: rc %d %v\n%s", rc, err, out)

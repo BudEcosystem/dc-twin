@@ -1,0 +1,18 @@
+# Stack-neutral: three trays of one rack leak; the stack asks the BMS to isolate the rack and the BMS does. Run last: the rack is left isolated.
+apiVersion: dc-twin/v1alpha1
+kind: Scenario
+metadata: { name: library-leak-isolation }
+spec:
+  estate: { requires: { formats: [nvidia/gb300-nvl72], capabilities: ["facility/isolation-request:nvidia/dsx-exchange"] } }
+  stack: { aliases: [machine] }
+  timeout: 6m
+  steps:
+    - wait: { for: 'model.select("a03/compute-tray-*").all(d, accessors.machine(d.identity.serial).state == "Ready")', within: 3m }
+    - fault: { id: leaks, select: "a03/compute-tray-{11..13}", inject: generic/leak/tray-detector }
+    - expect:
+        within: 60s
+        all:
+          - event: { canonical: facility.isolate, from: stack, on: "a03" }
+          - event: { field: isolation.electrical, to: true, on: "a03" }
+    - fault: { clear: leaks }
+  report: fidelity

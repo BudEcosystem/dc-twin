@@ -4,6 +4,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -21,6 +22,7 @@ import (
 	"github.com/BudEcosystem/dc-twin/internal/adapter/vm"
 	"github.com/BudEcosystem/dc-twin/internal/compile"
 	"github.com/BudEcosystem/dc-twin/internal/control"
+	"github.com/BudEcosystem/dc-twin/internal/critic"
 	"github.com/BudEcosystem/dc-twin/internal/engine"
 	"github.com/BudEcosystem/dc-twin/internal/report"
 	"github.com/BudEcosystem/dc-twin/internal/schema"
@@ -53,7 +55,14 @@ const usage = `dctwin — a datacenter twin
   dctwin dpu emulation <dpu> [on|off] | attach <dpu> <system> <volume> | detach <dpu> <function id>
   dctwin chaos <rate-per-device-hour> <fault>...
   dctwin clock advance <duration>
-  dctwin scenario run <scenario.yaml>
+  dctwin scenario run <scenario.yaml> [--policy f] [--subject ref] [--holdout] [--judgement f] [--junit f] [--markdown f] [--html f]
+                                                 judged by the critic; exit 0 passed, 1 failed, 2 not-run, 3 impersonated, 4 gate
+  dctwin critic judge <state dir|events.jsonl> [--policy p,…] [--run id|--all] [--baseline j.json] [--judgement f] [--junit f] …
+  dctwin critic explain <judgement.json> [n|rule]   dctwin critic diff <a.json> <b.json>
+  dctwin critic start [--policy f] [--subject ref] | stop <session> | status [session] | list | show <run> [--format …] | rejudge [--run id] [--policy f]
+  dctwin critic mcp                              the critic as an MCP server on stdio, for agents
+  dctwin policy validate <file|name>… [--stack name]
+  dctwin campaign run <campaign.yaml> [--out dir]
   dctwin credentials [selector]
   dctwin inspect <device> [redfish path]
   dctwin console <device> [--follow]            a vm device's serial console (a Serial over LAN stand-in)
@@ -89,8 +98,18 @@ func main() {
 		}
 	case "help", "-h", "--help":
 		fmt.Print(usage)
+	case "critic":
+		err = criticCmd(args)
+	case "policy":
+		err = policyCmd(args)
+	case "campaign":
+		err = campaignCmd(args)
 	default:
 		err = client(cmd, args)
+	}
+	var code exitCode
+	if errors.As(err, &code) {
+		os.Exit(int(code))
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "dctwin:", err)
@@ -608,18 +627,47 @@ func client(cmd string, args []string) error {
 			time.Sleep(500 * time.Millisecond)
 		}
 	case "scenario":
-		if len(args) != 2 || args[0] != "run" {
-			return fmt.Errorf("scenario run <scenario.yaml>")
+		polPath, args := flagVal(args, "--policy")
+		subject, args := flagVal(args, "--subject")
+		holdout, args := hasFlag(args, "--holdout")
+		if len(args) < 2 || args[0] != "run" {
+			return fmt.Errorf("scenario run <scenario.yaml> [--policy f] [--subject ref] [--holdout] [--judgement f] [--junit f] [--markdown f] [--html f]")
 		}
 		data, err := os.ReadFile(args[1])
 		if err != nil {
 			return err
 		}
-		b, err := a.do("POST", "/scenarios/run", data, "application/yaml")
+		pol := ""
+		if polPath != "" {
+			pb, err := os.ReadFile(polPath)
+			if err != nil {
+				return err
+			}
+			pol = string(pb)
+		}
+		b, err := a.do("POST", "/scenarios/run", map[string]any{"scenario": string(data), "policy": pol, "subject": subject, "holdout": holdout}, "")
 		if err != nil || jsonOut {
 			return print(b, err)
 		}
-		return printResult(b)
+		if err := printResult(b); err != nil {
+			return err
+		}
+		var jr struct {
+			Judgement *critic.Judgement `json:"judgement"`
+			CriticErr string            `json:"criticError"`
+		}
+		_ = json.Unmarshal(b, &jr)
+		if jr.CriticErr != "" {
+			fmt.Fprintln(os.Stderr, "critic:", jr.CriticErr)
+		}
+		if jr.Judgement == nil {
+			return nil
+		}
+		fmt.Print(jr.Judgement.Text())
+		if _, err := outputs(args[2:], []*critic.Judgement{jr.Judgement}, nil); err != nil {
+			return err
+		}
+		return verdictCode(jr.Judgement)
 	}
 	return fmt.Errorf("unknown command %q\n%s", cmd, usage)
 }

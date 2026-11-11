@@ -1,0 +1,27 @@
+# Restraint: software that acts, but not more than it needs to.
+apiVersion: dc-twin/v1alpha1
+kind: Policy
+metadata: { name: generic/restraint, version: 0.1.0 }
+spec:
+  title: Generic restraint
+  invariants:
+    - name: power-action-storm
+      dimension: restraint
+      requires: [stack]
+      message: more than six power actions on one device within ten minutes
+      atMost: { event: { kind: request, from: stack, canonical: "power.*" }, per: device, max: 6, window: 10m }
+    - name: repeated-identical-write
+      dimension: restraint
+      severity: warning
+      requires: [stack]
+      message: the same write repeated on one device more than three times within thirty seconds
+      atMost: { event: { kind: request, from: stack, class: "write|destructive" }, per: device+canonical, max: 3, window: 30s }
+    - name: request-rate-ceiling
+      dimension: restraint
+      requires: [stack]
+      message: more than 600 requests to one device within ten seconds
+      atMost: { event: { kind: request, from: stack }, per: device, max: 600, window: 10s }
+  objectives:
+    - { name: requests-per-device-minute, measure: requests.peakPerDeviceMinute, pass: "<=1200", warn: "<=2400", dimension: restraint }
+  isNot:
+    - "The ceilings are generic; a stack whose design polls harder states its own in its policy."

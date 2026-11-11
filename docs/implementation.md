@@ -132,6 +132,55 @@ VAST VMS dialect. Run on a Linux KVM host with QEMU 11.1.2 patched by `scripts/q
 
 Measurements: [measurements/2026-10-18-model-scale.md](measurements/2026-10-18-model-scale.md).
 
+## The critic
+
+[Spec 17](spec/17-critic.md), D64–D70: `internal/critic`, the generic policies in `policies/`, the
+reference stack's policy in `stacks/reference/policy.yaml`. Every scenario run through the CLI or
+the control API comes back judged and is stored in `<state>/judgements/`.
+
+| Area | Built |
+|---|---|
+| Evidence | Every request carries its class (`read`, `write`, `destructive`, `other`); a BMS isolation request is `facility.isolate` (destructive); `kind: run` start and end markers with every device's state, the stacks and their aliases; every accessor answer committed when it changed (D68), shared by the scenario runner and the critic's sampler; a BMS push of a discrete point committed as `observe` with `push: true`; the run rebuilt from its events as of any event (`History`), from memory or from the log's segments on disk |
+| Rules | `never`, `always`, `leadsTo` (fault, event or condition triggers; a moment, an event or a condition as the response), `atMost` (per device, device+canonical, principal, rack or run, over a sliding window), `sometimes` (coverage); `requires` makes a rule `n/a` without a stack or an alias; `disable` only with a reason |
+| Faults | Each fault's reach from cause chains; its five moments (exposed by a read of a device in reach or a push, acknowledged, first action, mitigated, recovered); the playbook's `permits`, `forbids`, `acknowledged`, `mitigated` and `then.recovered` within their windows; the response (requests, writes, destructive, collateral) |
+| Measures, objectives, score | 19 measures (the moments, response volume and collateral, request volume and peak rate, error ratio, sessions leaked, accelerator-seconds of capacity lost, ingest time); objectives with pass and warn, aggregated, absolute or against a baseline; six dimensions; a rule-based verdict (D65) and a weighted score with an optional gate |
+| Output | JSON judgement, text, every violation explained (who, what, the device before it, the open faults, the cause chain, the principal's reads in the minute before), JUnit, Markdown with a baseline diff, HTML with a fault timeline |
+| Interfaces | `dctwin scenario run --policy --subject --holdout --judgement --junit --markdown --html` (exit 0/1/2/3/4); `dctwin critic judge` (offline, `--all`, `--run`, `--policy`, `--baseline`), `explain`, `diff`, `start`/`stop`/`status` (open sessions), `list`, `show`, `rejudge`, `mcp`; `dctwin policy validate`; `dctwin campaign run`; control API `/v1/scenarios/run` (judged), `/v1/critic/{judgements,sessions,judge}`; the judgement on the console's Scenarios screen; an MCP server on stdio (9 tools); a GitHub composite action (`.github/actions/dctwin-critic`) |
+| Campaigns | Estates × seeds × scenarios, each cell with its own twin and stack on free addresses (`{tcp:…}`, `{udp:…}`, `{state}`), holdout cells (verdict and scores only, D70; redacted before the judgement is stored or served), flaky detection, a baseline campaign and its diff; generated fault sequences drawn from the catalogues and the profiles' allow-lists (`Engine.FaultTargets`), shrunk to a minimal scenario file |
+
+| Run (on the lab host, x86_64 Linux) | What it shows | Result |
+|---|---|---|
+| `TestCriticCatchesEveryMutant` (`make critic-mutants`; the reference stack with each seeded defect of `cmd/refstack/mutants.go`, each with its own twin, ten in parallel) | Each mutant must produce **exactly** its violations, the unmutated stack none, and the judgement read back from the log on disk must equal the live one. `wrong-tray`: `generic/safety/no-destructive-on-healthy` + the tray playbook's `forbids`, collateral 1 tray; `rack-leak-poweroff`: those + the rack-point's `forbids`; `slow`, `ignore-leak`: the playbook's `mitigated` (key); `reset-storm`: `power-action-storm` + `repeated-identical-write`; `chatty`: `request-rate-ceiling` (12,573 requests per tray-minute against the clean stack's ~1,000); `session-leak`: `sessions.leaked` 428 and `repeated-identical-write`; `eager-isolation`: the playbook forbids isolating the rack at one leak; `no-isolation`: the scenario's assertion only; none: passed with no violation on `bmc-discovery`, `nvl72-leak-response`, `tray-leak-isolation` | **10 of 10 pass**. The first runs found two critic bugs, fixed: collateral counted harmless writes (sessions) as damage, and the chatty mutant's load slowed the stack's own leak handling, so it was moved off the health loop |
+| `TestCriticOnTwinScenarios` (lab estate, no stack) | The five twin-only scenarios judged: every rule that needs a stack is `n/a`, no violation, the judgement keeps the scenario's verdict and lists its faults | **passed** |
+| `TestCampaignMatrixAndBaseline` | The example campaign's matrix, twice (2 seeds × leak response + discovery as a holdout): 4 cells passed, the holdout marked, no flakiness, and the second against the first as its baseline: `no change` | **passed** (2m48s per campaign) |
+| `TestGeneratorFindsAndShrinks` | The `wrong-tray` mutant and no scenario: seed 1 draws a tray leak and two slow BMCs; the run violates `forbids` and `no-destructive-on-healthy`; shrinking drops the BMC faults (5 attempts) and writes the one tray leak as a scenario file that decodes as a scenario | **passed** (7m36s) |
+| `scripts/critic-demo.sh` (the CLI end to end, `wrong-tray`) | A judged run with JSON, JUnit (24 cases, 5 failures) and Markdown; `critic explain` names tray-03, `On, health OK … in no open fault's reach`, and the reads before it; a session in which a tray leak injected by hand on tray-12 is answered by the mutant shutting tray-18, judged `failed` with that witness; the same explanation through the MCP server; the estate down and the log re-judged offline equal to the live judgement; the same run under a stricter policy failing its new key objective | **as described** |
+| `TestScenarioLibraryOnTheReferenceStack`, `TestScenarioLibraryTwinOnly` (the library, `examples/scenarios/library/`) | The twelve stack-neutral scenarios in order on one estate against the clean reference stack: nine **passed** with no violation (ingest, bmc, fabric, leak ×3, compound, thermal, power), and `accelerator/xid-79` and `lifecycle/release-sanitise` **not-run** because the reference stack maps no `node` or `allocation` alias, named in the reason; the same tray-leak and compound scenarios against the `wrong-tray` mutant, each on a fresh estate, **failed** with exactly the safety rule and the playbook's `forbids`; `storage/drive-failure` twin-only on `storage-lab`, **passed** with its fault listed | **pass**. Its first run found that a scenario stopping at a failed step left its faults injected for the next one; a scenario that does not pass now has the faults it injected cleared after its end marker, so the clears are not part of the judged run |
+| The CI action, run by `scripts/run-action-locally.py` (each `run:` step of `.github/actions/dctwin-critic/action.yml` as a runner would, `uses:` steps skipped) on `examples/campaigns/refstack-smoke.yaml` | Clean reference stack: build, the campaign (2 cells passed), the gate step exits 0. With `--mutant wrong-tray`: both cells failed, the gate exits 1, and the step summary holds the PR comment naming the tray shut down and the two rules | **as described**; not yet run on GitHub's runners |
+| Unit tests (`internal/critic`, `internal/control`) | Synthetic logs: the good path's moments, the wrong tray's witness and explanation, a late mitigation, storms and ceilings, a rack leak acknowledged from a recorded answer, no blame without a stack, byte-identical re-judgement, validation, disabling with a reason, a relative objective and the diff; the MCP protocol; the critic's control routes | **pass** |
+
+Running every suite on the lab host for the critic also settled two flakes that were there
+before it, both in the tests: `internal/adapter/kwok`'s end-to-end test read a node's lease once,
+right after its conditions, while the adapter writes the lease just after the conditions in the
+same pass (it now waits for the lease); and `TestVMStorageSystem`, which now runs on the lab host,
+failed one run in two on `HEAD` as well (`umount: Resource busy` right after `exportfs -ua`, NFSv4
+state from its probe mount holding the bind mount; it now waits five seconds, then detaches the
+mount lazily, as a node restart would; 4 of 4 runs pass). `TestVMFidelity` skips on the x86_64 lab host by design (its GB300
+tray is an aarch64 guest and the test wants it accelerated); on an Apple-silicon Mac under HVF it
+failed on `HEAD` too, at its last check, which still expected the fidelity report to say "QEMU
+user-mode networking" from before D48 cabled the guest's NICs to the twin's switch ports. It now
+expects the cabling (`cabled to leaf-a01-1:eth1`), and passes 2 of 2. With `DCTWIN_ALLOW_TCG=1` it
+also runs on the x86_64 lab host, the tray emulated under TCG (its boot windows eight times
+longer), and passes in 83 s; getting there found a substrate bug, recorded by the twin as an
+incident: the tray's TPM was `tpm-tis-device,ppi=off`, which QEMU 8.2 (Ubuntu 24.04's) refuses
+(`Property 'tpm-tis-device.ppi' not found`), so the machine never started; `ppi=off` is now passed
+only under Hypervisor.framework, the one accelerator that needs it.
+
+The critic also judged the clean reference stack's own hygiene: about a quarter of its Redfish
+requests answer 404 (it reads `LeakDetection` on every chassis, most of which have none), so
+`generic/hygiene/error-ratio` warns on every run, a finding about the reference stack rather than
+the twin.
+
 ## The reference stack
 
 `cmd/refstack` exists so scenarios can run end to end against software that reaches the twin only
