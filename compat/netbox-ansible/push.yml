@@ -1,0 +1,44 @@
+# Push each fabric switch's NVUE tree from NetBox (templates/fabric_nvue.yaml.j2, ported from
+# net-configurator's spine template) with nvidia.nvue over NVUE's REST API: one revision, the
+# tree patched at its root, applied with force (the prompts answered yes) and polled until
+# applied; then the applied system read back.
+#   ansible-playbook -i netbox.yml push.yml -e switch_ansible_password=<pw>
+- name: Day-0 push from NetBox with nvidia.nvue
+  hosts: switches
+  gather_facts: false
+  vars:
+    ansible_connection: ansible.netcommon.httpapi
+    ansible_network_os: nvidia.nvue.httpapi
+    ansible_httpapi_port: 8765
+    ansible_httpapi_use_ssl: true
+    ansible_httpapi_validate_certs: false
+    ansible_user: cumulus
+    ansible_password: "{{ switch_ansible_password }}"
+  tasks:
+    - name: Render the tree
+      ansible.builtin.set_fact:
+        day0_tree: "{{ lookup('ansible.builtin.template', 'templates/fabric_nvue.yaml.j2') | from_yaml }}"
+
+    - name: Apply it in one revision
+      nvidia.nvue.api:
+        operation: set
+        data: "{{ day0_tree }}"
+        force: true
+        wait: 120
+      register: applied
+
+    - name: The revision is applied
+      ansible.builtin.assert:
+        that: applied.message.state == 'applied'
+        fail_msg: "{{ applied.message | to_json }}"
+
+    - name: Read the applied system back
+      nvidia.nvue.api:
+        operation: get
+        path: system
+      register: system
+
+    - name: The switch runs its NetBox name
+      ansible.builtin.assert:
+        that: system.message.hostname == inventory_hostname
+        fail_msg: "{{ system.message | to_json }}"

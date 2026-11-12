@@ -132,6 +132,33 @@ type NOSOptions struct {
 	// source (forge-dpu-agent, forge-dhcp-server: compat/nico/hbn-build.sh), mounted read-only at
 	// /opt/forge/bin in every emulated BlueField (D71); unset, none is.
 	HBNBinaries string `json:"hbnBinaries,omitempty"`
+	// Day0Binaries is a directory on the Docker host holding the twin's day-0 programs for the
+	// switches (dctwin-day0: its ZTP client, nv, ONIE's discovery; `go build ./cmd/dctwin-day0`),
+	// mounted read-only at /opt/dctwin/bin in every switch of a factory fabric (18); unset, the
+	// directory of the twin's own executable is used when it holds one.
+	Day0Binaries string `json:"day0Binaries,omitempty"`
+	// Images are the NOS installers ONIE's discovery recognises (D75): a fetched file matching
+	// one, by sha256 or by name, installs that NOS.
+	Images []NOSImage `json:"images,omitempty"`
+	// CumulusVersion is the Cumulus Linux release every generic/nvue-frr switch runs ("5.18.3"):
+	// the NVUE grammar it speaks (5.15 changed it), the build GET /system reports and the
+	// version its ZTP requests carry. Unset, 5.6.0 (the emulation's own, before 5.15).
+	CumulusVersion string `json:"cumulusVersion,omitempty"`
+}
+
+// NOSImage is one NOS installer ONIE may fetch: what identifies it and the NOS it installs.
+type NOSImage struct {
+	Match NOSImageMatch `json:"match"`
+	NOS   string        `json:"nos"`
+	// Version is what the installed NOS reports as its version ("5.13.1"); optional.
+	Version string `json:"version,omitempty"`
+}
+
+// NOSImageMatch identifies an installer by its content's sha256 (hex) or its file name (a
+// regular expression over the last element of the URL ONIE fetched).
+type NOSImageMatch struct {
+	SHA256 string `json:"sha256,omitempty"`
+	Name   string `json:"name,omitempty"`
 }
 
 // Attachment cables a running container to a real switch's port.
@@ -239,6 +266,32 @@ type Fabric struct {
 	Params     map[string]any `json:"params,omitempty"`
 	Select     string         `json:"select,omitempty"`
 	PlaceIn    string         `json:"placeIn,omitempty"`
+	// BringUp is how the fabric's real switches start (D72): `twin` (the default: the twin
+	// applies each switch's start-up configuration from the model, D55, D56) or `factory` (each
+	// switch starts in its NOS's factory state and the software under test does day 0, 18).
+	BringUp string `json:"bringUp,omitempty"`
+	// Factory tunes a fabric whose bringUp is factory.
+	Factory *FabricFactory `json:"factory,omitempty"`
+}
+
+// FabricFactory is how a factory fabric's switches leave the factory (18 — The estate).
+type FabricFactory struct {
+	// Install is `preinstalled` (the default: the NOS is on the switch) or `onie` (the switch has
+	// no NOS until ONIE's discovery fetches an installer the twin recognises, D75).
+	Install string `json:"install,omitempty"`
+	// ZTP is `enabled` (the default: the NOS's ZTP runs at its first boot, D74) or `disabled`.
+	ZTP string `json:"ztp,omitempty"`
+	// Plan is `given` (the default: stack-inputs/day0/plan.json holds the twin's address plan, the
+	// oracle compares values) or `tool` (the software under test allocates; the oracle compares
+	// structure, D77).
+	Plan string `json:"plan,omitempty"`
+	// BootTime is how long a NOS takes from power-on to its management port's DHCP; InstallTime
+	// how long ONIE's install takes (durations, "90s", "5m"; shortened under spec.timeScale).
+	BootTime    string `json:"bootTime,omitempty"`
+	InstallTime string `json:"installTime,omitempty"`
+	// Select limits factory state to these switches (a selector); the others are configured by
+	// the twin as under bringUp: twin.
+	Select string `json:"select,omitempty"`
 }
 
 // StorageSystem is one shared storage system (docs/reviews/2026-11-08-storage-deep-dive.md 5.4,
@@ -390,6 +443,9 @@ type IdentitySpec struct {
 	Manufacturer  string `json:"manufacturer,omitempty"`
 	Model         string `json:"model,omitempty"`
 	PartNumber    string `json:"partNumber,omitempty"`
+	// Platform is a switch's ONIE platform string (`<arch>-<vendor>_<machine>-r<revision>`,
+	// onie-sysinfo -p), which ONIE's discovery and a NOS's ZTP report (18).
+	Platform string `json:"platform,omitempty"`
 }
 
 type ComponentSpec struct {

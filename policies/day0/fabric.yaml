@@ -1,0 +1,99 @@
+# Day 0: a fabric brought up from the factory by the software under test (18 — Judging, D72, D77).
+#
+# Opt-in by name. This policy is not one of the generic policies applied to every run
+# (critic.GenericPolicies), and the critic has no way to apply a policy only when the estate has
+# a factory fabric, so a stack that does day 0 extends it (`extends: [day0/fabric]`) or a run
+# names it (`dctwin critic judge --policy day0/fabric`). On an estate with no factory fabric no
+# switch reports a day-0 phase, and every rule passes without a trigger.
+#
+# What it reads, all committed by the twin:
+#   - the NOS observer's state events (source class `observer`, principal `nos/<hostname>`, path
+#     the switch's device path): `day0.phase` (factory, onie-installing, nos-booted, ztp-running,
+#     ztp-done, ztp-failed, configured, converged), `mgmt.lease` (the address, "" when lost),
+#     `hostname`, `credentials` (factory or changed), `lldp <port>` (<system>:<port>);
+#   - the SUT's requests to a switch (source class `stack`): NVUE's network.config.*, SONiC's
+#     gNMI and CLI writes as network.config.write, LLDP reads as network.lldp.read;
+#   - generic/cabling faults, whose reach is every switch at an end of a swapped cable (the
+#     engine's asBuilt events on the four ports).
+apiVersion: dc-twin/v1alpha1
+kind: Policy
+metadata: { name: day0/fabric, version: 0.1.0 }
+spec:
+  title: Day 0 of a factory fabric
+  invariants:
+    - name: switch-converges
+      dimension: timeliness
+      key: true
+      requires: [stack]
+      message: a switch that started its day 0 did not converge within thirty minutes
+      leadsTo:
+        when:
+          event: { kind: state, from: observer, field: day0.phase }
+          where: 'event.to == "factory" || event.to == "onie-installing" || event.to == "nos-booted"'
+        then:
+          event: { kind: state, from: observer, field: day0.phase, to: converged, on: "{event.device}" }
+        within: 30m
+
+    - name: no-identity-of-another-switch
+      dimension: safety
+      key: true
+      requires: [stack]
+      message: a switch was given a hostname another switch holds
+      never:
+        event: { kind: state, from: observer, field: hostname }
+        where: >-
+          !(event.to in ["", "cumulus", "sonic", "localhost"]) &&
+          model.holders({"field": "hostname", "value": event.to}).exists(p, p != event.device && model.device(p).class == "switch")
+
+    - name: no-convergence-over-a-swapped-cable
+      dimension: safety
+      key: true
+      requires: [stack]
+      message: a switch converged with a cable at it swapped, and the stack had not reported the miscabling
+      never:
+        event: { kind: state, from: observer, field: day0.phase, to: converged }
+        where: 'before.faults.exists(f, f == "generic/cabling/cable-swap") && accessors.alerts({"device": event.device}).size() == 0'
+
+    - name: management-lease-kept
+      dimension: safety
+      key: true
+      requires: [stack]
+      message: a switch lost its management lease after the stack's first write to it, and did not get it back
+      leadsTo:
+        when:
+          event: { kind: state, from: observer, field: mgmt.lease, to: "" }
+          where: >-
+            !affected && model.device(event.device).power != "Off" &&
+            events.count({"kind": "request", "from": "stack", "class": "write|destructive", "on": event.device}) > 0
+        then:
+          event: { kind: state, from: observer, field: mgmt.lease, on: "{event.device}" }
+          where: 'event.to != ""'
+        within: 5m
+
+    - name: reboots-during-day0
+      dimension: restraint
+      requires: [stack]
+      message: a switch booted more than four times (three reboots) during the run
+      atMost: { event: { kind: state, from: observer, field: day0.phase, to: nos-booted }, per: device, max: 4 }
+
+    - name: no-factory-credentials-once-converged
+      dimension: hygiene
+      requires: [stack]
+      message: a switch converged while its NOS's factory password still logged in
+      never:
+        event: { kind: state, from: observer, field: day0.phase, to: converged }
+        where: 'model.state({"path": event.device, "field": "credentials"}) == "factory"'
+
+    - name: cabling-checked
+      dimension: coverage
+      requires: [stack]
+      message: the stack read LLDP neighbours from a switch
+      sometimes:
+        event: { kind: request, from: stack, canonical: network.lldp.read }
+  isNot:
+    - "The thirty minutes to converge are this policy's default; a stack states its own by disabling day0/fabric/switch-converges with a reason and restating it."
+    - "Identity is judged by hostname alone, between switches at once: the design's assignment by serial is not in the event log, and loopbacks and AS numbers are not observer events. A tool that gives every switch another's design hostname, one at a time, is not caught here; the convergence oracle (internal/day0) reports it."
+    - "The observer emits no per-session BGP events, so a session brought up over a swapped cable is judged as the switch converging while the swap reaches it, not session by session. Whether the stack reported the miscabling is its alerts accessor's answer at that moment; with no alerts alias it never has."
+    - "A lease lost during a reboot is judged by whether it comes back within five minutes; a reboot longer than that (a slow-boot fault excepted, since a fault in reach exempts the switch) counts as losing it."
+    - "Cabling checked is coverage, not order: that LLDP was read before the switch converged is not checked."
+    - "The day-0 measures of 18 are the critic's built-in day0.* measures, reported on every judged run (no rule here sets a target for them): per switch the time from the observer's first day-0 observation, its first look after power-on, not power-on itself, to the first lease, ZTP running, ZTP done and converged; applies, failed applies and ZTP failures; the fabric's median and maximum time to converged; and changes NVUE refused by name. ZTP running stands for the ZTP fetch: the twin's ZTP client reports it running while it fetches."

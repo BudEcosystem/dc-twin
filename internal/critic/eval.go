@@ -21,7 +21,7 @@ import (
 var StandardAliases = []string{"machine", "alerts", "allocation", "allocatable", "node", "workload"}
 
 // modelFuncs are the member functions a condition may call besides the aliases.
-var modelFuncs = []string{"device", "affected", "openFaults", "bySerial", "count", "state", "selects"}
+var modelFuncs = []string{"device", "affected", "openFaults", "bySerial", "count", "state", "holders", "selects"}
 
 // world is what a condition reads: the run as of one event (history) or the twin now (live).
 type world interface {
@@ -31,6 +31,7 @@ type world interface {
 	bySerial(serial string) map[string]any
 	count(filter map[string]any) int
 	state(path, field string) any
+	holders(field string, value any) []any
 	accessor(alias string, args map[string]any) (any, bool)
 }
 
@@ -74,6 +75,7 @@ func newEvaluator(extra []string) (*evaluator, error) {
 		bind("bySerial", func(a any) any { return x.cur.bySerial(str(a)) }),
 		bind("count", func(a any) any { return x.cur.count(mapOf(a)) }),
 		bind("state", func(a any) any { m := mapOf(a); return x.cur.state(str(m["path"]), str(m["field"])) }),
+		bind("holders", func(a any) any { m := mapOf(a); return x.cur.holders(str(m["field"]), m["value"]) }),
 		bind("selects", func(a any) any { m := mapOf(a); return selectorMatch(str(m["selector"]), str(m["path"])) }),
 	)
 	for _, al := range x.aliases {
@@ -222,6 +224,35 @@ func (w histWorld) bySerial(s string) map[string]any {
 func (w histWorld) state(p, field string) any {
 	v, _ := w.h.State(p, field, w.seq)
 	return v
+}
+
+// holders are the devices whose state field holds value as of this event, in path order: the
+// switches that report a hostname, say, so a rule can ask whether another already holds it
+// (policies/day0/fabric.yaml, 18 — Judging). Values compare as text.
+func (w histWorld) holders(field string, value any) []any {
+	want := fmt.Sprint(value)
+	seen := map[string]bool{}
+	check := func(p string) {
+		if v, ok := w.h.State(p, field, w.seq); ok && v != nil && fmt.Sprint(v) == want {
+			seen[w.h.DevicePath(p)] = true
+		}
+	}
+	for p := range w.h.timeline {
+		check(p)
+	}
+	for p := range w.h.init {
+		check(p)
+	}
+	paths := make([]string, 0, len(seen))
+	for p := range seen {
+		paths = append(paths, p)
+	}
+	sort.Strings(paths)
+	out := make([]any, 0, len(paths))
+	for _, p := range paths {
+		out = append(out, p)
+	}
+	return out
 }
 
 // count counts the run's events before this one that match: kind, canonical, class, from, on

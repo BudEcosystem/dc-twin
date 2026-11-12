@@ -1,0 +1,1 @@
+{"ztp": {"01-configdb-json": {"url": {"source": "http://10.90.1.10:8080/configdb/SN0001.json"}, "clear-config": false, "overwrite-device-metadata": true}}}

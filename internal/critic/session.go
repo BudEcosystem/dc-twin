@@ -245,8 +245,9 @@ func (w liveWorld) bySerial(serial string) map[string]any {
 	return w.device(path)
 }
 
-func (w liveWorld) count(map[string]any) int { return 0 }
-func (w liveWorld) state(string, string) any { return nil }
+func (w liveWorld) count(map[string]any) int  { return 0 }
+func (w liveWorld) state(string, string) any  { return nil }
+func (w liveWorld) holders(string, any) []any { return []any{} }
 func (w liveWorld) accessor(alias string, args map[string]any) (any, bool) {
 	b := w.s.binds[alias]
 	if b == nil {

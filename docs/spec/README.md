@@ -24,6 +24,7 @@ and what resolved each are in [`docs/reviews/2026-10-18-spec-review.md`](../revi
 | 15 | [Security](15-security.md) | Threat model, the isolation mechanism behind D10, the install path, users and roles, secrets |
 | 16 | [Verifying the twin](16-testing.md) | Oracles per adapter, cross-projection properties, performance targets, twin incidents, observability, CI |
 | 17 | [The critic](17-critic.md) | **Proposed.** How a run is judged: evidence, invariants, playbooks, measures, the scorecard, judgements, campaigns, and what a stack brings to be judged |
+| 18 | [Day 0](18-day0.md) | **Built.** A fabric from the factory: factory state, the management port, ONIE, ZTP, the first push, LLDP and cabling, the design handed to the tool, and convergence judged against it |
 
 Stack-specific documents live in [`docs/stacks/`](../stacks/), starting with
 [NVIDIA DSX OS](../stacks/nvidia-dsx-os.md). Illustrative estate and scenario files are in

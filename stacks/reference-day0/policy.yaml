@@ -1,0 +1,8 @@
+# The reference day-0 tooling's promises: the twin's day-0 rules (policies/day0/fabric.yaml)
+# with nothing disabled.
+apiVersion: dc-twin/v1alpha1
+kind: Policy
+metadata: { name: reference-day0, version: 0.1.0 }
+spec:
+  title: Reference day-0 tooling
+  extends: [day0/fabric]

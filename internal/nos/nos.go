@@ -55,6 +55,9 @@ type Entry struct {
 	// Sidecars are the NOS's other containers, started beside the switch container in its
 	// network namespace once it has started, as a SONiC switch runs bgp and gnmi beside swss.
 	Sidecars []Sidecar
+	// FactorySidecars are started beside a factory switch as well (D72): what day 0 reads that
+	// the twin's own configuration does not need (SONiC's lldp).
+	FactorySidecars []Sidecar
 	// API is the management API the twin serves for the NOS and configures it through, once it
 	// has started: "nvue" (package nvue, D56), or "" when the switch configures itself from its
 	// start-up script.
@@ -124,7 +127,7 @@ type Relay struct {
 var registry = map[string]Entry{
 	"none": {Name: "none", Relay: Relay{Implementation: "the twin relay (model switch)", Circuit: "hostname:port", LinkSelection: true}},
 	SonicVS: {Name: SonicVS, Real: true, Runnable: true,
-		Image: SonicVSImage, RelayImage: SonicRelayImage, Sidecars: sonicSidecars,
+		Image: SonicVSImage, RelayImage: SonicRelayImage, Sidecars: sonicSidecars, FactorySidecars: sonicFactorySidecars,
 		Obtain: "docker pull --platform linux/amd64 " + SonicVSImage + "; the relay, bgp and gnmi images are SONiC's docker-dhcp-relay.gz, docker-fpm-frr.gz and docker-sonic-gnmi.gz from build " + SonicRelayBuild +
 			" (" + SonicRelayArtifact + ", sha256 " + SonicRelaySHA256 + "; " + SonicBGPArtifact + ", sha256 " + SonicBGPSHA256 + "; " + SonicGNMIArtifact + ", sha256 " + SonicGNMISHA256 + "), each docker load-ed and tagged " +
 			SonicRelayImage + ", " + SonicBGPImage + ", " + SonicGNMIImage + " (scripts/linux-substrate-e2e.sh does it)",
@@ -234,6 +237,11 @@ const (
 	SonicGNMIImage     = "dctwin-sonic-gnmi:master.1250767-408ffc98c"
 	SonicGNMIArtifact  = "https://sonic-build.azurewebsites.net/api/sonic/artifacts?branchName=master&buildId=1250767&platform=vs&target=target/docker-sonic-gnmi.gz"
 	SonicGNMISHA256    = "864ed2431d7f6b963fff005dbb458d84e0b8ae12779b20fbd96ccd29027a9244"
+	// SONiC's lldp container (lldpd, lldp_syncd, lldpmgrd), beside a factory switch (D78), from
+	// the same build
+	SonicLLDPImage    = "dctwin-sonic-lldp:master.1250767-408ffc98c"
+	SonicLLDPArtifact = "https://sonic-build.azurewebsites.net/api/sonic/artifacts?branchName=master&buildId=1250767&platform=vs&target=target/docker-lldp.gz"
+	SonicLLDPSHA256   = "728214e5726229075248a3227e59c4f9b5639502c2b543e479281dd8ada4a022"
 )
 
 // Lookup returns a registered NOS.
@@ -312,6 +320,11 @@ type Switch struct {
 	// Cabled are ports the twin moves in that the twin itself configures nothing on: an
 	// emulated BlueField's uplinks and host PF, which NICo's agent configures (D71).
 	Cabled []string
+	// Factory is set when the switch starts in its NOS's factory state (D72): the fields above
+	// are then its design, which the twin does not apply.
+	Factory *Factory
+	// Mgmt: the switch's management port (eth0) is cabled into it (D73).
+	Mgmt bool
 }
 
 // Unnumbered is a fabric port with an unnumbered eBGP session to whatever is cabled to it.
@@ -541,14 +554,25 @@ func (e Entry) nvueStartScript(sw Switch) string {
 	w("  while [ ! -e /sys/class/net/$p ]; do n=$((n+1)); [ $n -gt 3000 ] && { log \"port $p never arrived\"; exit 1; }; sleep 0.1; done")
 	w("done")
 	w("log \"ports present: $want\"")
+	if sw.Factory != nil {
+		factoryPreamble(w, sw.Factory)
+	}
 	w("ip link set lo up")
 	w("mkdir -p /run/network /etc/network/interfaces.d /var/log/frr /var/run/frr && chown frr:frr /var/log/frr /var/run/frr")
 	w("printf 'auto lo\\niface lo inet loopback\\n' > /etc/network/interfaces")
-	w("sed -i 's/^bgpd=no/bgpd=yes/' /etc/frr/daemons")
+	// bfdd too: NVUE's router bfd profiles and a peer's bfd are FRR's bfdd's, as on Cumulus
+	w("sed -i 's/^bgpd=no/bgpd=yes/; s/^bfdd=no/bfdd=yes/' /etc/frr/daemons")
 	w("echo 'service integrated-vtysh-config' > /etc/frr/vtysh.conf")
 	w("printf 'frr defaults datacenter\\nhostname %s\\nlog syslog informational\\nservice integrated-vtysh-config\\n!\\n' > /etc/frr/frr.conf", sw.Hostname)
 	w("chown frr:frr /etc/frr/frr.conf /etc/frr/vtysh.conf")
 	w("/usr/lib/frr/frrinit.sh start")
+	if sw.Factory != nil {
+		w("# Cumulus's factory services: sshd on every address (in VRF mgmt through tcp_l3mdev_accept)")
+		w("# host keys of its own (the image's were made at build, shared by every switch)")
+		w("mkdir -p /run/sshd && rm -f /etc/ssh/ssh_host_*_key /etc/ssh/ssh_host_*_key.pub && ssh-keygen -A >/dev/null 2>&1")
+		w("command -v sshd >/dev/null 2>&1 && /usr/sbin/sshd || log 'no sshd in the image'")
+		w("# lldpd and rsyslog are started by NVUE's factory apply (service lldp, system syslog)")
+	}
 	w("# the DHCP relay NVUE configures: dhcrelay with the arguments its apply writes, restarted when")
 	w("# it ends (an apply that changes them ends it); one that ends at once is retried every 30 s,")
 	w("# its log kept to its last 200 lines")
@@ -681,4 +705,13 @@ func DHCRelayArgs(down, up, servers []string) []string {
 		args = append(args, "-iu", i)
 	}
 	return append(args, servers...)
+}
+
+// SidecarsOf is every sidecar a switch runs: its NOS's, and its factory ones when it is a
+// factory switch.
+func (e Entry) SidecarsOf(sw Switch) []Sidecar {
+	if sw.Factory == nil {
+		return e.Sidecars
+	}
+	return append(append([]Sidecar{}, e.Sidecars...), e.FactorySidecars...)
 }

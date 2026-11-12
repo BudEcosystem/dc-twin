@@ -42,6 +42,7 @@ needs only what its milestone has already put in the control API ([D16](11-decis
 | **M9** | Intel | Gaudi 3 server profiles, with the integrated RoCE ports wired by the format; an HLML shim; the `intel/gaudi` catalogue; a stack for the Intel Gaudi Base Operator |
 | **M10** | Vendor-neutral stacks | Metal³/Ironic, Tinkerbell and MAAS as stacks, so the same estates and scenarios compare lifecycle managers |
 | **M11** | Scale-out | One estate across several hosts ([Q6](11-decisions.md)) |
+| **M12** | Day 0 | Fabrics brought up from the factory by the software under test ([18](18-day0.md), phases Z0 to Z6): factory state, management-port DHCP, ZTP, `nv` and SONiC CLIs over SSH, LLDP and cabling faults, ONIE discovery, the day-0 policy |
 
 OEM packs (`oem-dell`, `oem-hpe`, `oem-lenovo`, `oem-supermicro`) arrive with the first milestone
 whose stack needs them: `oem-dell` at M1 if Q19 picks the XE9680 as the first dialect.

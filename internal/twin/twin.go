@@ -83,8 +83,12 @@ func NOSSwitches(m *model.Model) map[*model.Device]string {
 			continue
 		}
 		for _, p := range []*model.Port{l.A, l.B} {
-			if p.Device.BaseClass == "switch" {
-				out[p.Device] = f.NOS
+			// a switch's management port cabled into this fabric (a leaf's mgmt0 on the OOB
+			// network) does not make the switch this fabric's: its own fabric names its NOS
+			if p.Device.BaseClass == "switch" && p.Role != "management" {
+				if _, own := out[p.Device]; !own {
+					out[p.Device] = f.NOS
+				}
 			}
 		}
 	}

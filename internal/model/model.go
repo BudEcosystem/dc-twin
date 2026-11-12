@@ -279,6 +279,13 @@ type Link struct {
 	Kind   string
 	Fabric string
 	Up     bool // false when pulled
+	// SwappedWith: as built, the cable's B end is plugged where the other link's B end should
+	// be, and vice versa (both links point at each other). "B end" is the far end from the port
+	// the fault named, which Engine.AsBuiltPeer resolves. The design is unchanged: A, B and ID
+	// stay what the estate says, so the day-0 design handed to the SUT (18, D77) does not move.
+	// Set by the generic/cabling catalogue's cable-swap fault, cleared with it (18 — LLDP and
+	// cabling, D78).
+	SwappedWith *Link
 }
 
 // Peer returns the far end of the link from p.
@@ -326,6 +333,20 @@ type Fabric struct {
 	Devices    []*Device
 	Links      []*Link
 	Provides   []string
+	// BringUp is twin or factory (D72); Factory is set when it is factory.
+	BringUp string
+	Factory *FabricFactory
+}
+
+// FabricFactory is a factory fabric's settings, checked and defaulted (18).
+type FabricFactory struct {
+	Install     string // preinstalled or onie
+	ZTP         bool
+	Plan        string // given or tool
+	BootTime    time.Duration
+	InstallTime time.Duration
+	// Devices are the fabric's switches that start in factory state (its Select's, or all).
+	Devices map[*Device]bool
 }
 
 type Feed struct {

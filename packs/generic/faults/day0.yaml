@@ -1,0 +1,67 @@
+# What goes wrong while a fabric comes up from the factory (18 — Faults during day 0). Each fault is
+# recorded on the switch as a `day0.*` set (Engine.FaultSets); the TAP substrate's management
+# network, its twin relay and the switch's ZTP and ONIE stand-ins act on them. With no factory
+# fabric (bringUp: twin) nothing reads them and the fault changes nothing.
+apiVersion: dc-twin/v1alpha1
+kind: FaultCatalogue
+metadata: { name: generic/day0, version: 0.1.0 }
+spec:
+  isNot:
+    - "The effects are carried out by the TAP substrate on a factory fabric; on any other the fault is recorded and nothing acts on it."
+    - "ZTP's and ONIE's faults are carried out by the twin's ZTP client and ONIE stand-in, which read them from the switch's /etc/dctwin/faults."
+  faults:
+    - name: ztp-dhcp-no-option
+      title: "Management lease served without the ZTP option"
+      target: { device: switch }
+      effects: [{ set: { "day0.dhcpStripZTP": true } }]
+      clears: { manual: true }
+      isNot: ["The switch's ZTP sees the lease without its ZTP options (239, 67), as if the scope had none; the stack's DHCP server and its lease are not changed."]
+    - name: ztp-server-unreachable
+      title: "The ZTP URL does not answer"
+      target: { device: switch }
+      effects: [{ set: { "day0.blockZTP": true } }]
+      clears: { manual: true }
+      isNot: ["The switch's fetch is dropped, as a firewall would; the server itself is untouched and answers every other switch."]
+    - name: switch-slow-boot
+      title: "Switch slow to boot"
+      target: { device: switch }
+      params: { factor: { type: int, default: 4, range: [1, 100] } }
+      effects: [{ set: { "day0.bootFactor": "{factor}" } }]
+      clears: { manual: true }
+      isNot: ["bootTime is multiplied from the next power-on; a boot in progress keeps its time."]
+    - name: onie-image-mismatch
+      title: "ONIE rejects the fetched installer"
+      target: { device: switch }
+      effects: [{ set: { "day0.onieRejectAll": true } }]
+      clears: { manual: true }
+      isNot: ["Every installer is refused as if for another platform or with a bad checksum; ONIE goes back to discovery."]
+    - name: mgmt-duplicate-ip
+      title: "Another device answers ARP for the switch's management lease"
+      target: { device: switch }
+      effects: [{ set: { "day0.duplicateMgmtIP": true } }]
+      clears: { manual: true }
+      isNot: ["The duplicate answers ARP only; it serves none of the switch's management interfaces."]
+    - name: ztp-script-error
+      title: "The ZTP script or document arrives corrupted"
+      target: { device: switch }
+      effects: [{ set: { "day0.ztpCorrupt": true } }]
+      clears: { manual: true }
+      isNot: ["What the switch's ZTP fetches is cut short before it runs, as an interrupted transfer leaves it; the server's copy is untouched."]
+    - name: onie-install-power-loss
+      title: "Power lost during the NOS install"
+      target: { device: switch }
+      effects: [{ set: { "day0.oniePowerLoss": true } }]
+      clears: { manual: true }
+      isNot: ["The install is cut off half way and ONIE starts its discovery again, as after a power cycle; the twin does not power the whole switch off."]
+    - name: switch-doa
+      title: "Switch dead on arrival"
+      target: { device: switch }
+      effects: [{ set: { "day0.doa": true } }]
+      clears: { manual: true }
+      isNot: ["The switch never boots: its management port has no carrier and nothing answers on it; clearing the fault boots it."]
+    - name: ntp-unreachable
+      title: "NTP unreachable from the switch"
+      target: { device: switch }
+      effects: [{ set: { "day0.blockNTP": true } }]
+      clears: { manual: true }
+      isNot: ["The switch's NTP (UDP 123) is dropped as it leaves; the clock is the host's and does not drift."]

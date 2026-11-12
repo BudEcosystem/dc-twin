@@ -1,0 +1,57 @@
+# Day 0 on the TAP substrate (18): a frontend Clos fabric whose switches leave the factory
+# (bringUp: factory, D72) and are brought up by the software under test, here the test playing a
+# site's day-0 tooling: Kea with the NOSes' ZTP options and an HTTP server for ZTP scripts and
+# documents. The OOB fabric is generic/nvue-frr configured by the twin (bringUp: twin): its
+# management switches relay the factory switches' management ports' DHCP (D73) by giaddr to Kea at
+# the aggregation switch's eth128; the ZTP server is the probe at eth127. Two racks of one model
+# server each (their BMCs on the OOB too) and a network rack holding the leaves and spines.
+# test/linuxnet substitutes the NOS, the Kea container's and the probe namespace's names, the
+# day-0 programs' directory, the install mode and the ONIE images.
+apiVersion: dc-twin/v1alpha1
+kind: Estate
+metadata:
+  name: ESTATE_NAME
+spec:
+  seed: 2027
+  clock: wall
+  timeScale: 0.05
+  packs: [generic@0.1.0]
+  fidelity: { default: model }
+  sites:
+    - name: site-1
+      halls:
+        - name: hall-a
+          rows:
+            - name: a
+              positions: 4
+              racks:
+                - { name: r01, position: 1, format: generic/cpu-rack, params: { servers: 1 }, feeds: [A, B] }
+                - { name: r02, position: 2, format: generic/cpu-rack, params: { servers: 1 }, feeds: [A, B] }
+                - { name: n01, position: 4, format: generic/network-rack, feeds: [A, B] }
+  networks:
+    oob:      { role: management, dhcp: stack, cidr: 10.30.0.0/20, fabric: oob, server: 10.90.0.10 }
+    frontend: { role: frontend,   dhcp: none,  cidr: 10.50.0.0/20, fabric: frontend }
+  fabrics:
+    - { name: oob,      template: oob-flat,   nos: generic/nvue-frr }
+    - name: frontend
+      template: clos-2tier
+      nos: FABRIC_NOS
+      params: { leafsPerRack: 1, spines: 2 }
+      placeIn: n01
+      bringUp: factory
+      factory: { install: INSTALL_MODE, ztp: ZTP_MODE, bootTime: BOOT_TIME, installTime: 2m, plan: PLAN_MODE }
+  # the day-0 tooling, when the run is the reference stack's (installed outside the twin)
+  stacks: STACKS
+  facility:
+    power:
+      feeds: [{ name: A, capacityW: 200000 }, { name: B, capacityW: 200000 }]
+  adapters:
+    network:
+      substrate: tap
+      nos:
+        cumulusVersion: "CUMULUS_VERSION"
+        day0Binaries: DAY0_BINARIES
+        images: ONIE_IMAGES
+      attach:
+        - { container: KEA_CONTAINER, port: "oob-agg-1:eth128", address: 10.90.0.10/24, gateway: 10.90.0.1 }
+        - { netns: PROBE_NETNS, port: "oob-agg-1:eth127", address: 10.90.1.10/24, gateway: 10.90.1.1, interface: probe0 }

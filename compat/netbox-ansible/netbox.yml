@@ -1,0 +1,19 @@
+# Ansible's inventory from NetBox (netbox.netbox.nb_inventory): every device with a bgp_asn and an
+# out-of-band address (the management lease record-leases.py stored, so a switch this tooling
+# brought up; the OOB switches the site configures otherwise have none) is a fabric switch in
+# group `switches`, the group net-configurator's push playbook runs on, at that address; `hostname`
+# is the variable the push playbook names a switch's config script by. NETBOX_API and
+# NETBOX_TOKEN come from the environment.
+plugin: netbox.netbox.nb_inventory
+validate_certs: false
+interfaces: true
+oob_ip_as_primary_ip: true
+config_context: false
+group_by: [device_roles]
+# NetBox's own filter: only devices with an out-of-band address
+device_query_filters:
+  - has_oob_ip: true
+compose:
+  hostname: inventory_hostname
+groups:
+  switches: custom_fields.bgp_asn is not none

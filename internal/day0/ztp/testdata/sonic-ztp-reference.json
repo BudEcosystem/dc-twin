@@ -1,0 +1,1531 @@
+{
+ "commit": "036c8eaad345102e92d085bf36f30e4585934135",
+ "docs": [
+  {
+   "doc": {
+    "ztp": {
+     "01-configdb-json": {
+      "clear-config": false,
+      "dynamic-url": {
+       "source": {
+        "identifier": "serial-number",
+        "prefix": "http://10.90.1.10:8080/ztp/configdb/",
+        "suffix": ".json"
+       }
+      },
+      "overwrite-device-metadata": true
+     },
+     "02-connectivity-check": {
+      "ignore-result": true,
+      "ping-hosts": [
+       "10.90.1.10"
+      ]
+     }
+    }
+   },
+   "name": "tooling/linuxnet-day0-sonic.json"
+  },
+  {
+   "doc": {
+    "ztp": {
+     "01-configdb-json": {
+      "clear-config": false,
+      "overwrite-device-metadata": true,
+      "url": {
+       "source": "http://10.90.1.10:8080/configdb/SN0001.json"
+      }
+     }
+    }
+   },
+   "name": "tooling/reference-day0-render.json"
+  },
+  {
+   "doc": {
+    "ztp": {
+     "0001-test-plugin": {
+      "fail": false,
+      "ignore-result": true,
+      "message": "0001-test-plugin",
+      "message-file": "/etc/ztp.results",
+      "plugin": "test-plugin"
+     },
+     "0002-test-plugin": {
+      "fail": true,
+      "halt-on-failure": true,
+      "ignore-result": true,
+      "message": "0002-test-plugin",
+      "message-file": "/etc/ztp.results"
+     },
+     "0003-test-plugin": {
+      "fail": false,
+      "message": "0003-test-plugin",
+      "message-file": "/etc/ztp.results",
+      "plugin": {
+       "name": "test-plugin"
+      }
+     }
+    }
+   },
+   "name": "test_ConfigSection.py#1"
+  },
+  {
+   "doc": {
+    "ztp": {
+     "0001-test-plugin": {
+      "fail": false,
+      "ignore-result": true,
+      "message": "0001-test-plugin",
+      "message-file": "/etc/ztp.results",
+      "plugin": "test-plugin"
+     },
+     "0002-test-plugin": {
+      "fail": true,
+      "halt-on-failure": true,
+      "ignore-result": true,
+      "message": "0002-test-plugin",
+      "message-file": "/etc/ztp.results"
+     },
+     "0003-test-plugin": {
+      "fail": false,
+      "message": "0003-test-plugin",
+      "message-file": "/etc/ztp.results",
+      "plugin": {
+       "name": "test-plugin"
+      }
+     }
+    }
+   },
+   "name": "test_ZTPJson.py#1"
+  },
+  {
+   "doc": {
+    "ztp": {
+     "0001-test-provisioning-script": {
+      "halt-on-failure": false,
+      "ignore-result": false,
+      "plugin": {
+       "url": {
+        "source": "http://localhost:2000/ztp/scripts/post_install.sh"
+       }
+      },
+      "reboot-on-failure": 123,
+      "reboot-on-success": false,
+      "status": "BOOT",
+      "timestamp": "2019-04-18 19:49:49"
+     },
+     "config-fallback": false,
+     "halt-on-failure": false,
+     "ignore-result": false,
+     "reboot-on-failure": false,
+     "reboot-on-success": false,
+     "restart-ztp-no-config": true,
+     "restart-ztp-on-failure": false,
+     "status": "BOOT",
+     "timestamp": "2019-04-18 19:49:49"
+    }
+   },
+   "name": "test_ZTPJson.py#2"
+  },
+  {
+   "doc": {
+    "ztp": {
+     "0001-test-provisioning-script": {
+      "halt-on-failure": false,
+      "ignore-result": false,
+      "plugin": {
+       "url": {
+        "source": "http://localhost:2000/ztp/scripts/post_install.sh"
+       }
+      },
+      "reboot-on-failure": false,
+      "reboot-on-success": false,
+      "status": "BOOT",
+      "timestamp": "2019-04-18 19:49:49"
+     },
+     "config-fallback": false,
+     "halt-on-failure": false,
+     "ignore-result": false,
+     "reboot-on-failure": false,
+     "reboot-on-success": false,
+     "restart-ztp-no-config": true,
+     "restart-ztp-on-failure": false,
+     "status": "BOOT",
+     "timestamp": "2019-04-18 19:49:49",
+     "ztp-json-version": "1.0"
+    }
+   },
+   "name": "test_ZTPJson.py#3"
+  },
+  {
+   "doc": {
+    "ztp": {
+     "0001-test-provisioning-script": {
+      "halt-on-failure": false,
+      "ignore-result": true,
+      "plugin": {
+       "url": {
+        "source": "http://localhost:2000/ztp/scripts/post_install.sh"
+       }
+      },
+      "suspend-exit-code": -1
+     },
+     "halt-on-failure": false,
+     "ignore-result": false,
+     "reboot-on-failure": false,
+     "reboot-on-success": false,
+     "status": "BOOT"
+    }
+   },
+   "name": "test_ZTPJson.py#4"
+  },
+  {
+   "doc": {
+    "ztp": {
+     "0001-test-provisioning-script": {
+      "halt-on-failure": false,
+      "ignore-result": false,
+      "plugin": {
+       "url": {
+        "source": "file:///tmp/test_firmware.sh"
+       }
+      },
+      "reboot-on-failure": false,
+      "reboot-on-success": false,
+      "status": "BOOT",
+      "timestamp": "2019-04-18 19:49:49"
+     },
+     "config-fallback": false,
+     "halt-on-failure": false,
+     "ignore-result": false,
+     "reboot-on-failure": false,
+     "reboot-on-success": false,
+     "restart-ztp-no-config": true,
+     "restart-ztp-on-failure": false,
+     "status": "BOOT",
+     "timestamp": "2019-04-18 19:49:49",
+     "ztp-json-version": "1.0"
+    }
+   },
+   "name": "test_ZTPJson.py#5"
+  },
+  {
+   "doc": {
+    "ztp": {
+     "0001-test-provisioning-script": {
+      "halt-on-failure": false,
+      "ignore-result": false,
+      "plugin": {
+       "url": {
+        "destination": "/tmp/firmware_check.sh",
+        "source": "file:///tmp/test_firmware.sh"
+       }
+      },
+      "reboot-on-failure": false,
+      "reboot-on-success": false,
+      "status": "BOOT",
+      "timestamp": "2019-04-18 19:49:49"
+     },
+     "halt-on-failure": false,
+     "ignore-result": false,
+     "reboot-on-failure": false,
+     "reboot-on-success": false,
+     "status": "BOOT",
+     "timestamp": "2019-04-18 19:49:49"
+    }
+   },
+   "name": "test_ZTPJson.py#6"
+  },
+  {
+   "doc": {
+    "ztp": {
+     "04-connectivity-tests-2": {
+      "plugin": {
+       "name": "firmware"
+      }
+     },
+     "reboot-on-failure": false,
+     "reboot-on-success": false,
+     "status": "BOOT",
+     "timestamp": "2019-04-18 19:49:49"
+    }
+   },
+   "name": "test_ZTPJson.py#7"
+  },
+  {
+   "doc": {
+    "ztp": {
+     "04-connectivity-tests-2": {
+      "plugin": {
+       "nothing": "firmware"
+      }
+     },
+     "reboot-on-failure": false,
+     "reboot-on-success": false,
+     "status": "BOOT",
+     "timestamp": "2019-04-18 19:49:49"
+    }
+   },
+   "name": "test_ZTPJson.py#8"
+  },
+  {
+   "doc": {
+    "ztp": {
+     "0001-test-provisioning-script": {
+      "halt-on-failure": false,
+      "ignore-result": false,
+      "plugin": {
+       "dynamic-url": {
+        "destination": "/tmp/firmware_check.sh",
+        "source": {
+         "identifier": "hostname",
+         "prefix": "file:///tmp/test_firmware_",
+         "suffix": ".sh"
+        }
+       }
+      },
+      "reboot-on-failure": false,
+      "reboot-on-success": false,
+      "status": "BOOT",
+      "timestamp": "2019-04-18 19:49:49"
+     },
+     "halt-on-failure": false,
+     "ignore-result": false,
+     "reboot-on-failure": false,
+     "reboot-on-success": false,
+     "status": "BOOT",
+     "timestamp": "2019-04-18 19:49:49"
+    }
+   },
+   "name": "test_ZTPJson.py#9"
+  },
+  {
+   "doc": {
+    "ztp": {
+     "0001-test-provisioning-script": {
+      "halt-on-failure": false,
+      "ignore-result": false,
+      "plugin": {
+       "dynamic-url": {
+        "source": {
+         "identifier": "hostname",
+         "prefix": "file:///tmp/test_firmware_post_install_",
+         "suffix": ".sh"
+        }
+       }
+      },
+      "reboot-on-failure": false,
+      "reboot-on-success": false,
+      "status": "BOOT",
+      "timestamp": "2019-04-18 19:49:49"
+     },
+     "halt-on-failure": false,
+     "ignore-result": false,
+     "reboot-on-failure": false,
+     "reboot-on-success": false,
+     "status": "BOOT",
+     "timestamp": "2019-04-18 19:49:49"
+    }
+   },
+   "name": "test_ZTPJson.py#10"
+  },
+  {
+   "doc": {
+    "ztp": {
+     "0001-test-provisioning-script": {
+      "halt-on-failure": false,
+      "ignore-result": false,
+      "plugin": "graphservice",
+      "reboot-on-failure": false,
+      "reboot-on-success": false,
+      "status": "BOOT",
+      "timestamp": "2019-04-18 19:49:49"
+     },
+     "config-fallback": false,
+     "halt-on-failure": false,
+     "ignore-result": false,
+     "reboot-on-failure": false,
+     "reboot-on-success": false,
+     "restart-ztp-no-config": true,
+     "restart-ztp-on-failure": false,
+     "status": "BOOT",
+     "timestamp": "2019-04-18 19:49:49",
+     "ztp-json-version": "1.0"
+    }
+   },
+   "name": "test_ZTPJson.py#11"
+  },
+  {
+   "doc": {
+    "ztp": {
+     "0001-test-provisioning-script": {
+      "halt-on-failure": false,
+      "ignore-result": false,
+      "plugin": [
+       12
+      ],
+      "reboot-on-failure": false,
+      "reboot-on-success": false,
+      "status": "BOOT",
+      "timestamp": "2019-04-18 19:49:49"
+     },
+     "halt-on-failure": false,
+     "ignore-result": false,
+     "reboot-on-failure": false,
+     "reboot-on-success": false,
+     "status": "BOOT",
+     "timestamp": "2019-04-18 19:49:49"
+    }
+   },
+   "name": "test_ZTPJson.py#12"
+  },
+  {
+   "doc": {
+    "ztp": {
+     "0001-test-provisioning-script": {
+      "halt-on-failure": false,
+      "ignore-result": false,
+      "reboot-on-failure": false,
+      "reboot-on-success": false,
+      "status": "BOOT",
+      "timestamp": "2019-04-18 19:49:49"
+     },
+     "halt-on-failure": false,
+     "ignore-result": false,
+     "reboot-on-failure": false,
+     "reboot-on-success": false,
+     "status": "BOOT",
+     "timestamp": "2019-04-18 19:49:49"
+    }
+   },
+   "name": "test_ZTPJson.py#13"
+  },
+  {
+   "doc": {
+    "ztp": {
+     "halt-on-failure": false,
+     "ignore-result": false,
+     "reboot-on-failure": false,
+     "reboot-on-success": false,
+     "status": "BOOT",
+     "test-provisioning-script": {
+      "halt-on-failure": false,
+      "ignore-result": false,
+      "reboot-on-failure": false,
+      "reboot-on-success": false,
+      "status": "BOOT",
+      "timestamp": "2019-04-18 19:49:49"
+     },
+     "timestamp": "2019-04-18 19:49:49"
+    }
+   },
+   "name": "test_ZTPJson.py#14"
+  },
+  {
+   "doc": {
+    "ztp": {
+     "0001-test-provisioning-script": {
+      "halt-on-failure": false,
+      "ignore-result": false,
+      "reboot-on-failure": false,
+      "reboot-on-success": false,
+      "status": "BOOT",
+      "timestamp": "2019-04-18 19:49:49"
+     },
+     "halt-on-failure": false,
+     "ignore-result": false,
+     "reboot-on-failure": false,
+     "reboot-on-success": false,
+     "status": "BOOT",
+     "timestamp": "2019-04-18 19:49:49"
+    }
+   },
+   "name": "test_ZTPJson.py#15"
+  },
+  {
+   "doc": {
+    "ztp": {
+     "halt-on-failure": false,
+     "ignore-result": false,
+     "reboot-on-failure": false,
+     "reboot-on-success": false,
+     "status": "BOOT",
+     "test-provisioning-script": {
+      "halt-on-failure": false,
+      "ignore-result": false,
+      "reboot-on-failure": false,
+      "reboot-on-success": false,
+      "status": "BOOT",
+      "timestamp": "2019-04-18 19:49:49"
+     },
+     "timestamp": "2019-04-18 19:49:49"
+    }
+   },
+   "name": "test_ZTPJson.py#16"
+  },
+  {
+   "doc": {
+    "ztp": {
+     "0001-test-provisioning-script": {
+      "halt-on-failure": false,
+      "ignore-result": false,
+      "plugin": {
+       "dynamic-url": {
+        "source": "/tmp/test_firmware_%s.json"
+       }
+      },
+      "reboot-on-failure": false,
+      "reboot-on-success": false,
+      "status": "BOOT",
+      "timestamp": "2019-04-18 19:49:49"
+     },
+     "config-fallback": false,
+     "halt-on-failure": false,
+     "ignore-result": false,
+     "reboot-on-failure": false,
+     "reboot-on-success": false,
+     "restart-ztp-no-config": true,
+     "restart-ztp-on-failure": false,
+     "status": "BOOT",
+     "timestamp": "2019-04-18 19:49:49",
+     "ztp-json-version": "1.0"
+    }
+   },
+   "name": "test_ZTPJson.py#17"
+  },
+  {
+   "doc": {
+    "ztp": {
+     "dynamic-url": {
+      "source": {
+       "identifier": "hostname",
+       "prefix": "file:///tmp/test_firmware_",
+       "suffix": ".json"
+      }
+     }
+    }
+   },
+   "name": "test_ZTPJson.py#18"
+  },
+  {
+   "doc": {
+    "ztp": {
+     "dynamic-url": {
+      "source": {
+       "identifier": "hostname",
+       "prefix": "file:///tmp/test_firmware_",
+       "suffix": ".json"
+      }
+     }
+    }
+   },
+   "name": "test_ZTPJson.py#19"
+  },
+  {
+   "doc": {
+    "ztp": {
+     "dynamic-url": {
+      "source": {
+       "identifier": "hostname",
+       "prefix": "file:///tmp/test_firmware_",
+       "suffix": ".json"
+      }
+     }
+    }
+   },
+   "name": "test_ZTPJson.py#20"
+  },
+  {
+   "doc": {
+    "ztp": {
+     "dynamic-url": {
+      "source": {
+       "identifier": "hostname",
+       "prefix": "file:///tmp/test_firmware_",
+       "suffix": ".json"
+      }
+     }
+    }
+   },
+   "name": "test_ZTPJson.py#21"
+  },
+  {
+   "doc": {
+    "ztp": {
+     "dynamic-url": {
+      "source": {
+       "identifier": "hostname",
+       "prefix": "file:///tmp/test_firmware_",
+       "suffix": ".json"
+      }
+     }
+    }
+   },
+   "name": "test_ZTPJson.py#22"
+  },
+  {
+   "doc": {
+    "ztp": {
+     "dynamic-url": {
+      "source": {
+       "identifier": "hostname",
+       "prefix": "file:///tmp/test_firmware_",
+       "suffix": ".json"
+      }
+     }
+    }
+   },
+   "name": "test_ZTPJson.py#23"
+  },
+  {
+   "doc": {
+    "ztp": {
+     "dynamic-url": {
+      "source": {
+       "identifier": "hostname",
+       "prefix": "file:///tmp/test_firmware_",
+       "suffix": ".json"
+      }
+     }
+    }
+   },
+   "name": "test_ZTPJson.py#24"
+  },
+  {
+   "doc": {
+    "ztp": {
+     "dynamic-url": {
+      "source": {
+       "identifier": "hostname",
+       "prefix": "file:///tmp/test_firmware_",
+       "suffix": ".json"
+      }
+     }
+    }
+   },
+   "name": "test_ZTPJson.py#25"
+  },
+  {
+   "doc": {
+    "ztp": {
+     "dynamic-url": {
+      "source": {
+       "identifier": "hostname",
+       "prefix": "file:///tmp/test_firmware_",
+       "suffix": ".json"
+      }
+     }
+    }
+   },
+   "name": "test_ZTPJson.py#26"
+  },
+  {
+   "doc": {
+    "ztp": {
+     "url": {
+      "source": {
+       "identifier": "hostname",
+       "prefix": "file:///tmp/test_firmware_",
+       "suffix": ".json"
+      }
+     }
+    }
+   },
+   "name": "test_ZTPJson.py#27"
+  },
+  {
+   "doc": {
+    "ztp": {
+     "url": {
+      "source": "file://"
+     }
+    }
+   },
+   "name": "test_ZTPJson.py#28"
+  },
+  {
+   "doc": {
+    "ztp": {
+     "dynamic-url": {
+      "source": {
+       "identifier": "hostname",
+       "prefix": "file:///tmp/test_firmware_",
+       "suffix": ".json"
+      }
+     }
+    }
+   },
+   "name": "test_ZTPJson.py#29"
+  },
+  {
+   "doc": {
+    "ztp": {
+     "dynamic-url": {
+      "source": {
+       "identifier": "hostname",
+       "prefix": "file:///tmp/test_firmware_",
+       "suffix": ".json"
+      }
+     }
+    }
+   },
+   "name": "test_ZTPJson.py#30"
+  },
+  {
+   "doc": {
+    "ztp": {
+     "dynamic-url": {
+      "source": {
+       "identifier": "hostname",
+       "prefix": "file:///tmp/test_firmware_",
+       "suffix": ".json"
+      }
+     }
+    }
+   },
+   "name": "test_ZTPJson.py#31"
+  },
+  {
+   "doc": {
+    "ztp": {
+     "dynamic-url": {
+      "source": {
+       "identifier": "hostname",
+       "prefix": "file:////tmp/test_firmware_",
+       "suffix": ".sh"
+      }
+     }
+    }
+   },
+   "name": "test_ZTPJson.py#32"
+  },
+  {
+   "doc": {
+    "ztp": {
+     "dynamic-url": {
+      "source": {
+       "identifier": "hostname",
+       "prefix": "file:///tmp/test_firmware_",
+       "suffix": ".sh"
+      }
+     }
+    }
+   },
+   "name": "test_ZTPJson.py#33"
+  },
+  {
+   "doc": {
+    "ztp": {
+     "dynamic-url": {
+      "source": {
+       "identifier": "hostname",
+       "prefix": "file:////tmp/test_firmware_",
+       "suffix": ".sh"
+      }
+     }
+    }
+   },
+   "name": "test_ZTPJson.py#34"
+  },
+  {
+   "doc": {
+    "ztp": {
+     "dynamic-url": {
+      "source": {
+       "identifier": "hostname",
+       "prefix": "file:////tmp/test_firmware_",
+       "suffix": ".sh"
+      }
+     }
+    }
+   },
+   "name": "test_ZTPJson.py#35"
+  },
+  {
+   "doc": {
+    "ztp": {
+     "dynamic-url": {
+      "source": {
+       "identifier": "hostname",
+       "prefix": "file:///tmp/ztp_",
+       "suffix": ".json"
+      }
+     }
+    }
+   },
+   "name": "test_ZTPJson.py#36"
+  },
+  {
+   "doc": {
+    "ztp": {}
+   },
+   "name": "test_connectivity-check.py#1"
+  },
+  {
+   "doc": {
+    "ztp": {
+     "0001-test-plugin": {
+      "fail": false,
+      "message": "0001-test-plugin",
+      "message-file": "/etc/ztp.results",
+      "plugin": "test-plugin"
+     },
+     "0002-test-plugin": {
+      "fail": false,
+      "message": "0002-test-plugin",
+      "message-file": "/etc/ztp.results",
+      "plugin": {
+       "shell": true
+      }
+     },
+     "0003-test-plugin": {
+      "fail": false,
+      "message": "0003-test-plugin",
+      "message-file": "/etc/ztp.results",
+      "plugin": {
+       "name": "test-plugin",
+       "shell": false
+      },
+      "status": "DISABLED"
+     },
+     "0004-test-plugin": {
+      "fail": false,
+      "message": "0004-test-plugin",
+      "message-file": "/etc/ztp.results",
+      "plugin": {
+       "name": "test-plugin"
+      }
+     },
+     "0005-test-plugin": {
+      "message": "umask-check",
+      "message-file": "/tmp/test_plugin_umask_600",
+      "plugin": {
+       "name": "test-plugin",
+       "umask": "177"
+      }
+     },
+     "0006-test-plugin": {
+      "message": "umask-check",
+      "message-file": "/tmp/test_plugin_umask_644",
+      "plugin": {
+       "name": "test-plugin",
+       "umask": "177"
+      }
+     }
+    }
+   },
+   "name": "test_ztp_engine.py#1"
+  },
+  {
+   "doc": {
+    "ztp": {
+     "0001-test-plugin": {
+      "fail": false,
+      "message": "0001-test-plugin",
+      "message-file": "/etc/ztp.results",
+      "plugin": "test-plugin"
+     },
+     "0002-test-plugin": {
+      "attempts": 2,
+      "fail": false,
+      "message": "0002-test-plugin",
+      "message-file": "/etc/ztp.results",
+      "suspend-exit-code": 1
+     },
+     "0003-test-plugin": {
+      "attempts": 2,
+      "fail": false,
+      "message": "0003-test-plugin",
+      "message-file": "/etc/ztp.results",
+      "plugin": {
+       "name": "test-plugin"
+      },
+      "suspend-exit-code": 1
+     },
+     "reboot-on-success": true
+    }
+   },
+   "name": "test_ztp_engine.py#2"
+  },
+  {
+   "doc": {
+    "ztp": {
+     "0001-test-plugin": {
+      "fail": true,
+      "message": "0001-test-plugin",
+      "message-file": "/etc/ztp.results",
+      "plugin": "test-plugin"
+     },
+     "0002-test-plugin": {
+      "fail": true,
+      "message": "0002-test-plugin",
+      "message-file": "/etc/ztp.results"
+     },
+     "0003-test-plugin": {
+      "fail": false,
+      "message": "0003-test-plugin",
+      "message-file": "/etc/ztp.results",
+      "plugin": {
+       "name": "test-plugin",
+       "shell": true
+      }
+     }
+    }
+   },
+   "name": "test_ztp_engine.py#3"
+  },
+  {
+   "doc": {
+    "ztp": {
+     "0001-test-plugin": {
+      "fail": true,
+      "ignore-result": true,
+      "message": "0001-test-plugin",
+      "message-file": "/etc/ztp.results",
+      "plugin": "test-plugin"
+     },
+     "0002-test-plugin": {
+      "fail": true,
+      "ignore-result": true,
+      "message": "0002-test-plugin",
+      "message-file": "/etc/ztp.results"
+     },
+     "0003-test-plugin": {
+      "fail": false,
+      "message": "0003-test-plugin",
+      "message-file": "/etc/ztp.results",
+      "plugin": {
+       "name": "test-plugin"
+      }
+     }
+    }
+   },
+   "name": "test_ztp_engine.py#4"
+  },
+  {
+   "doc": {
+    "ztp": {
+     "0001-test-plugin": {
+      "fail": true,
+      "ignore-result": true,
+      "message": "0001-test-plugin",
+      "message-file": "/etc/ztp.results",
+      "plugin": "test-plugin"
+     },
+     "0002-test-plugin": {
+      "fail": true,
+      "ignore-result": true,
+      "message": "0002-test-plugin",
+      "message-file": "/etc/ztp.results"
+     },
+     "0003-test-plugin": {
+      "fail": true,
+      "message": "0003-test-plugin",
+      "message-file": "/etc/ztp.results",
+      "plugin": {
+       "name": "test-plugin"
+      }
+     },
+     "reboot-on-failure": true
+    }
+   },
+   "name": "test_ztp_engine.py#5"
+  },
+  {
+   "doc": {
+    "ztp": {
+     "0001-test-plugin": {
+      "fail": true,
+      "ignore-result": true,
+      "message": "0001-test-plugin",
+      "message-file": "/etc/ztp.results",
+      "plugin": "test-plugin"
+     },
+     "0002-test-plugin": {
+      "fail": true,
+      "ignore-result": true,
+      "message": "0002-test-plugin",
+      "message-file": "/etc/ztp.results"
+     },
+     "0003-test-plugin": {
+      "fail": true,
+      "message": "0003-test-plugin",
+      "message-file": "/etc/ztp.results",
+      "plugin": {
+       "name": "test-plugin"
+      }
+     },
+     "ignore-result": true
+    }
+   },
+   "name": "test_ztp_engine.py#6"
+  },
+  {
+   "doc": {
+    "ztp": {
+     "0001-test-plugin": {
+      "fail": false,
+      "message": "0001-test-plugin",
+      "message-file": "/etc/ztp.results",
+      "plugin": "test-plugin"
+     },
+     "0002-test-plugin": {
+      "fail": true,
+      "halt-on-failure": true,
+      "message": "0002-test-plugin",
+      "message-file": "/etc/ztp.results"
+     },
+     "0003-test-plugin": {
+      "fail": false,
+      "message": "0003-test-plugin",
+      "message-file": "/etc/ztp.results",
+      "plugin": {
+       "name": "test-plugin"
+      }
+     }
+    }
+   },
+   "name": "test_ztp_engine.py#7"
+  },
+  {
+   "doc": {
+    "ztp": {
+     "0001-test-plugin": {
+      "fail": false,
+      "ignore-result": true,
+      "message": "0001-test-plugin",
+      "message-file": "/etc/ztp.results",
+      "plugin": "test-plugin"
+     },
+     "0002-test-plugin": {
+      "fail": true,
+      "halt-on-failure": true,
+      "ignore-result": true,
+      "message": "0002-test-plugin",
+      "message-file": "/etc/ztp.results"
+     },
+     "0003-test-plugin": {
+      "fail": false,
+      "message": "0003-test-plugin",
+      "message-file": "/etc/ztp.results",
+      "plugin": {
+       "name": "test-plugin"
+      }
+     }
+    }
+   },
+   "name": "test_ztp_engine.py#8"
+  },
+  {
+   "doc": {
+    "ztp": {
+     "url": "file:///tmp/ztp_input.json"
+    }
+   },
+   "name": "test_ztp_engine.py#9"
+  },
+  {
+   "doc": {
+    "ztp": {
+     "0001-test-plugin": {
+      "fail": false,
+      "message": "0001-test-plugin",
+      "message-file": "/etc/ztp.results",
+      "plugin": "test-plugin"
+     },
+     "0002-test-plugin": {
+      "fail": false,
+      "message": "0002-test-plugin",
+      "message-file": "/etc/ztp.results"
+     },
+     "0003-test-plugin": {
+      "fail": false,
+      "message": "0003-test-plugin",
+      "message-file": "/etc/ztp.results",
+      "plugin": {
+       "name": "test-plugin"
+      }
+     }
+    }
+   },
+   "name": "test_ztp_engine.py#10"
+  },
+  {
+   "doc": {
+    "ztp": {
+     "dynamic-url": {
+      "source": {
+       "identifier": "hostname",
+       "prefix": "file:///tmp/",
+       "suffix": "_ztp_input.json"
+      }
+     }
+    }
+   },
+   "name": "test_ztp_engine.py#11"
+  },
+  {
+   "doc": {
+    "ztp": {
+     "0001-test-plugin": {
+      "fail": false,
+      "message": "0001-test-plugin",
+      "message-file": "/etc/ztp.results",
+      "plugin": "test-plugin"
+     },
+     "0002-test-plugin": {
+      "fail": false,
+      "message": "0002-test-plugin",
+      "message-file": "/etc/ztp.results"
+     },
+     "0003-test-plugin": {
+      "fail": false,
+      "message": "0003-test-plugin",
+      "message-file": "/etc/ztp.results",
+      "plugin": {
+       "name": "test-plugin"
+      }
+     }
+    }
+   },
+   "name": "test_ztp_engine.py#12"
+  },
+  {
+   "doc": {
+    "ztp": {
+     "dynamic-url": {
+      "source": {
+       "identifier": "hostname",
+       "prefix": "file:///tmp/",
+       "suffix": "_ztp_input.json"
+      }
+     }
+    }
+   },
+   "name": "test_ztp_engine.py#13"
+  },
+  {
+   "doc": {
+    "ztp": {
+     "0001-test-1": {},
+     "0002-test-2": {},
+     "0003-test-3": {}
+    }
+   },
+   "name": "test_ztp_engine.py#14"
+  },
+  {
+   "doc": {
+    "ztp": {
+     "dynamic-url": {
+      "source": {
+       "identifier": "hostname",
+       "prefix": "file:///tmp/",
+       "suffix": "_ztp_input.json"
+      }
+     }
+    }
+   },
+   "name": "test_ztp_engine.py#15"
+  },
+  {
+   "doc": {
+    "ztp": {}
+   },
+   "name": "test_ztp_engine.py#16"
+  },
+  {
+   "doc": {
+    "ztp": {
+     "0001-test-plugin": {
+      "message": "0001-test-plugin",
+      "message-file": "/etc/ztp.results"
+     }
+    }
+   },
+   "name": "test_ztp_engine.py#17"
+  },
+  {
+   "doc": {
+    "ztp": {
+     "0002-test-plugin": {
+      "message": "0002-test-plugin",
+      "message-file": "/etc/ztp.results"
+     }
+    }
+   },
+   "name": "test_ztp_engine.py#18"
+  },
+  {
+   "doc": {
+    "ztp": {
+     "0001-test-plugin": {
+      "message": "0001-test-plugin",
+      "message-file": "/etc/ztp.results"
+     }
+    }
+   },
+   "name": "test_ztp_engine.py#19"
+  },
+  {
+   "doc": {
+    "ztp": {
+     "0001-arg-check": {
+      "plugin": {
+       "args": "-a -b",
+       "url": "file:///tmp/test.sh"
+      }
+     }
+    }
+   },
+   "name": "test_ztp_engine.py#20"
+  },
+  {
+   "doc": {
+    "ztp": {
+     "0001-arg-check": {
+      "plugin": {
+       "args": "-a -b",
+       "ignore-section-data": true,
+       "url": "file:///tmp/test.sh"
+      }
+     }
+    }
+   },
+   "name": "test_ztp_engine.py#21"
+  },
+  {
+   "doc": {
+    "ztp": {
+     "0001-arg-check": {
+      "plugin": {
+       "ignore-section-data": true,
+       "url": "file:///tmp/test.sh"
+      }
+     }
+    }
+   },
+   "name": "test_ztp_engine.py#22"
+  },
+  {
+   "doc": {
+    "ztp": {
+     "0001-arg-check": {
+      "plugin": {
+       "ignore-section-data": false,
+       "url": "file:///tmp/test.sh"
+      }
+     }
+    }
+   },
+   "name": "test_ztp_engine.py#23"
+  },
+  {
+   "doc": {
+    "ztp": {
+     "0001-test-plugin": {
+      "fail": false,
+      "message": "0001-test-plugin",
+      "message-file": "/etc/ztp.results",
+      "plugin": "test-plugin",
+      "reboot-on-success": "True"
+     },
+     "0002-test-plugin": {
+      "fail": true,
+      "message": "0001-test-plugin",
+      "message-file": "/etc/ztp.results",
+      "plugin": "test-plugin",
+      "reboot-on-failure": "True"
+     }
+    }
+   },
+   "name": "test_ztp_engine.py#24"
+  },
+  {
+   "doc": {
+    "ztp": {
+     "0001-test-plugin": {
+      "message": "0001-test-plugin",
+      "message-file": "/etc/ztp.results",
+      "plugin": "test-plugin"
+     }
+    }
+   },
+   "name": "test_ztp_engine.py#25"
+  },
+  {
+   "doc": {
+    "ztp": {
+     "0001-test-plugin": {
+      "message": "0001-test-plugin",
+      "message-file": "/etc/ztp.results",
+      "plugin": "test-plugin"
+     },
+     "restart-ztp-no-config": true
+    }
+   },
+   "name": "test_ztp_engine.py#26"
+  },
+  {
+   "doc": {
+    "ztp": {
+     "0001-test-plugin": {
+      "message": "0001-test-plugin",
+      "message-file": "/etc/sonic/config_db.json",
+      "plugin": "test-plugin"
+     },
+     "restart-ztp-no-config": true
+    }
+   },
+   "name": "test_ztp_engine.py#27"
+  },
+  {
+   "doc": {
+    "ztp": {
+     "0001-test-plugin": {
+      "fail": true,
+      "message": "0001-test-plugin",
+      "message-file": "/etc/ztp.results",
+      "plugin": "test-plugin"
+     },
+     "restart-ztp-no-config": false,
+     "restart-ztp-on-failure": true
+    }
+   },
+   "name": "test_ztp_engine.py#28"
+  },
+  {
+   "doc": {
+    "ztp": {
+     "0001-test-plugin": {
+      "message": "0001-test-plugin",
+      "message-file": "/etc/sonic/config_db.json",
+      "plugin": "test-plugin"
+     },
+     "restart-ztp-no-config": false,
+     "restart-ztp-on-failure": true
+    }
+   },
+   "name": "test_ztp_engine.py#29"
+  },
+  {
+   "doc": {
+    "ztp": {
+     "0001-test-plugin": {
+      "message": "0001-test-plugin",
+      "message-file": "/etc/ztp.results",
+      "plugin": "test-plugin"
+     }
+    }
+   },
+   "name": "test_ztp_engine.py#30"
+  },
+  {
+   "doc": {
+    "ztp": {
+     "0001-test-plugin": {
+      "message": "0001-test-plugin",
+      "message-file": "/etc/ztp.results",
+      "plugin": "test-plugin"
+     }
+    }
+   },
+   "name": "test_ztp_engine.py#31"
+  },
+  {
+   "doc": {
+    "ztp": {
+     "0001-test-plugin": {
+      "message": "0001-test-plugin",
+      "message-file": "/etc/ztp.results",
+      "plugin": "test-plugin"
+     },
+     "restart-ztp-no-config": false
+    }
+   },
+   "name": "test_ztp_engine.py#32"
+  },
+  {
+   "doc": {
+    "ztp": {
+     "0001-test-plugin": {
+      "message": "0001-test-plugin",
+      "message-file": "/etc/ztp.results"
+     },
+     "restart-ztp-no-config": false
+    }
+   },
+   "name": "test_ztp_engine.py#33"
+  },
+  {
+   "doc": {
+    "ztp": {
+     "0001-test-plugin": {
+      "message": "0001-test-plugin",
+      "message-file": "/etc/ztp.results"
+     },
+     "restart-ztp-no-config": false
+    }
+   },
+   "name": "test_ztp_engine.py#34"
+  },
+  {
+   "doc": {
+    "ztp": {
+     "0001-test-plugin": {
+      "message": "0001-test-plugin",
+      "message-file": "/etc/ztp.results"
+     },
+     "restart-ztp-no-config": false
+    }
+   },
+   "name": "test_ztp_engine.py#35"
+  },
+  {
+   "doc": {
+    "ztp": {
+     "0001-test-plugin": {
+      "sleep": "1"
+     },
+     "0002-test-plugin": {
+      "sleep": "2"
+     },
+     "0003-test-plugin": {
+      "sleep": "3"
+     },
+     "restart-ztp-no-config": false
+    }
+   },
+   "name": "test_ztp_engine.py#36"
+  },
+  {
+   "doc": {
+    "ztp": {
+     "0001-test-plugin": {
+      "description": "This is Test Plugin 1"
+     },
+     "0002-test-plugin": {
+      "fail": true
+     },
+     "0003-test-plugin": {},
+     "restart-ztp-no-config": false
+    }
+   },
+   "name": "test_ztp_engine.py#37"
+  },
+  {
+   "doc": {
+    "ztp": {
+     "0001-test-plugin": {
+      "sleep": 10
+     },
+     "restart-ztp-no-config": false
+    }
+   },
+   "name": "test_ztp_engine.py#38"
+  },
+  {
+   "doc": {
+    "ztp": {
+     "0001-test-plugin": {
+      "message": "0001-test-plugin",
+      "message-file": "/etc/ztp.results"
+     }
+    }
+   },
+   "name": "test_ztp_engine.py#39"
+  },
+  {
+   "doc": {
+    "ztp": {
+     "0002-test-plugin": {
+      "message": "0002-test-plugin",
+      "message-file": "/etc/ztp.results"
+     }
+    }
+   },
+   "name": "test_ztp_engine.py#40"
+  },
+  {
+   "doc": {
+    "ztp": {
+     "0003-test-plugin": {
+      "message": "0003-test-plugin",
+      "message-file": "/etc/ztp.results"
+     }
+    }
+   },
+   "name": "test_ztp_engine.py#41"
+  },
+  {
+   "doc": {
+    "ztp": {
+     "0001-test-plugin": {
+      "message": "0001-test-plugin",
+      "message-file": "/etc/ztp.results"
+     }
+    }
+   },
+   "name": "test_ztp_engine.py#42"
+  },
+  {
+   "doc": {
+    "ztp": {
+     "0001-test-plugin": {
+      "message": "0001-test-plugin",
+      "message-file": "/etc/ztp.results"
+     }
+    }
+   },
+   "name": "test_ztp_engine.py#43"
+  },
+  {
+   "doc": {
+    "ztp": {
+     "0001-test-plugin": {
+      "message": "0001-test-plugin",
+      "message-file": "/etc/ztp.results"
+     },
+     "0002-test-plugin": {
+      "message": "0002-test-plugin",
+      "message-file": "/etc/ztp.results",
+      "status": "DISABLED"
+     }
+    }
+   },
+   "name": "test_ztp_engine.py#44"
+  },
+  {
+   "doc": {
+    "ztp": {
+     "01-test-plugin": {
+      "sleep": 40
+     }
+    }
+   },
+   "name": "test_ztp_engine.py#45"
+  },
+  {
+   "doc": {
+    "ztp": {
+     "01-test-plugin": {
+      "sleep": 40
+     }
+    }
+   },
+   "name": "test_ztp_engine.py#46"
+  },
+  {
+   "doc": {
+    "ztp": {
+     "0001-test-plugin": {
+      "message": "0001-test-plugin",
+      "message-file": "/etc/ztp.results",
+      "sleep": 100
+     }
+    }
+   },
+   "name": "test_ztp_engine.py#47"
+  }
+ ],
+ "source": "https://github.com/sonic-net/sonic-ztp"
+}

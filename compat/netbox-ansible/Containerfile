@@ -1,0 +1,23 @@
+# The NetBox + Ansible day-0 controller (compat/netbox-ansible, docs/spec/18-day0.md Z6, D79):
+# NVIDIA's enterprise-ras net-configurator at nc-v8.0.0 (MIT) with its own pinned Python
+# requirements (ansible 14, ansible-core 2.21, pexpect), which bring the netbox.netbox and
+# ansible.netcommon collections; NVIDIA's nvidia.nvue 1.2.9, the push over NVUE's REST API;
+# pynetbox and pytz, which netbox.netbox's inventory needs; and sshpass and OpenSSH, which
+# net-configurator's password bootstrap needs. Nothing of net-configurator is changed: its
+# playbooks run as checked out, verified by commit.
+FROM public.ecr.aws/docker/library/debian:trixie-slim
+ARG NC_TAG=nc-v8.0.0
+ARG NC_COMMIT=eda15cb7f7354e4a0476b7461eda73aa69137913
+RUN apt-get update \
+ && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      python3 python3-venv ca-certificates git openssh-client sshpass \
+ && rm -rf /var/lib/apt/lists/* \
+ && git clone -q --depth 1 --branch "$NC_TAG" https://github.com/NVIDIA/enterprise-ras.git /opt/enterprise-ras \
+ && test "$(git -C /opt/enterprise-ras rev-parse HEAD)" = "$NC_COMMIT" \
+ && python3 -m venv /opt/ansible \
+ && /opt/ansible/bin/pip install --no-cache-dir -r /opt/enterprise-ras/net-configurator/requirements.txt pynetbox==7.5.0 pytz==2025.2 \
+ && /opt/ansible/bin/ansible-galaxy collection install -p /usr/share/ansible/collections nvidia.nvue:==1.2.9 \
+ && /opt/ansible/bin/ansible-galaxy collection list netbox.netbox \
+ && mkdir -p /work
+ENV PATH=/opt/ansible/bin:$PATH
+WORKDIR /work

@@ -45,7 +45,9 @@ import (
 	"gvisor.dev/gvisor/pkg/waiter"
 
 	"github.com/BudEcosystem/dc-twin/internal/adapter/netsim"
+	"github.com/BudEcosystem/dc-twin/internal/adapter/netsim/lldp"
 	"github.com/BudEcosystem/dc-twin/internal/compile"
+	"github.com/BudEcosystem/dc-twin/internal/day0"
 	"github.com/BudEcosystem/dc-twin/internal/engine"
 	"github.com/BudEcosystem/dc-twin/internal/model"
 	"github.com/BudEcosystem/dc-twin/internal/nos"
@@ -79,9 +81,16 @@ type Substrate struct {
 	switches []*nosSwitch
 	byPath   map[string]*nosSwitch
 	cables   []*cable
-	docker   *nos.Docker
-	volumes  []string // the switches' shared volumes, removed after their containers
-	attached []string
+	// master is the middle a cable end's veth is in when not its own cable's (syncAsBuilt)
+	master map[string]string
+	// faultState is what the substrate has done for each factory switch's day-0 faults, and
+	// renamedEnds the cable ends a cable-wrong-port fault has renamed (day0faults_linux.go)
+	faultState  map[string]*day0FaultState
+	renamedEnds map[string]string
+	mgmt        []*mgmtPort
+	docker      *nos.Docker
+	volumes     []string // the switches' shared volumes, removed after their containers
+	attached    []string
 	// ca issues the TLS material of real switches' management interfaces (the estate CA); nil
 	// leaves them without (a gNMI server then listens on its loopback only)
 	ca       *netsim.Net
@@ -90,7 +99,11 @@ type Substrate struct {
 	// "vxlan" -> nil, or why not
 	kernel map[string]error
 
-	obs    *observer
+	obs *observer
+	// design is a factory estate's day-0 design (D77) and day0 the observer holding the factory
+	// switches against it
+	design day0.Design
+	day0   *day0Observer
 	ctx    context.Context
 	cancel context.CancelFunc
 	closed atomic.Bool
@@ -209,6 +222,8 @@ type nosSwitch struct {
 	nvue         *nvue.Server
 	nvueHTTP     *http.Server
 	nvuePassword string
+	// factoryUp: a factory switch has booted and its factory configuration is applied (D72).
+	factoryUp atomic.Bool
 }
 
 // routing is the container a switch's routing daemons run in: its bgp sidecar, or the switch's.
@@ -227,6 +242,16 @@ type cable struct {
 	br       string
 	appliedA int32
 	appliedB int32
+}
+
+// mgmtPort is a factory switch's management port (D73): a veth whose switch end is its eth0.
+// On a model OOB switch the twin end is a port of its segment's bridge; on a real OOB NOS the
+// port is a cable as a fabric link is (two veths and a two-port bridge the twin holds), the
+// second veth the OOB switch's port. Carrier follows the model as a cable's does.
+type mgmtPort struct {
+	plan    *MgmtPlan
+	ends    []string // twin-side veths
+	applied []int32
 }
 
 // New builds the substrate from the running estate (twin.RegisterNetworkSubstrate).
@@ -296,6 +321,11 @@ func (s *Substrate) start() error {
 			return fmt.Errorf("host port %s: %w", hp.Ref, err)
 		}
 	}
+	for _, mp := range s.plan.Mgmt {
+		if err := s.addMgmt(mp); err != nil {
+			return fmt.Errorf("management port %s: %w", mp.Ref, err)
+		}
+	}
 	for i, lp := range s.plan.Links {
 		if err := s.addCable(i, lp); err != nil {
 			return fmt.Errorf("fabric link %s: %w", lp.Link.ID, err)
@@ -316,6 +346,11 @@ func (s *Substrate) start() error {
 		}
 		s.wg.Add(1)
 		go s.obs.loop(s.ctx, &s.wg)
+		if s.plan.Factory() {
+			s.day0 = &day0Observer{s: s}
+			s.wg.Add(1)
+			go s.day0.loop(s.ctx, &s.wg)
+		}
 	}
 	s.log.Info("tap substrate up", "netns", s.nsName, "endpoints", len(s.ports), "bridges", len(s.bridges),
 		"nos", len(s.switches), "cables", len(s.cables), "attached", len(s.attached))
@@ -388,7 +423,10 @@ func (s *Substrate) nl(f func(h *netlink.Handle) error) error {
 func (s *Substrate) addBridge(name string) error {
 	return s.nl(func(h *netlink.Handle) error {
 		off := false
-		br := &netlink.Bridge{LinkAttrs: netlink.LinkAttrs{Name: name, MTU: 1500}, MulticastSnooping: &off}
+		// a cable or a model switch's segment carries LLDP (01:80:c2:00:00:0e, group bit 14),
+		// which a Linux bridge keeps to itself by default; STP, pause and 802.1X stay its own
+		lldp := uint16(1 << 14)
+		br := &netlink.Bridge{LinkAttrs: netlink.LinkAttrs{Name: name, MTU: 1500}, MulticastSnooping: &off, GroupFwdMask: &lldp}
 		if err := h.LinkAdd(br); err != nil {
 			return err
 		}
@@ -443,6 +481,22 @@ func (s *Substrate) addEndpoint(ep *EndpointPlan) error {
 	s.ports[ep.Ref] = p
 	s.byDev[ep.Device] = p
 	s.mu.Unlock()
+	if ep.Switch != nil && s.plan.Factory() {
+		// the BMC's NIC speaks LLDP to the real switch it is cabled to (D78), as a BMC's does: its
+		// MAC, its port, its host's name, while it has carrier; in an estate with a factory
+		// fabric, whose day-0 tooling validates cabling by LLDP (a twin-configured estate's
+		// switches run no LLDP agent of the twin's choosing)
+		info := lldp.Info{ChassisMAC: ep.MAC, PortID: ep.Port.Name, PortDesc: "BMC management port", SysName: Hostname(ep.Dev),
+			SysDesc: "dc-twin model BMC (" + ep.Dev.ProfileName + ")", Station: true}
+		snd := lldp.NewSender(lldp.DefaultInterval, n.WriteFrame, func() (lldp.Info, bool) {
+			return info, atomic.LoadInt32(&n.carrier) == 1
+		})
+		s.wg.Add(1)
+		go func() {
+			defer s.wg.Done()
+			snd.Run(s.ctx)
+		}()
+	}
 	return nil
 }
 
@@ -864,7 +918,7 @@ func (s *Substrate) startSwitches() error {
 		if e.RelayImage != "" && sp.Config.Relaying() {
 			images = append(images, e.RelayImage)
 		}
-		for _, sc := range e.Sidecars {
+		for _, sc := range e.SidecarsOf(sp.Config) {
 			images = append(images, sc.Image)
 		}
 		for _, img := range images {
@@ -911,8 +965,24 @@ func (s *Substrate) startSwitches() error {
 			s.volumes = append(s.volumes, v)
 			vols, binds = append(vols, v), append(binds, v+":"+m.Path)
 		}
+		day0Binds, err := s.prepareDay0(sp)
+		if err != nil {
+			return err
+		}
+		binds = append(binds, day0Binds...)
 		sysctls := e.Sysctls
-		if len(sp.Config.Unnumbered) > 0 {
+		if sp.Config.Factory != nil {
+			// a factory switch: whatever the day-0 tool configures (unnumbered sessions over IPv6
+			// link-local addresses, RFC 5549), and its management interfaces answering in VRF mgmt
+			// from sockets in the default VRF (tcp_l3mdev_accept), as Cumulus's sshd and NVUE do
+			sysctls = map[string]string{}
+			for k, v := range e.Sysctls {
+				sysctls[k] = v
+			}
+			sysctls["net.ipv6.conf.all.disable_ipv6"], sysctls["net.ipv6.conf.default.disable_ipv6"] = "0", "0"
+			sysctls["net.ipv6.conf.all.forwarding"] = "1"
+			sysctls["net.ipv4.tcp_l3mdev_accept"], sysctls["net.ipv4.udp_l3mdev_accept"] = "1", "1"
+		} else if len(sp.Config.Unnumbered) > 0 {
 			// an unnumbered session runs over the port's IPv6 link-local address (RFC 5549)
 			sysctls = map[string]string{}
 			for k, v := range e.Sysctls {
@@ -922,7 +992,14 @@ func (s *Substrate) startSwitches() error {
 			sysctls["net.ipv6.conf.all.forwarding"] = "1"
 			sysctls["net.ipv6.conf.all.ignore_routes_with_linkdown"], sysctls["net.ipv6.conf.default.ignore_routes_with_linkdown"] = "1", "1"
 		}
-		c, err := d.Run(ctx, nos.Spec{Name: sp.Container, Image: sp.Image, Hostname: sp.Config.Hostname,
+		hostname := sp.Config.Hostname
+		if sp.Config.Factory != nil {
+			hostname = map[string]string{nos.SonicVS: nos.SonicFactoryHostname}[sp.NOS.Name]
+			if hostname == "" {
+				hostname = nvue.FactoryHostname
+			}
+		}
+		c, err := d.Run(ctx, nos.Spec{Name: sp.Container, Image: sp.Image, Hostname: hostname,
 			Entrypoint: nos.Entrypoint, Cmd: []string{script}, Labels: labels, Sysctls: sysctls,
 			Platform: e.Platform, Privileged: e.Privileged, Binds: binds})
 		if err != nil {
@@ -991,7 +1068,7 @@ func (s *Substrate) runBeside(sw *nosSwitch, role, image string, caps []string) 
 
 // startSidecars starts a switch's other containers (nos.Entry.Sidecars) once it has started.
 func (s *Substrate) startSidecars(sw *nosSwitch) error {
-	for _, sc := range sw.plan.NOS.Sidecars {
+	for _, sc := range sw.plan.NOS.SidecarsOf(sw.plan.Config) {
 		c, err := s.runBeside(sw, sc.Role, sc.Image, sc.CapAdd)
 		if err != nil {
 			return fmt.Errorf("switch %s: its %s container: %w", sw.plan.Device.Path, sc.Role, err)
@@ -1048,6 +1125,9 @@ func (s *Substrate) startNVUE(sw *nosSwitch) error {
 		return err
 	}
 	sw.nvuePassword = hex.EncodeToString(pw)
+	if sw.plan.Config.Factory != nil {
+		sw.nvuePassword = nvue.FactoryPassword
+	}
 	id := sw.c.ID
 	apply := func(ctx context.Context, f nvue.Files) (string, error) {
 		out, code, err := s.docker.Exec(ctx, id, append([]string{"sh", "-c", nvue.ApplyScript, "sh"}, nvue.ApplyArgs(f)...)...)
@@ -1075,21 +1155,46 @@ func (s *Substrate) startNVUE(sw *nosSwitch) error {
 			return
 		}
 		canonical := map[string]string{"revision.create": "network.config.revision", "revision.change": "network.config.change",
-			"revision.delete": "network.config.discard", "revision.apply": "network.config.apply"}[ev.Op]
+			"revision.refuse": "network.config.change",
+			"revision.delete": "network.config.discard", "revision.apply": "network.config.apply", "lldp.read": "network.lldp.read"}[ev.Op]
 		status := 200
-		if ev.Op == "revision.apply" && ev.State != "applied" {
+		switch {
+		case ev.Op == "revision.apply" && ev.State != "applied":
 			status = 500
+		case ev.Op == "revision.refuse":
+			status = 400 // refused by name: the schema's gap (18 — Measures)
 		}
 		target := "/nvue_v1/revision/" + ev.Revision
 		if ev.Path != "" {
-			target = "/nvue_v1" + ev.Path + "?rev=" + ev.Revision
+			target = "/nvue_v1" + ev.Path
+			if ev.Revision != "" {
+				target += "?rev=" + ev.Revision
+			}
 		}
 		user, addr, _ := strings.Cut(ev.Client, "@")
+		if sw.plan.Config.Factory != nil && ev.Op == "revision.apply" {
+			// a configuration a client applied: Cumulus's ZTP no longer runs on a switch someone
+			// configured by hand (docs/reviews/2026-11-11-day0-vendor-facts.md A)
+			go func() {
+				_ = s.docker.ExecDetached(s.ctx, id, "sh", "-c", "mkdir -p /run/dctwin && touch /run/dctwin/nvue-user-applied")
+			}()
+		}
 		s.eng.LogRead(engine.Request{Path: path, Canonical: canonical, Protocol: "nvue", Method: ev.Op, Target: target,
 			Source: schema.EventSource{Class: "stack", Principal: user, Address: addr}}, status)
 	})
 	ctx, cancel := context.WithTimeout(s.ctx, 5*time.Minute)
 	defer cancel()
+	if sw.plan.Config.Factory != nil {
+		sw.nvue.SetLocalToken(sw.plan.nvueToken)
+		// a factory switch: its NOS's factory configuration, and NVUE at every address of the
+		// switch's (its management lease in VRF mgmt, whatever the day-0 tool gives it) with
+		// Cumulus's factory credentials
+		if err := sw.nvue.ApplyFactory(ctx); err != nil {
+			return fmt.Errorf("switch %s: NVUE: %w", sw.plan.Device.Path, err)
+		}
+		s.log.Info("tap: NVUE applied the factory configuration", "switch", sw.plan.Device.Path)
+		return s.serveNVUE(sw, netip.IPv4Unspecified(), nvue.FactoryHostname)
+	}
 	if err := sw.nvue.ApplyStartup(ctx); err != nil {
 		return fmt.Errorf("switch %s: NVUE: %w", sw.plan.Device.Path, err)
 	}
@@ -1114,7 +1219,21 @@ func (s *Substrate) startNVUE(sw *nosSwitch) error {
 	if s.ca == nil || !lo.IsValid() {
 		return nil
 	}
-	cert, err := s.ca.Certificate(sw.plan.Config.Hostname, []string{sw.plan.Config.Hostname}, []string{lo.String()})
+	return s.serveNVUE(sw, lo, sw.plan.Config.Hostname)
+}
+
+// serveNVUE serves a switch's NVUE over TLS at an address in its namespace (the unspecified
+// address: every one, in every VRF, as tcp_l3mdev_accept lets a socket in the default VRF take a
+// connection that arrived in another), with a certificate the estate CA issued for name.
+func (s *Substrate) serveNVUE(sw *nosSwitch, lo netip.Addr, name string) error {
+	if s.ca == nil {
+		return nil
+	}
+	var ips []string
+	if !lo.IsUnspecified() {
+		ips = []string{lo.String()}
+	}
+	cert, err := s.ca.Certificate(name, []string{name}, ips)
 	if err != nil {
 		return err
 	}
@@ -1237,8 +1356,11 @@ func (s *Substrate) writeSwitchInputs() error {
 		}
 		if c.GNMI != nil && sw.sidecars["gnmi"] != nil {
 			in.GNMI = netip.AddrPortFrom(c.Loopback, nos.SonicGNMIPort).String()
-			gnmi = true
 		}
+		// the client certificate is the stack's whenever a switch has gNMI's TLS material: a
+		// factory switch's gnmi starts after it boots, after these inputs are written, and a
+		// day-0 tool reaches it at its management lease, not at an address listed here
+		gnmi = gnmi || c.GNMI != nil
 		if sw.nvueHTTP != nil {
 			in.NVUE, in.NVUEUser, in.NVUEPassword = netip.AddrPortFrom(c.Loopback, nvue.APIPort).String(), nvue.User, sw.nvuePassword
 			if c.Native {
@@ -1314,6 +1436,82 @@ func (s *Substrate) addCable(i int, lp *LinkPlan) error {
 	}
 	s.cables = append(s.cables, c)
 	return nil
+}
+
+// addMgmt cables a factory switch's eth0 onto the OOB network.
+func (s *Substrate) addMgmt(mp *MgmtPlan) error {
+	sw := s.byPath[mp.Switch.Device.Path]
+	if sw == nil {
+		return errors.New("its switch did not start")
+	}
+	mg := &mgmtPort{plan: mp}
+	var br string
+	if mp.Bridge != nil {
+		br = mp.Bridge.Name
+	} else {
+		br = mp.TwinIf
+		if err := s.addBridge(br); err != nil {
+			return err
+		}
+	}
+	type end struct {
+		twin, ifname string
+		ns           netns.NsHandle
+		mac          net.HardwareAddr
+	}
+	ends := []end{{mp.TwinIf + "a", nos.MgmtIf, sw.ns, mp.MAC}}
+	if mp.OOB != nil {
+		oob := s.byPath[mp.OOB.Device.Path]
+		if oob == nil {
+			return fmt.Errorf("its OOB switch %s did not start", mp.OOB.Device.Path)
+		}
+		ends = append(ends, end{mp.TwinIf + "b", mp.PeerIf, oob.ns, nil})
+	}
+	if err := s.nl(func(h *netlink.Handle) error {
+		brl, err := h.LinkByName(br)
+		if err != nil {
+			return err
+		}
+		for _, e := range ends {
+			v := &netlink.Veth{LinkAttrs: netlink.LinkAttrs{Name: e.twin, MTU: 1500}, PeerName: e.ifname, PeerNamespace: netlink.NsFd(int(e.ns))}
+			if e.mac != nil {
+				v.PeerHardwareAddr = e.mac
+			}
+			if err := h.LinkAdd(v); err != nil {
+				return err
+			}
+			l, err := h.LinkByName(e.twin)
+			if err != nil {
+				return err
+			}
+			if err := h.LinkSetMasterByIndex(l, brl.Attrs().Index); err != nil {
+				return err
+			}
+			mg.ends = append(mg.ends, e.twin)
+			mg.applied = append(mg.applied, 0)
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	if mp.OOB != nil && mp.OOB.NOS.SoftwareChecksum {
+		if err := txChecksumOff(sw.ns, nos.MgmtIf); err != nil {
+			return err
+		}
+	}
+	if err := sw.h.LinkSetHardwareAddr(mustLink(sw.h, nos.MgmtIf), mp.MAC); err != nil {
+		return fmt.Errorf("eth0's MAC: %w", err)
+	}
+	s.mgmt = append(s.mgmt, mg)
+	return nil
+}
+
+func mustLink(h *netlink.Handle, name string) netlink.Link {
+	l, err := h.LinkByName(name)
+	if err != nil {
+		return &netlink.Dummy{LinkAttrs: netlink.LinkAttrs{Name: name}}
+	}
+	return l
 }
 
 // txChecksumOff turns transmit checksum offload off on an interface in a network namespace
@@ -1422,6 +1620,13 @@ func (s *Substrate) waitSwitches(timeout time.Duration) error {
 	start := time.Now()
 	deadline := start.Add(timeout)
 	for _, sw := range s.switches {
+		if sw.plan.Config.Factory != nil {
+			// a factory switch comes up on its own time (its ONIE install, its boot) and is
+			// configured by the software under test, not the twin: up does not wait for it (D72)
+			s.wg.Add(1)
+			go s.factoryBringUp(sw)
+			continue
+		}
 		for {
 			logs, _ := s.docker.Logs(s.ctx, sw.c.ID)
 			if nos.Started(logs) {
@@ -1457,8 +1662,11 @@ func (s *Substrate) waitSwitches(timeout time.Duration) error {
 	if err := s.writeSwitchInputs(); err != nil {
 		return fmt.Errorf("stack-inputs/%s: %w", SwitchesFile, err)
 	}
+	if err := s.writeDay0Files(); err != nil {
+		return err
+	}
 	for _, sw := range s.switches {
-		if sw.relay == nil {
+		if sw.relay == nil || sw.plan.Config.Factory != nil {
 			continue
 		}
 		for {
@@ -1497,6 +1705,9 @@ func (s *Substrate) waitSwitches(timeout time.Duration) error {
 func (s *Substrate) unrouted() []string {
 	var out []string
 	for _, sw := range s.switches {
+		if sw.plan.Config.Factory != nil {
+			continue
+		}
 		for _, v := range sw.plan.Config.Vlans {
 			for _, srv := range v.Relay {
 				if _, err := sw.h.RouteGet(srv.AsSlice()); err != nil {
@@ -1578,10 +1789,88 @@ func (s *Substrate) syncLinks() {
 			s.log.Warn("tap: link state", "port", h.plan.Ref, "err", err)
 		}
 	}
+	s.syncDay0Faults()
 	for _, c := range s.cables {
-		want := s.eng.PortUp(c.plan.Link.A) && s.eng.PortUp(c.plan.Link.B)
+		want := s.eng.PortUp(c.plan.Link.A) && s.eng.PortUp(c.plan.Link.B) && s.cableFaultUp(c)
 		s.setLink(c.a, want, &c.appliedA)
 		s.setLink(c.b, want, &c.appliedB)
+	}
+	s.syncAsBuilt()
+	for _, mg := range s.mgmt {
+		want := s.eng.PortUp(mg.plan.Port) && s.eng.PortUp(mg.plan.Peer) && s.mgmtFaultUp(mg.plan)
+		for i, e := range mg.ends {
+			s.setLink(e, want, &mg.applied[i])
+		}
+	}
+}
+
+// syncAsBuilt wires every fabric cable as built: each cable end meets the port the model says
+// its cable reaches now (engine.AsBuiltPeer), normally its own far end, another cable's while a
+// cable-swap fault holds (generic/cabling, the design unchanged). Each as-built pair of ends takes
+// the middle of one of their cables, and the ends' veths move there; a NOS sees its port's
+// neighbour change as on a miswired floor, its LLDP and BGP with it.
+func (s *Substrate) syncAsBuilt() {
+	type end struct {
+		c    *cable
+		veth string
+	}
+	ends := map[*model.Port]end{}
+	for _, c := range s.cables {
+		ends[c.plan.Link.A] = end{c, c.a}
+		ends[c.plan.Link.B] = end{c, c.b}
+	}
+	assigned := map[*model.Port]string{} // port -> the middle its veth belongs in
+	used := map[string]bool{}            // middles a pair holds
+	for _, c := range s.cables {
+		for _, p := range []*model.Port{c.plan.Link.A, c.plan.Link.B} {
+			if _, done := assigned[p]; done {
+				continue
+			}
+			peer := s.eng.AsBuiltPeer(p)
+			pe, ok := ends[peer]
+			if !ok {
+				continue
+			}
+			if _, taken := assigned[peer]; taken {
+				continue
+			}
+			// the pair takes its first end's cable's middle, else its other end's: two cables
+			// swapped are two pairs in their two middles
+			br := ends[p].c.br
+			if used[br] {
+				br = pe.c.br
+			}
+			if used[br] {
+				continue
+			}
+			used[br] = true
+			assigned[p], assigned[peer] = br, br
+		}
+	}
+	for p, br := range assigned {
+		e := ends[p]
+		if s.master[e.veth] == br || (s.master[e.veth] == "" && br == e.c.br) {
+			continue
+		}
+		if err := s.nl(func(h *netlink.Handle) error {
+			l, err := h.LinkByName(e.veth)
+			if err != nil {
+				return err
+			}
+			b, err := h.LinkByName(br)
+			if err != nil {
+				return err
+			}
+			return h.LinkSetMasterByIndex(l, b.Attrs().Index)
+		}); err != nil {
+			s.log.Warn("tap: as-built cabling", "port", p.Ref, "err", err)
+			continue
+		}
+		if s.master == nil {
+			s.master = map[string]string{}
+		}
+		s.master[e.veth] = br
+		s.log.Warn("tap: cable as built (generic/cabling)", "port", p.Ref, "middle", br)
 	}
 }
 

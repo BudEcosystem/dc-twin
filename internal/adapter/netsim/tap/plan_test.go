@@ -283,6 +283,43 @@ func TestPlanNOSMemory(t *testing.T) {
 	}
 }
 
+// spec.adapters.network.nos.cumulusVersion is every generic/nvue-frr switch's build, which its
+// NVUE's grammar and ZTP's version follow; unset, the build is NVUE's default.
+func TestPlanCumulusVersion(t *testing.T) {
+	est := loadEstate(t, "tap-nvue.yaml")
+	m := compileModel(t, est)
+	p, err := BuildPlan(m, est, nil, "aarch64")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, sp := range p.Switches {
+		if sp.Config.Build != "" || sp.NOS.SwitchVersion(sp.Config) != sp.NOS.FactoryVersion() {
+			t.Errorf("%s: build %q with no version set", sp.Device.Path, sp.Config.Build)
+		}
+	}
+	est.Spec.Adapters.Network.NOS.CumulusVersion = "5.18.3"
+	if p, err = BuildPlan(m, est, nil, "aarch64"); err != nil {
+		t.Fatal(err)
+	}
+	n := 0
+	for _, sp := range p.Switches {
+		if sp.NOS.Name != nos.NVUEFRR {
+			continue
+		}
+		n++
+		if sp.Config.Build != "Cumulus Linux 5.18.3" || sp.NOS.SwitchVersion(sp.Config) != "5.18.3" {
+			t.Errorf("%s: build %q", sp.Device.Path, sp.Config.Build)
+		}
+	}
+	if n == 0 {
+		t.Fatalf("no generic/nvue-frr switch in tap-nvue.yaml")
+	}
+	est.Spec.Adapters.Network.NOS.CumulusVersion = "4.4"
+	if _, err = BuildPlan(m, est, nil, "aarch64"); err == nil || !strings.Contains(err.Error(), "cumulusVersion") {
+		t.Fatalf("4.4: %v", err)
+	}
+}
+
 // Every device the kernel probe creates has a name the kernel takes (IFNAMSIZ: 15 characters):
 // a longer one fails with "Attribute failed policy validation", which read as a kernel without
 // VRF devices on every host.

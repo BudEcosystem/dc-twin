@@ -1,0 +1,23 @@
+apiVersion: dc-twin/v1alpha1
+kind: Stack
+metadata: { name: reference-day0, version: 0.1.0 }
+spec:
+  title: dc-twin reference day-0 tooling — ZTP as a site runs it (Kea, an HTTP server, per-serial scripts)
+  components:
+    kea:
+      obtain: { source: "https://www.isc.org/kea/", ref: "2.6", licence: MPL-2.0 }
+      install: [{ script: "python3 stacks/reference-day0/render.py <state>/stack-inputs/day0 <out> --server <addr>; kea-dhcp4 -c <out>/kea-dhcp4.json" }]
+      attach: [management]
+      requires:
+        - { capability: "dhcp/relay-giaddr", anyOf: ["dhcp/relay-option-82", "dhcp/relay-giaddr"], gate: install }
+    ztp-server:
+      obtain: { source: "https://github.com/BudEcosystem/dc-twin", ref: "in-tree: stacks/reference-day0", licence: Apache-2.0 }
+      install: [{ script: "python3 -m http.server --directory <out>/www 8080" }]
+      attach: [management]
+      requires:
+        - { capability: "switch/nvue" }
+  critic:
+    policy: policy.yaml
+  isNot:
+    - "A reference, not a product: it renders Cumulus ZTP scripts (nv set … ; nv config apply) and SONiC ZTP documents (configdb-json) from stack-inputs/day0/plan.json, as a site's own generator would, and serves them; it does no inventory, IPAM or change control of its own."
+    - "One script per serial: the HTTP server serves www/ztp/<serial>.sh; Kea hands every Cumulus switch one URL (option 239) whose server answers by the CUMULUS-SERIAL header when render.py --dispatch is used, or each switch its own URL by its MAC's reservation otherwise."

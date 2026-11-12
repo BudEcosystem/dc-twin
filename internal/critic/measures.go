@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/BudEcosystem/dc-twin/internal/schema"
 )
 
 // measureDefs are the built-in measures (17 — Measures): unit and what they are per.
@@ -30,6 +32,17 @@ var measureDefs = map[string]struct{ per, unit, dim string }{
 	"sessions.leaked":                  {"run", "sessions", "hygiene"},
 	"capacity.lost":                    {"run", "accelerator-s", "correctness"},
 	"ingest.time":                      {"device", "s", "timeliness"},
+	// day 0 (18 — Measures): per factory switch, from the day-0 observer's first look at it
+	"day0.toLease":         {"device", "s", "timeliness"},
+	"day0.toZTP":           {"device", "s", "timeliness"},
+	"day0.toZTPDone":       {"device", "s", "timeliness"},
+	"day0.toConverged":     {"device", "s", "timeliness"},
+	"day0.applies":         {"device", "requests", "restraint"},
+	"day0.appliesFailed":   {"device", "requests", "correctness"},
+	"day0.ztpFailures":     {"device", "failures", "correctness"},
+	"day0.convergedMedian": {"run", "s", "timeliness"},
+	"day0.convergedMax":    {"run", "s", "timeliness"},
+	"day0.refused":         {"run", "requests", "correctness"},
 }
 
 func knownMeasure(name string) bool {
@@ -129,6 +142,101 @@ func (jd *judge) measures() {
 	}
 	jd.measure("capacity.lost", "", jd.capacityLost())
 	jd.ingestTimes()
+	jd.day0Measures()
+}
+
+// day0Measures are day 0's measures (18 — Measures), from the NOS observer's state events (D72,
+// policies/day0/fabric.yaml says which): per factory switch, the time from the observer's first
+// day-0 observation of it (its first look after the switch powers on) to its first management
+// lease, to its ZTP running, to ZTP done and to converged; the configuration applies the stack
+// made to it and those that failed; and its ZTP failures. For the fabric: the median and the
+// maximum time to converged. For the run: the configuration changes the switches' NVUE refused by
+// name, a gap of the twin's schema reported against the twin, not the stack. A run with no
+// day-0 observation has none of them.
+func (jd *judge) day0Measures() {
+	h := jd.h
+	type sw struct {
+		first                          time.Time
+		lease, ztp, ztpDone, converged *Measure
+		applies, failed, ztpFailures   int
+	}
+	switches := map[string]*sw{}
+	var order []string
+	at := func(s *sw, e schema.Event, name string) *Measure {
+		return &Measure{Name: name, Value: h.time(e).Sub(s.first).Seconds(), Witness: []uint64{e.Seq}}
+	}
+	refused := 0
+	for _, e := range h.Events {
+		if e.Kind == "state" && e.State != nil && e.Source.Class == "observer" && (e.State.Field == "day0.phase" || e.State.Field == "mgmt.lease") {
+			dev := h.DevicePath(e.Path)
+			s := switches[dev]
+			if s == nil {
+				if e.State.Field != "day0.phase" {
+					continue
+				}
+				s = &sw{first: h.time(e)}
+				switches[dev] = s
+				order = append(order, dev)
+			}
+			to := fmt.Sprint(e.State.To)
+			switch {
+			case e.State.Field == "mgmt.lease" && to != "" && to != "<nil>" && s.lease == nil:
+				s.lease = at(s, e, "day0.toLease")
+			case e.State.Field == "day0.phase" && to == "ztp-running" && s.ztp == nil:
+				s.ztp = at(s, e, "day0.toZTP")
+			case e.State.Field == "day0.phase" && to == "ztp-done" && s.ztpDone == nil:
+				s.ztpDone = at(s, e, "day0.toZTPDone")
+			case e.State.Field == "day0.phase" && to == "ztp-failed":
+				s.ztpFailures++
+			case e.State.Field == "day0.phase" && to == "converged" && s.converged == nil:
+				s.converged = at(s, e, "day0.toConverged")
+			}
+			continue
+		}
+		if !fromStack(e) || e.Request == nil || !strings.HasPrefix(e.Request.Canonical, "network.config.") {
+			continue
+		}
+		if e.Request.Method == "revision.refuse" {
+			refused++
+			continue
+		}
+		if e.Request.Canonical == "network.config.apply" {
+			if s := switches[h.DevicePath(e.Path)]; s != nil {
+				s.applies++
+				if e.Request.Status >= 400 {
+					s.failed++
+				}
+			}
+		}
+	}
+	if len(switches) == 0 {
+		return
+	}
+	var conv []float64
+	for _, dev := range order {
+		s := switches[dev]
+		for _, m := range []*Measure{s.lease, s.ztp, s.ztpDone, s.converged} {
+			if m != nil {
+				jd.measure(m.Name, dev, m.Value, m.Witness...)
+			}
+		}
+		if s.converged != nil {
+			conv = append(conv, s.converged.Value)
+		}
+		jd.measure("day0.applies", dev, float64(s.applies))
+		jd.measure("day0.appliesFailed", dev, float64(s.failed))
+		jd.measure("day0.ztpFailures", dev, float64(s.ztpFailures))
+	}
+	if len(conv) > 0 {
+		sort.Float64s(conv)
+		med := conv[len(conv)/2]
+		if len(conv)%2 == 0 {
+			med = (conv[len(conv)/2-1] + conv[len(conv)/2]) / 2
+		}
+		jd.measure("day0.convergedMedian", "", med)
+		jd.measure("day0.convergedMax", "", conv[len(conv)-1])
+	}
+	jd.measure("day0.refused", "", float64(refused))
 }
 
 // capacityLost integrates, over the run, the accelerators of every device that was off, without

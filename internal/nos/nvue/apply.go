@@ -10,8 +10,11 @@ import (
 // switch's own tools (ifreload -a, which creates, changes and removes interfaces to match;
 // frr-reload.py, which applies the difference to the running FRR, after the VRFs' own stanzas
 // through vtysh), restart dhcrelay when its command line changed, and replace the twin's
-// nftables tables with the ACLs' (nft -f, atomically). It prints what each printed and exits non-zero when one failed; ifupdown2
-// carries on past an interface it cannot create, as it does on a switch.
+// nftables tables with the ACLs' (nft -f, atomically), then the system's files, accounts and
+// daemons (SystemScript: hostname, time zone, users, NTP, DNS, syslog, LLDP, the login messages,
+// SNMP). It prints what each
+// printed and exits non-zero when one failed; ifupdown2 carries on past an interface it cannot
+// create, as it does on a switch.
 const ApplyScript = `set -u
 umask 022
 mkdir -p /run/network /etc/network/interfaces.d
@@ -47,8 +50,13 @@ fi
 # crashes bgpd 10 in bgp_evpn_local_vni_add)
 new_as=$(awk '/^router bgp [0-9]+$/ { print $3; exit }' /etc/frr/frr.conf)
 old_as=$(vtysh -c 'show running-config' 2>/dev/null | awk '/^router bgp [0-9]+$/ { print $3; exit }')
-if [ -n "$old_as" ] && [ "$old_as" != "$new_as" ]; then
-  echo "== router bgp $old_as is now ${new_as:-none}: FRR restarts"
+if [ -n "$old_as" ] && [ -z "$new_as" ]; then
+  # BGP removed (a factory reset, a configuration without it): FRR's own command removes it;
+  # a restart is for an AS that changes, which frr-reload cannot do
+  echo "== router bgp $old_as removed"
+  vtysh -c 'configure terminal' -c "no router bgp $old_as" 2>&1 || rc=1
+elif [ -n "$old_as" ] && [ "$old_as" != "$new_as" ]; then
+  echo "== router bgp $old_as is now $new_as: FRR restarts"
   /usr/lib/frr/frrinit.sh restart 2>&1 || rc=1
 fi
 echo "== frr-reload.py --reload"
@@ -87,7 +95,7 @@ elif grep -q 'jump acl_' /run/dctwin-acl.nft; then
 else
   echo "no ACLs"
 fi
-exit $rc
+` + SystemScript + `exit $rc
 `
 
 // VRFRemovals is, from the new VRF stanzas (its first file) and the running ones (its second),
@@ -109,7 +117,9 @@ END { if (m) { print "(errors)"; for (i = 1; i <= m; i++) print e[i]; print "(la
 
 // ApplyArgs are ApplyScript's arguments for rendered files.
 func ApplyArgs(f Files) []string {
-	return []string{f.Interfaces, f.FRR, strings.Join(f.Relay, " "), f.ACL, strings.Join(f.Recreate, " ")}
+	y := f.System
+	return []string{f.Interfaces, f.FRR, strings.Join(f.Relay, " "), f.ACL, strings.Join(f.Recreate, " "),
+		y.Hostname, y.Timezone, y.Users, y.NTP, y.NTPVRF, y.DNS, y.Syslog, y.LLDP, y.Banner, y.MOTD, y.SNMP}
 }
 
 // vniVLANs reads a rendered interfaces file's VXLAN devices: VLAN -> VNI.

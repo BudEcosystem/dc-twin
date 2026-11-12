@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/netip"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -37,6 +38,17 @@ const (
 	kNeighbor // a BGP neighbour: an address, or an interface for an unnumbered session
 	kMatch    // a prefix list's match: an address with its length, or "any"
 	kAddrOrPrefix
+	kIfAddr // an interface's address: an address with its length, or dhcp (Cumulus's eth0)
+	kEnum   // one of the node's enum values
+	kUser   // a Linux user name (system aaa user)
+	kTZ     // a time zone's name in the tz database (US/Eastern, Etc/UTC)
+	kSpeed  // a port's speed: 400G, 100M, auto
+	// kBreakout is a port's breakout: <n>x, optionally with the lanes' speed (4x, 4x25G), or
+	// disabled, loopback
+	kBreakout
+	kHost // a server: an IP address or a DNS name
+	// kToggle is a switch as 5.15 spells it: enabled or disabled
+	kToggle
 )
 
 // node is the schema: children by name ("*" for any name: an interface, a VRF, an address), or a
@@ -46,13 +58,34 @@ type node struct {
 	leaf kind
 	// key, for "*": what the names must be
 	key kind
+	// enum is what a kEnum leaf may be
+	enum []string
+	// choice: the children are alternatives with nothing below them, one at a time, as NVUE's
+	// JSON writes an enumeration it keeps as an object (link state {"up": {}}): setting one
+	// removes the others (withChoices)
+	choice bool
+	// since and removed are the releases that introduced and removed the node, and instead what
+	// to use where it is refused (version.go's gate); zero: every release has it
+	since, removed Version
+	instead        string
+	// rename, for a kToggle leaf (5.15's state), is the 5.14 switch it replaces (enable), which
+	// normalize renders it as
+	rename string
 }
 
 func obj(kids map[string]*node) *node { return &node{kids: kids} }
 func any_(child *node, key kind) *node {
 	return &node{kids: map[string]*node{"*": child}, key: key}
 }
-func lf(k kind) *node { return &node{leaf: k} }
+func lf(k kind) *node              { return &node{leaf: k} }
+func oneOf(values ...string) *node { return &node{leaf: kEnum, enum: values} }
+func choiceOf(names ...string) *node {
+	n := &node{kids: map[string]*node{}, choice: true}
+	for _, v := range names {
+		n.kids[v] = empty
+	}
+	return n
+}
 
 var empty = obj(map[string]*node{})
 
@@ -77,7 +110,7 @@ var policy = obj(map[string]*node{
 
 // a BGP peer's or peer group's address family
 func peerAF() *node {
-	return obj(with(enable, map[string]*node{
+	return obj(toggle(map[string]*node{
 		"policy":                    policy,
 		"default-route-origination": obj(enable),
 		"aspath":                    obj(map[string]*node{"allow-my-asn": obj(with(enable, map[string]*node{"occurrences": lf(kInt), "origin": lf(kOnOff)}))}),
@@ -99,14 +132,25 @@ var peerCommon = map[string]*node{
 		"connection-retry": lf(kInt), "hold": lf(kInt), "keepalive": lf(kInt), "route-advertisement": lf(kString),
 	}),
 	"address-family": peerAFs,
+	// BFD for the session: on (enable on to 5.14, state enabled from 5.15), its timers, or a
+	// profile of router bfd's. The profile form before 5.15 is UNCONFIRMED; it is accepted in
+	// every release
+	"bfd": obj(toggle(map[string]*node{
+		"profile":           lf(kString),
+		"detect-multiplier": lf(kInt),
+		"min-rx-interval":   lf(kInt),
+		"min-tx-interval":   lf(kInt),
+	})),
 }
 
 // a VRF's BGP address family
 func vrfAF() *node {
-	return obj(with(enable, map[string]*node{
-		"redistribute": obj(map[string]*node{"connected": obj(enable), "static": obj(enable)}),
-		"route-export": obj(map[string]*node{"to-evpn": obj(enable)}),
-		"route-import": obj(map[string]*node{"from-vrf": obj(with(enable, map[string]*node{
+	redistribute := func() *node { return obj(toggle(map[string]*node{"route-map": lf(kString)})) }
+	return obj(toggle(map[string]*node{
+		// static's switch is renamed as connected's is (5.15 names connected; static UNCONFIRMED)
+		"redistribute": obj(map[string]*node{"connected": redistribute(), "static": redistribute()}),
+		"route-export": obj(map[string]*node{"to-evpn": obj(toggle(nil))}),
+		"route-import": obj(map[string]*node{"from-vrf": obj(toggle(map[string]*node{
 			"list": any_(empty, kString), "route-map": lf(kString),
 		}))}),
 		"multipaths": obj(map[string]*node{"ebgp": lf(kInt), "ibgp": lf(kInt)}),
@@ -116,19 +160,144 @@ func vrfAF() *node {
 
 var via = any_(obj(map[string]*node{"type": lf(kString)}), kString)
 
+// link is an interface's physical layer (`nv set interface <swp> link …`, Cumulus Linux 5.14's
+// Switch Port Attributes, docs/reviews/2026-11-11-day0-vendor-facts.md C.3): its admin state and
+// MTU, which ifupdown2 applies, and its speed, auto-negotiation and breakout, which are accepted
+// and recorded (and read back by `nv show interface`) and do nothing, because a port of the twin
+// is a TAP or a veth with no PHY to set and no lanes to split (18 — Fidelity). A breakout's
+// subports (swp1s0 to swp1s3) are therefore never created: an interface named after one is
+// refused at render, saying so.
+var link = obj(map[string]*node{
+	"state":          choiceOf("up", "down"),
+	"mtu":            lf(kInt),
+	"speed":          lf(kSpeed),
+	"auto-negotiate": lf(kOnOff),
+	"breakout":       lf(kBreakout),
+})
+
+// Roles are the roles of `nv set system aaa user <name> role` (Cumulus Linux 5.14's User
+// Accounts page, vendor facts C.3), with the Linux groups each gives its user, as Cumulus maps
+// them on that page: nvshow lets a user read through NVUE, nvset stage changes, nvapply apply
+// them; a system administrator is also in sudo, as the factory user cumulus is (vendor facts B).
+// The groups are read from the documentation, not from a switch, and are UNCONFIRMED. A role
+// `system aaa role` defines from classes maps to groups the same way (system.go's roleGroups).
+var Roles = map[string][]string{
+	"system-admin": {"sudo", "nvshow", "nvset", "nvapply"},
+	"nvue-admin":   {"nvshow", "nvset", "nvapply"},
+	"nvue-monitor": {"nvshow"},
+}
+
+// DefaultRole is a user's role when its configuration names none: the least, since what NVUE
+// gives a user with no role is not documented (UNCONFIRMED).
+const DefaultRole = "nvue-monitor"
+
 // schema is the part of NVUE's object model the twin emulates: what Cumulus Linux's fabric
-// switches are configured with (D56), and what NICo's DPU agent writes to a BlueField's HBN (its
-// FNN and Ethernet Virtualizer templates, D71).
+// switches are configured with (D56), what NICo's DPU agent writes to a BlueField's HBN (its
+// FNN and Ethernet Virtualizer templates, D71), and what NVIDIA's own day-0 tool configures (its
+// net-configurator's spine and leaf templates, nc-v8.0.0, Cumulus 5.18). It holds the grammar
+// before Cumulus Linux 5.15 and the grammar since (version.go): a node one release does not have
+// is gated (since, until), and refused there by name.
 var schema = obj(map[string]*node{
+	// system: the switch's identity, users, time, API and logging, as a day-0 push sets them
+	// (18 — The first push; vendor facts C.3). timezone is the form before Cumulus Linux 5.15,
+	// date-time timezone the form since (and, the emulation has always taken, before: the
+	// release it appeared in is UNCONFIRMED); the second wins.
 	"system": obj(map[string]*node{
-		"hostname":      lf(kString),
-		"api":           obj(map[string]*node{"listening-address": any_(empty, kAddr)}),
-		"config":        obj(map[string]*node{"snippet": obj(map[string]*node{"frr.conf": lf(kString)})}),
+		"hostname":  lf(kString),
+		"timezone":  until(v515, "system date-time timezone", lf(kTZ)),
+		"date-time": obj(map[string]*node{"timezone": lf(kTZ)}),
+		"aaa": obj(map[string]*node{
+			"user": any_(obj(with(state, map[string]*node{
+				"password":        lf(kString),
+				"hashed-password": lf(kString),
+				// a built-in role (Roles) or one `system aaa role` defines: Render refuses
+				// any other
+				"role":      lf(kString),
+				"full-name": lf(kString),
+			})), kUser),
+			// NVUE's role-based access (net-configurator restates Cumulus's built-in classes and
+			// roles with them): a class allows or denies command paths with a permission, a role
+			// is classes. Recorded, and mapped to the Linux groups the switch authorises by
+			// (renderSystem's roleGroups)
+			"class": any_(obj(map[string]*node{
+				"action":       oneOf("allow", "deny"),
+				"command-path": any_(obj(map[string]*node{"permission": oneOf("ro", "rw", "act", "all")}), kString),
+			}), kString),
+			"role": any_(obj(map[string]*node{"class": any_(empty, kString)}), kString),
+			// the order PAM tries the methods in: recorded; the twin's switch has local
+			// accounts only
+			"authentication": obj(map[string]*node{"order": any_(empty, kString)}),
+		}),
+		// state is recorded: NVUE's REST API is the twin's and keeps serving (disabling it would
+		// cut off the client that disabled it, which the twin does not emulate)
+		"api": obj(with(state, map[string]*node{"listening-address": any_(empty, kAddr)})),
+		// 5.13's form (vendor facts C.3); the older service syslog <vrf> is not emulated
+		"syslog": obj(map[string]*node{"server": any_(obj(map[string]*node{
+			"port":     lf(kInt),
+			"protocol": oneOf("udp", "tcp"),
+			"vrf":      lf(kString),
+		}), kHost)}),
+		"config": obj(map[string]*node{
+			"snippet": obj(map[string]*node{"frr.conf": lf(kString)}),
+			// auto-save (5.9, vendor facts C.2): recorded; an apply does not save, `nv config
+			// save` does
+			"auto-save": since(v59, "nv config save after an apply", obj(toggle(nil))),
+		}),
 		"reflexive-acl": obj(enable),
+		// 5.15's NTP, DNS and LLDP: service ntp <vrf> server, service dns <vrf> server and
+		// service lldp before (normalize renders them as those). association-type pool is
+		// chrony's pool
+		"ntp": since(v515, "service ntp <vrf> server <host>", obj(map[string]*node{
+			"server": any_(obj(map[string]*node{"iburst": lf(kOnOff), "association-type": oneOf("server", "pool")}), kHost),
+			"vrf":    lf(kString),
+		})),
+		"dns":  since(v515, "service dns <vrf> server <address>", obj(map[string]*node{"server": any_(empty, kAddr)})),
+		"lldp": since(v515, "service lldp", lldp),
+		// the login banners, sshd's (Banner /etc/issue.net, before the password) and the message
+		// of the day after a login (/etc/motd)
+		"message": obj(map[string]*node{"pre-login": lf(kString), "post-login": lf(kString)}),
+		// state is recorded: the switch's sshd keeps running (it is how the twin's own day-0
+		// checks reach a factory switch)
+		"ssh-server": obj(state),
+		// SNMP (system snmp-server since 5.11): snmpd, read-only communities by source prefix,
+		// on the listening addresses (localhost, or an address)
+		"snmp-server": since(v511, "no SNMP is configured through NVUE", obj(toggle(map[string]*node{
+			"listening-address":  any_(obj(map[string]*node{"vrf": lf(kString)}), kHost),
+			"readonly-community": any_(obj(map[string]*node{"access": any_(empty, kMatch)}), kString),
+		}))),
+		// What Just Happened: Spectrum's ASIC reports the packets it drops and why. Recorded:
+		// the twin forwards in the kernel, with no ASIC to report from (18 — Fidelity)
+		"wjh": obj(with(state, map[string]*node{
+			"channel": any_(obj(map[string]*node{"trigger": any_(empty, kString)}), kString),
+		})),
 	}),
 	"router": obj(map[string]*node{
-		"bgp": obj(map[string]*node{"enable": lf(kOnOff), "autonomous-system": lf(kInt), "router-id": lf(kAddr)}),
-		"vrr": obj(enable),
+		"bgp": obj(toggle(map[string]*node{
+			"autonomous-system": lf(kInt),
+			"router-id":         lf(kAddr),
+			// graceful restart, rendered in the default VRF's router bgp: full is FRR's bgp
+			// graceful-restart, helper-only FRR's default, off bgp graceful-restart-disable
+			"graceful-restart": obj(map[string]*node{
+				"mode":                         oneOf("full", "helper-only", "off"),
+				"restart-time":                 lf(kInt),
+				"path-selection-deferral-time": lf(kInt),
+				"stale-routes-time":            lf(kInt),
+			}),
+		})),
+		"vrr": obj(toggle(nil)),
+		// BFD's profiles (FRR's bfd profile), which a peer's bfd profile names. The switch is
+		// renamed in 5.15 as router bgp's is (UNCONFIRMED for bfd)
+		"bfd": obj(toggle(map[string]*node{
+			"profile": any_(obj(map[string]*node{
+				"detect-multiplier": lf(kInt),
+				"min-rx-interval":   lf(kInt),
+				"min-tx-interval":   lf(kInt),
+			}), kString),
+		})),
+		// PTM's check of the cabling against topology.dot, as NVUE controls it: FRR's
+		// check-link-state hook only (vendor facts B). Accepted and recorded; the twin runs no
+		// ptmd (18 — LLDP and cabling)
+		"ptm": obj(enable),
 		"policy": obj(map[string]*node{
 			"community-list": any_(obj(map[string]*node{"rule": any_(obj(map[string]*node{
 				"action": lf(kString), "community": any_(empty, kString),
@@ -144,7 +313,8 @@ var schema = obj(map[string]*node{
 				}), kInt),
 			}), kString),
 			"route-map": any_(obj(map[string]*node{"rule": any_(obj(map[string]*node{
-				"action": obj(map[string]*node{"permit": empty, "deny": empty}),
+				"action":      choiceOf("permit", "deny"),
+				"description": lf(kString),
 				"match": obj(map[string]*node{
 					"type": lf(kString), "ip-prefix-list": lf(kString), "ip-prefix-len": lf(kInt),
 					"community-list": lf(kString), "evpn-route-type": lf(kString), "interface": lf(kString),
@@ -152,6 +322,9 @@ var schema = obj(map[string]*node{
 				}),
 				"set": obj(map[string]*node{
 					"community": any_(empty, kString), "large-community": any_(empty, kString), "tag": lf(kInt),
+					// the link bandwidth extended community (weighted ECMP): a number, or
+					// cumulative, multipaths and their -non-transitive forms
+					"ext-community-bw": lf(kString),
 				}),
 			}), kInt)}), kString),
 		}),
@@ -160,16 +333,33 @@ var schema = obj(map[string]*node{
 		"type":        lf(kString),
 		"description": lf(kString),
 		"vlan":        lf(kInt),
-		"link":        obj(map[string]*node{"state": obj(map[string]*node{"up": empty, "down": empty}), "mtu": lf(kInt)}),
-		"ip": obj(map[string]*node{
-			"address": any_(empty, kPrefix),
+		"link":        link,
+		// to 5.14 an interface's addresses, gateway, VRF and VRR are under ip; from 5.15 under
+		// ipv4 and ipv6, with its VRF at interface <id> vrf and VRR's up|down at vrr-state
+		"ip": until(v515, "ipv4 (address, gateway, vrr), ipv6, and interface <id> vrf", obj(map[string]*node{
+			"address": any_(empty, kIfAddr),
+			"gateway": any_(empty, kAddr),
 			"vrf":     lf(kString),
 			"vrr": obj(with(enable, map[string]*node{
 				"address":     any_(empty, kPrefix),
 				"mac-address": lf(kString),
-				"state":       obj(map[string]*node{"up": empty, "down": empty}),
+				"state":       choiceOf("up", "down"),
 			})),
-		}),
+		})),
+		"ipv4": since(v515, "ip", obj(map[string]*node{
+			"address": any_(empty, kIfAddr),
+			"gateway": any_(empty, kAddr),
+			"vrr": obj(toggle(map[string]*node{
+				"address":     any_(empty, kPrefix),
+				"mac-address": lf(kString),
+				"vrr-state":   choiceOf("up", "down"),
+			})),
+		})),
+		"ipv6": since(v515, "ip", obj(map[string]*node{
+			"address": any_(empty, kPrefix),
+			"gateway": any_(empty, kAddr),
+		})),
+		"vrf":    since(v515, "ip vrf", lf(kString)),
 		"bridge": obj(map[string]*node{"domain": any_(obj(map[string]*node{"access": lf(kInt)}), kString)}),
 		"acl": any_(obj(map[string]*node{
 			"inbound":  obj(map[string]*node{"control-plane": empty}),
@@ -180,11 +370,10 @@ var schema = obj(map[string]*node{
 		"vlan": any_(obj(map[string]*node{"vni": any_(empty, kInt)}), kInt),
 	}), kString)}),
 	"vrf": any_(obj(map[string]*node{
-		"evpn":     obj(with(enable, map[string]*node{"vni": any_(empty, kInt)})),
+		"evpn":     obj(toggle(map[string]*node{"vni": any_(empty, kInt)})),
 		"loopback": obj(map[string]*node{"ip": obj(map[string]*node{"address": any_(empty, kPrefix)})}),
 		"router": obj(map[string]*node{
-			"bgp": obj(map[string]*node{
-				"enable":            lf(kOnOff),
+			"bgp": obj(toggle(map[string]*node{
 				"autonomous-system": lf(kInt),
 				"router-id":         lf(kAddr),
 				"rd":                lf(kString),
@@ -196,14 +385,16 @@ var schema = obj(map[string]*node{
 				"address-family": obj(map[string]*node{
 					"ipv4-unicast": vrfAF(),
 					"ipv6-unicast": vrfAF(),
-					"l2vpn-evpn":   obj(enable),
+					"l2vpn-evpn":   obj(toggle(nil)),
 				}),
+				// aspath-ignore is on|off to 5.14 and enabled|disabled from 5.15 (net-configurator's
+				// templates), as every on|off leaf is taken there
 				"path-selection": obj(map[string]*node{"multipath": obj(map[string]*node{
 					"aspath-ignore": lf(kOnOff), "bandwidth": lf(kString),
 				})}),
 				"route-export": obj(map[string]*node{"to-evpn": obj(map[string]*node{"route-target": any_(empty, kString)})}),
 				"route-import": obj(map[string]*node{"from-evpn": obj(map[string]*node{"route-target": any_(empty, kString)})}),
-			}),
+			})),
 			"static": any_(obj(map[string]*node{
 				"address-family": lf(kString),
 				"via":            via,
@@ -215,20 +406,37 @@ var schema = obj(map[string]*node{
 			}),
 		}),
 	}), kString),
-	"nve": obj(map[string]*node{"vxlan": obj(map[string]*node{
-		"enable":          lf(kOnOff),
+	"nve": obj(map[string]*node{"vxlan": obj(toggle(map[string]*node{
 		"source":          obj(map[string]*node{"address": lf(kAddr)}),
 		"arp-nd-suppress": lf(kOnOff),
-	})}),
-	"evpn": obj(enable),
-	"service": obj(map[string]*node{"dhcp-relay": any_(obj(map[string]*node{
-		"server":    any_(empty, kAddr),
-		"interface": any_(empty, kString),
-	}), kString)}),
+	}))}),
+	"evpn": obj(toggle(nil)),
+	"service": obj(map[string]*node{
+		"dhcp-relay": any_(obj(map[string]*node{
+			"server":    any_(empty, kAddr),
+			"interface": any_(empty, kString),
+		}), kString),
+		// per VRF, as Cumulus has them to 5.14 (vendor facts C.3): service ntp <vrf> server <host>
+		// and service dns <vrf> server <address>; system ntp, dns and lldp from 5.15
+		"ntp":  until(v515, "system ntp server <host> (and system ntp vrf <vrf>)", any_(obj(map[string]*node{"server": any_(obj(map[string]*node{"iburst": lf(kOnOff)}), kHost)}), kString)),
+		"dns":  until(v515, "system dns server <address>", any_(obj(map[string]*node{"server": any_(empty, kAddr)}), kString)),
+		"lldp": until(v515, "system lldp", lldp),
+	}),
+	// qos roce: accepted and recorded, rendered to nothing: the twin forwards in the kernel, with
+	// no ASIC buffers, PFC or ECN behind it (18 — Fidelity). `nv set qos roce` alone is mode
+	// lossless, as on Cumulus (vendor facts C.3). traffic-pool (the ASIC's shared buffer split
+	// between pools) likewise
+	"qos": obj(map[string]*node{
+		"roce": obj(toggle(map[string]*node{"mode": oneOf("lossless", "lossy")})),
+		"traffic-pool": any_(obj(map[string]*node{
+			"memory-percent":  lf(kInt),
+			"switch-priority": any_(empty, kInt),
+		}), kString),
+	}),
 	"acl": any_(obj(map[string]*node{
 		"type": lf(kString),
 		"rule": any_(obj(map[string]*node{
-			"action":     obj(map[string]*node{"permit": empty, "deny": empty}),
+			"action":     choiceOf("permit", "deny"),
 			"hw-offload": lf(kOnOff),
 			"match": obj(map[string]*node{
 				"ip": obj(map[string]*node{
@@ -242,21 +450,38 @@ var schema = obj(map[string]*node{
 	}), kString),
 })
 
-// Validate checks a tree, or a subtree at a path, against the emulated schema.
-func Validate(path []string, v any) error {
+// lldp is lldpd's settings: service lldp to 5.14, system lldp from 5.15
+var lldp = obj(map[string]*node{
+	"state":              oneOf("enabled", "disabled"),
+	"tx-interval":        lf(kInt),
+	"tx-hold-multiplier": lf(kInt),
+})
+
+// Validate checks a tree, or a subtree at a path, against the emulated schema, in any release's
+// grammar.
+func Validate(path []string, v any) error { return ValidateAt(Version{}, path, v) }
+
+// ValidateAt checks a tree, or a subtree at a path, against the emulated schema as a release has
+// it: a node the release does not have is refused by name, with what to use instead.
+func ValidateAt(ver Version, path []string, v any) error {
 	n := schema
 	for i, p := range path {
-		c, err := n.child(p)
+		c, err := n.childAt(ver, p)
 		if err != nil {
 			return fmt.Errorf("/%s: %w", strings.Join(path[:i+1], "/"), err)
 		}
 		n = c
 	}
-	return n.validate("/"+strings.Join(path, "/"), v)
+	return n.validate(ver, "/"+strings.Join(path, "/"), v)
 }
 
-func (n *node) child(name string) (*node, error) {
+func (n *node) child(name string) (*node, error) { return n.childAt(Version{}, name) }
+
+func (n *node) childAt(ver Version, name string) (*node, error) {
 	if c, ok := n.kids[name]; ok {
+		if err := c.gate(ver, name); err != nil {
+			return nil, err
+		}
 		return c, nil
 	}
 	if c, ok := n.kids["*"]; ok {
@@ -266,8 +491,10 @@ func (n *node) child(name string) (*node, error) {
 		return c, nil
 	}
 	var names []string
-	for k := range n.kids {
-		names = append(names, k)
+	for k, c := range n.kids {
+		if c.gate(ver, k) == nil {
+			names = append(names, k)
+		}
 	}
 	sort.Strings(names)
 	if len(names) == 0 {
@@ -289,6 +516,10 @@ func checkKey(k kind, name string) error {
 		if _, err := netip.ParsePrefix(name); err != nil {
 			return fmt.Errorf("%q is not an address with its prefix length", name)
 		}
+	case kIfAddr:
+		if _, err := netip.ParsePrefix(name); err != nil && name != "dhcp" {
+			return fmt.Errorf("%q is not an address with its prefix length, or dhcp", name)
+		}
 	case kAddr:
 		if _, err := netip.ParseAddr(name); err != nil {
 			return fmt.Errorf("%q is not an IP address", name)
@@ -301,39 +532,68 @@ func checkKey(k kind, name string) error {
 		if _, err := netip.ParsePrefix(name); err != nil && name != "any" {
 			return fmt.Errorf("%q is neither an address with its prefix length nor any", name)
 		}
+	case kUser:
+		if !userName.MatchString(name) {
+			return fmt.Errorf("%q is not a user name", name)
+		}
+		if name == "root" {
+			return fmt.Errorf("root: NVUE does not manage the root account (it is locked, vendor facts B)")
+		}
+	case kHost:
+		if _, err := netip.ParseAddr(name); err != nil && !hostName.MatchString(name) {
+			return fmt.Errorf("%q is neither an IP address nor a host name", name)
+		}
 	}
 	return nil
 }
+
+var (
+	userName  = regexp.MustCompile(`^[a-z_][a-z0-9_-]{0,31}$`)
+	hostName  = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)*\.?$`)
+	tzName    = regexp.MustCompile(`^[A-Za-z0-9_+-]+(/[A-Za-z0-9_+-]+)*$`)
+	speedRE   = regexp.MustCompile(`^([0-9]+[MG]|auto)$`)
+	breakout  = regexp.MustCompile(`^([1-8])x([0-9]+G)?$|^disabled$|^loopback$`)
+	subportRE = regexp.MustCompile(`^swp[0-9]+s[0-9]+$`)
+)
 
 // ifName is whether a name can be a Linux interface's
 func ifName(s string) bool {
 	return s != "" && len(s) <= 15 && !strings.ContainsAny(s, " /:")
 }
 
-func (n *node) validate(at string, v any) error {
+func (n *node) validate(ver Version, at string, v any) error {
 	if v == nil {
 		return nil // a deletion in a patch
 	}
+	if n.leaf == kEnum {
+		s := str(v)
+		for _, e := range n.enum {
+			if s == e {
+				return nil
+			}
+		}
+		return fmt.Errorf("%s: %v is not one of %s", at, v, strings.Join(n.enum, ", "))
+	}
 	if n.leaf != 0 {
-		return checkLeaf(n.leaf, at, v)
+		return checkLeaf(ver, n.leaf, at, v)
 	}
 	m, ok := v.(map[string]any)
 	if !ok {
 		return fmt.Errorf("%s: an object, not %v", at, v)
 	}
 	for k, cv := range m {
-		c, err := n.child(k)
+		c, err := n.childAt(ver, k)
 		if err != nil {
 			return fmt.Errorf("%s: %w", at, err)
 		}
-		if err := c.validate(at+"/"+k, cv); err != nil {
+		if err := c.validate(ver, at+"/"+k, cv); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func checkLeaf(k kind, at string, v any) error {
+func checkLeaf(ver Version, k kind, at string, v any) error {
 	s := str(v)
 	switch k {
 	case kInt:
@@ -341,8 +601,19 @@ func checkLeaf(k kind, at string, v any) error {
 			return fmt.Errorf("%s: %v is not a number", at, v)
 		}
 	case kOnOff:
-		if s != "on" && s != "off" {
+		// 5.15 spells an on|off leaf enabled|disabled (net-configurator's path-selection
+		// multipath aspath-ignore enabled); whether it still takes on|off is UNCONFIRMED, and
+		// it is taken
+		new := s == "enabled" || s == "disabled"
+		if new && !ver.IsZero() && ver.Less(v515) {
+			return fmt.Errorf("%s: %v is Cumulus Linux 5.15's spelling and this switch runs %s: on or off", at, v, ver)
+		}
+		if s != "on" && s != "off" && !new {
 			return fmt.Errorf("%s: %v is not on or off", at, v)
+		}
+	case kToggle:
+		if s != "enabled" && s != "disabled" {
+			return fmt.Errorf("%s: %v is not enabled or disabled", at, v)
 		}
 	case kPrefix:
 		if _, err := netip.ParsePrefix(s); err != nil {
@@ -361,6 +632,18 @@ func checkLeaf(k kind, at string, v any) error {
 	case kASN:
 		if _, err := strconv.ParseUint(s, 10, 32); err != nil && s != "external" && s != "internal" {
 			return fmt.Errorf("%s: %v is not an AS number, external or internal", at, v)
+		}
+	case kTZ:
+		if !tzName.MatchString(s) || strings.Contains(s, "..") {
+			return fmt.Errorf("%s: %v is not a time zone's name (US/Eastern, Etc/UTC)", at, v)
+		}
+	case kSpeed:
+		if !speedRE.MatchString(s) {
+			return fmt.Errorf("%s: %v is not a speed (400G, 100M, auto)", at, v)
+		}
+	case kBreakout:
+		if !breakout.MatchString(s) {
+			return fmt.Errorf("%s: %v is not a breakout (4x, 4x25G, disabled, loopback)", at, v)
 		}
 	case kString:
 		if _, ok := v.(map[string]any); ok {

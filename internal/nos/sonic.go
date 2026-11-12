@@ -173,11 +173,30 @@ var sonicSidecars = []Sidecar{
 		Check: []string{"sh", "-c", "supervisorctl status gnmi-native; ss -Hltn"}, Pending: sonicGNMIPending},
 }
 
+// sonicFactorySidecars: SONiC's lldp container (D78), which renders its supervisord from
+// CONFIG_DB and runs lldpd, lldp_syncd and lldpmgrd; LLDP is how a day-0 tool validates cabling.
+var sonicFactorySidecars = []Sidecar{
+	{Role: "lldp", Image: SonicLLDPImage, CapAdd: []string{"NET_ADMIN", "NET_RAW"},
+		Check: []string{"supervisorctl", "status", "lldpd"}, Pending: func(_ Switch, out string) (string, []string) {
+			if strings.Contains(out, "RUNNING") {
+				return "", nil
+			}
+			return "lldpd running", nil
+		}},
+}
+
 // sonicBGPPending: FRR holds the switch's BGP instance. The bgp container loads the frr.conf it
 // rendered from CONFIG_DB with `vtysh -b` as soon as bgpd runs, which can be before bgpd answers
 // (under emulation it was, and the load left FRR without the instance); loading it again then is
 // what an operator does, and frrcfgd applies only changes after start.
 func sonicBGPPending(sw Switch, out string) (string, []string) {
+	if sw.Factory != nil {
+		// a factory switch has no BGP until day 0 configures one: FRR answering is enough
+		if strings.Contains(out, "frr version") || strings.Contains(out, "Current configuration") {
+			return "", nil
+		}
+		return "FRR answering vtysh", nil
+	}
 	if sw.ASN == 0 || strings.Contains(out, fmt.Sprintf("router bgp %d\n", sw.ASN)) {
 		return "", nil
 	}
@@ -214,6 +233,30 @@ func ConfigDB(sw Switch) (map[string]map[string]any, error) {
 			db[table] = map[string]any{}
 		}
 		db[table][key] = v
+	}
+	if sw.Factory != nil {
+		// a factory switch (D72): what SONiC's factory default config holds, its hostname
+		// sonic, its ports, unified routing; nothing of the design
+		meta := map[string]any{"hostname": SonicFactoryHostname, "hwsku": SonicHWSKU(sw), "platform": sonicPlatform,
+			"docker_routing_config_mode": "unified", "frr_mgmt_framework_config": "true", "type": "LeafRouter"}
+		if sw.MAC != "" {
+			meta["mac"] = strings.ToLower(sw.MAC)
+		}
+		put("DEVICE_METADATA", "localhost", meta)
+		for _, p := range list {
+			lanes := make([]string, len(p.Lanes))
+			for i, l := range p.Lanes {
+				lanes[i] = strconv.Itoa(l)
+			}
+			put("PORT", p.Name, map[string]any{"alias": p.Model, "lanes": strings.Join(lanes, ","), "index": strconv.Itoa(p.Index),
+				"speed": strconv.Itoa(p.Speed), "admin_status": "up", "mtu": "9100"})
+		}
+		if sw.GNMI != nil {
+			put("GNMI", "gnmi", map[string]any{"port": strconv.Itoa(SonicGNMIPort), "client_auth": "true", "user_auth": "none", "log_level": "2"})
+			put("GNMI", "certs", map[string]any{"server_crt": sonicGNMICert, "server_key": sonicGNMIKey, "ca_crt": sonicGNMICA})
+		}
+		_ = ports
+		return db, nil
 	}
 	// unified: FRR's configuration is CONFIG_DB's, rendered and kept by frrcfgd, which is what
 	// takes a VRF, a VNI or an EVPN address family written there to FRR
@@ -309,6 +352,9 @@ func ConfigDB(sw Switch) (map[string]map[string]any, error) {
 // the same keys (wait_for_intf.sh) before it starts dhcrelay.
 func sonicReadyKeys(sw Switch, ports map[string]SonicPort) []string {
 	var keys []string
+	if sw.Factory != nil {
+		return nil // nothing of the design is configured
+	}
 	for _, v := range sw.Vlans {
 		keys = append(keys, "INTERFACE_TABLE|"+v.Name+"|"+v.Gateway.String())
 	}
@@ -396,6 +442,14 @@ func sonicStartScript(sw Switch) (string, error) {
 			w("EOF")
 		}
 		w("chmod 0600 %s", sonicGNMIKey)
+	}
+	if sw.Factory != nil {
+		factoryPreamble(w, sw.Factory)
+		w("# SONiC's factory login, admin/YourPaSsWoRd (sonic-buildimage rules/config); the VS image")
+		w("# has no sudo, so admin is root-equivalent and sudo runs what it is given")
+		w("getent passwd admin >/dev/null || useradd -o -u 0 -g 0 -M -d /root -s /bin/bash admin")
+		w("echo 'admin:%s' | chpasswd", SonicFactoryPassword)
+		w("%s", sonicFactoryShims)
 	}
 	w("# zebra, staticd, mgmtd and fpmsyncd are the bgp container's, as on a switch")
 	w("sed -i -E '/supervisorctl start (zebra|staticd|mgmtd|fpmsyncd)$/d' /usr/bin/start.sh")
@@ -499,3 +553,29 @@ func (sw Switch) Relaying() bool {
 	}
 	return false
 }
+
+// sonicFactoryShims make a factory sonic-vs switch's CLI behave as a switch's for a day-0 tool:
+// sudo (the VS image has none; admin is root-equivalent there), `config reload` without the
+// systemd restarts a VS container cannot do (SonicReloadCommand), and sshd with password logins.
+const sonicFactoryShims = `command -v sudo >/dev/null 2>&1 || { cat > /usr/local/bin/sudo <<'SUDO'
+#!/bin/sh
+exec "$@"
+SUDO
+chmod 755 /usr/local/bin/sudo; }
+if [ ! -e /usr/local/bin/config.sonic ]; then
+  mv /usr/local/bin/config /usr/local/bin/config.sonic
+  cat > /usr/local/bin/config <<'CONFIG'
+#!/bin/sh
+# dc-twin: config reload without its systemd service restarts (a VS container runs no systemd)
+if [ "$1" = reload ]; then shift; exec /usr/local/bin/config.sonic reload -n -f "$@"; fi
+exec /usr/local/bin/config.sonic "$@"
+CONFIG
+  chmod 755 /usr/local/bin/config
+fi
+mkdir -p /run/sshd && ssh-keygen -A >/dev/null 2>&1
+sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
+# admin is uid 0 here (no sudo to elevate through), and sshd refuses a password login to any
+# uid-0 account unless root logins with a password are allowed; on a switch admin is uid 1000
+sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
+grep -q '^PermitRootLogin' /etc/ssh/sshd_config || echo 'PermitRootLogin yes' >> /etc/ssh/sshd_config
+/usr/sbin/sshd || log 'sshd did not start'`

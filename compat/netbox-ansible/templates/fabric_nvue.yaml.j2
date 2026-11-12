@@ -1,0 +1,163 @@
+{#
+  A fabric switch's NVUE configuration tree (`nv config show -o yaml` form, what NVUE's REST
+  API takes), rendered from NetBox through the netbox.netbox inventory and pushed with
+  nvidia.nvue's api module.
+
+  Ported from NVIDIA enterprise-ras net-configurator nc-v8.0.0,
+  roles/spine/templates/spine_nvue_cli.j2 (commit eda15cb7f7354e4a0476b7461eda73aa69137913),
+  SPDX-License-Identifier: MIT, Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. Every setting
+  is one of that template's `nv set` lines, in the tree those lines make (D79); what changed:
+    - the form: NVUE's object tree for its REST API, not `nv set` lines for SSH, since the push
+      is nvidia.nvue's over REST; a multi-valued argument (a class's command path, a WJH
+      trigger, the authentication order) is a key with an empty object, as NVUE's JSON keeps
+      them;
+    - the values: hostname, loopback and AS from NetBox (the device's name, its lo address, its
+      bgp_asn custom field), not the workbook's host_vars;
+    - the underlay: the design's fabric links are numbered /31s, so each cabled swp with an
+      address gets it and its cable's far address a numbered neighbour in the underlay peer
+      group, where the workbook's spines have unnumbered neighbours on breakout sub-ports;
+    - no breakout, OOB uplink, overlay peer, LDAP, ACL, banner or custom-config settings: the
+      design has no values for them;
+    - the route maps are LOOPBACK-BGP and WEIGHTED-ECMP, not LOOPBACK_BGP and WEIGHTED_ECMP:
+      nvidia.nvue's httpapi plugin rewrites every key's "_" to "-" (normalize_keys) and leaves
+      values alone, so a route map named with "_" would be made as "LOOPBACK-BGP" and referred
+      to as "LOOPBACK_BGP", which NVUE refuses;
+    - the factory user's password is set here, as net-configurator's push stages it.
+#}
+{%- set _lo = (interfaces | selectattr('name', 'equalto', 'lo') | first) %}
+{%- set lo_ip = (_lo.ip_addresses | first).address %}
+{%- set router_id = lo_ip.split('/')[0] %}
+{%- set _fabric = [] %}
+{%- for i in interfaces if i.name.startswith('swp') and i.ip_addresses and i.link_peers %}
+{%-   set _peer = i.link_peers | first %}
+{%-   set _far = hostvars[_peer.device.name].interfaces | selectattr('name', 'equalto', _peer.name) | first %}
+{%-   set _ = _fabric.append({'name': i.name, 'address': (i.ip_addresses | first).address, 'peer': (_far.ip_addresses | first).address.split('/')[0]}) %}
+{%- endfor %}
+evpn:
+  state: enabled
+interface:
+  eth0:
+    type: eth
+    vrf: mgmt
+  lo:
+    type: loopback
+    ipv4:
+      address:
+        {{ lo_ip }}: {}
+{% for f in _fabric %}
+  {{ f.name }}:
+    type: swp
+    link:
+      state:
+        up: {}
+    ipv4:
+      address:
+        {{ f.address }}: {}
+{% endfor %}
+qos:
+  roce:
+    state: enabled
+    mode: lossless
+router:
+  bfd:
+    state: enabled
+    profile:
+      overlay: {detect-multiplier: 3, min-rx-interval: 1000, min-tx-interval: 1000}
+      underlay: {detect-multiplier: 3, min-rx-interval: 300, min-tx-interval: 300}
+  bgp:
+    autonomous-system: {{ custom_fields.bgp_asn }}
+    state: enabled
+    router-id: {{ router_id }}
+    graceful-restart:
+      mode: full
+      restart-time: 180
+      path-selection-deferral-time: 180
+      stale-routes-time: 180
+  policy:
+    route-map:
+      LOOPBACK-BGP:
+        rule:
+          '10':
+            action: {permit: {}}
+            description: permit_loopback_interface_routes
+            match: {interface: lo, type: ipv4}
+      WEIGHTED-ECMP:
+        rule:
+          '10':
+            action: {permit: {}}
+            description: enable_w_ecmp_adjustment
+            set: {ext-community-bw: multipaths}
+system:
+  hostname: {{ inventory_hostname }}
+  ntp:
+    server:
+{% for server in ntp_servers | default(['0.cumulusnetworks.pool.ntp.org', '1.cumulusnetworks.pool.ntp.org', '2.cumulusnetworks.pool.ntp.org', '3.cumulusnetworks.pool.ntp.org']) %}
+      {{ server }}: {association-type: server}
+{% endfor %}
+    vrf: mgmt
+  aaa:
+    authentication:
+      order:
+        local: {}
+    class:
+      nvapply: {action: allow, command-path: {/: {permission: all}}}
+      nvshow: {action: allow, command-path: {/: {permission: ro}}}
+      sudo: {action: allow, command-path: {/: {permission: all}}}
+    role:
+      nvue-admin: {class: {nvapply: {}}}
+      nvue-monitor: {class: {nvshow: {}}}
+      system-admin: {class: {nvapply: {}, sudo: {}}}
+    user:
+      cumulus:
+        full-name: cumulus,,,
+        role: system-admin
+        state: enabled
+        password: {{ switch_ansible_password | to_json }}
+  api:
+    state: enabled
+  config:
+    auto-save:
+      state: enabled
+  ssh-server:
+    state: enabled
+  wjh:
+    channel:
+      forwarding:
+        trigger: {l2: {}, l3: {}, tunnel: {}}
+    state: enabled
+vrf:
+  default:
+    router:
+      bgp:
+        state: enabled
+        router-id: {{ router_id }}
+        address-family:
+          ipv4-unicast:
+            state: enabled
+            redistribute:
+              connected: {state: enabled, route-map: LOOPBACK-BGP}
+            multipaths: {ebgp: 128}
+          l2vpn-evpn:
+            state: enabled
+        path-selection:
+          multipath: {aspath-ignore: enabled}
+        neighbor:
+{% for f in _fabric %}
+          {{ f.peer }}: {peer-group: underlay, type: numbered}
+{% endfor %}
+        peer-group:
+          overlay:
+            address-family:
+              ipv4-unicast: {state: disabled}
+              l2vpn-evpn: {state: enabled}
+            bfd: {profile: overlay}
+            multihop-ttl: 2
+            remote-as: external
+            update-source: lo
+          underlay:
+            address-family:
+              ipv4-unicast:
+                state: enabled
+                policy: {outbound: {route-map: WEIGHTED-ECMP}}
+            bfd: {profile: underlay}
+            remote-as: external

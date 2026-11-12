@@ -1,0 +1,59 @@
+# As-built cabling that differs from the design (18 — LLDP and cabling, D78). The design handed to
+# a day-0 tool (stack-inputs/day0/: cabling.csv, topology.dot, netbox/) never changes; these faults
+# change only what is plugged in, so a tool that validates LLDP against the cabling plan has
+# something to find. The critic's day0/fabric policy judges a BGP session brought up over a link
+# these reach.
+apiVersion: dc-twin/v1alpha1
+kind: FaultCatalogue
+metadata: { name: generic/cabling, version: 0.1.0 }
+spec:
+  isNot:
+    - "Cables are model links: no optics, no lane mapping, no breakout cables split across ports."
+    - "The TAP substrate carries the faults out on cables between real switches; on a model switch they are recorded only."
+  faults:
+    - name: cable-swap
+      title: "Two cables' far ends swapped"
+      target: { port: true }
+      params:
+        with: { type: string, label: "the other port (or link id) whose cable this one's far end is exchanged with" }
+      effects: [{ link: { swapWith: "{with}" } }]
+      clears: { manual: true }
+      isNot:
+        - "Both cables keep carrier and speed; only which far end each reaches changes (Engine.AsBuiltPeer)."
+        - "The near ends are the target port and `with`; their cables' far ends are what moved."
+    - name: cable-missing
+      title: "Cable never run"
+      target: { port: true }
+      effects: [{ link: { state: down } }]
+      clears: { on: [cable.replaced], manual: true }
+      isNot:
+        - "As cable-pulled, a missing cable is a link down: no carrier and no LLDP. It never clears on its own; running the cable (cable.replaced) clears it."
+    - name: cable-dead
+      title: "Cable present, no carrier"
+      target: { port: true }
+      effects: [{ link: { state: down } }]
+      clears: { on: [cable.replaced], manual: true }
+      isNot:
+        - "A dead cable and a missing one are the same link down to the twin; a site's tool tells them apart by inspection, which is not modelled."
+    - name: cable-flap
+      title: "Cable flapping"
+      target: { port: true }
+      params:
+        period: { type: int, default: 10, range: [2, 3600], label: "seconds between carrier changes" }
+      effects: [{ set: { "day0.cableFlap": "{period}" } }]
+      clears: { on: [cable.replaced], manual: true }
+      isNot: ["Carrier goes down and up every period at both ends, as a bad optic or a loose cable does; no frames are corrupted in between."]
+    - name: cable-wrong-port
+      title: "Cable plugged into the wrong port"
+      target: { port: true }
+      params:
+        port: { type: string, label: "the far switch's port (model name, eth<n>) the cable is plugged into instead" }
+      effects: [{ set: { "day0.wrongPort": "{port}" } }]
+      clears: { manual: true }
+      isNot: ["The far end is the far switch's other front-panel port (generic/nvue-frr renames it there, swp<n>); a sonic-vs switch, whose ports are its config_db's, sees the link down instead."]
+    - name: cable-speed-mismatch
+      title: "Speed or breakout mismatch"
+      target: { port: true }
+      effects: [{ set: { "day0.speedMismatch": true } }]
+      clears: { manual: true }
+      isNot: ["No link while it holds, as two ends configured for different speeds or breakouts have none; the twin does not read the ports' configured speeds."]
