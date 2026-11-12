@@ -44,7 +44,7 @@ const authCache = 30 * time.Second
 // SetAuthenticator makes NVUE authenticate HTTP Basic credentials with a, in place of the
 // single password NewServer was given (nil: that password again).
 func (s *Server) SetAuthenticator(a Authenticator) {
-	s.auth, s.authSet = a, true
+	s.auth, s.authSet, s.authForget = a, true, nil
 }
 
 // SetLocalToken opens the local trust path: a request carrying HeaderNvUser and HeaderNvToken,
@@ -192,8 +192,20 @@ func (s *Server) groups(ctx context.Context, user string) ([]string, error) {
 // ErrPasswordExpired. A success is kept for authCache, so a client's requests do not each ask
 // the switch.
 func ShadowAuthenticator(run Runner) Authenticator {
+	a, _ := shadowAuthenticator(run)
+	return a
+}
+
+// shadowAuthenticator is ShadowAuthenticator and what forgets its successes: the Server calls it
+// after every apply, so a password NVUE changed is not accepted from the cache.
+func shadowAuthenticator(run Runner) (Authenticator, func()) {
 	var mu sync.Mutex
 	ok := map[string]time.Time{}
+	forget := func() {
+		mu.Lock()
+		clear(ok)
+		mu.Unlock()
+	}
 	return func(ctx context.Context, user, password string) error {
 		if !userName.MatchString(user) {
 			return errBadCredentials
@@ -238,7 +250,7 @@ func ShadowAuthenticator(run Runner) Authenticator {
 		ok[key] = time.Now()
 		mu.Unlock()
 		return nil
-	}
+	}, forget
 }
 
 // expired is whether a shadow entry's password must be changed: its last change is 0 (shadow(5):

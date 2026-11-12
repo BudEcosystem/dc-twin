@@ -93,6 +93,8 @@ type Server struct {
 	// single password of User (a switch the twin configures, D56)
 	auth    Authenticator
 	authSet bool
+	// authForget forgets the authenticator's cached successes (shadowAuthenticator), after an apply
+	authForget func()
 	// token is the local trust path's secret (SetLocalToken); "" refuses the path
 	token     string
 	groupsMu  sync.Mutex
@@ -150,7 +152,7 @@ func (s *Server) newID() string {
 func (s *Server) SetRunner(r Runner) {
 	s.run = r
 	if s.sw.Factory != nil && !s.authSet && r != nil {
-		s.auth = ShadowAuthenticator(r)
+		s.auth, s.authForget = shadowAuthenticator(r)
 	}
 }
 
@@ -246,6 +248,9 @@ func (s *Server) applyRevision(ctx context.Context, r *revision) {
 	}
 	changed := rerr == nil
 	s.mu.Unlock()
+	if changed && s.authForget != nil {
+		s.authForget()
+	}
 	if changed && s.onApplied != nil {
 		s.onApplied()
 	}

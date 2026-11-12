@@ -140,8 +140,13 @@ func TestDay0NetBox(t *testing.T) {
 		"python3 record-leases.py "+nb+" /work/day0 --leases /work/leases.csv --token "+netboxToken)
 	env := "NETBOX_API=" + nb + " NETBOX_TOKEN=" + netboxToken + " ANSIBLE_NOCOLOR=1 ANSIBLE_HOST_KEY_CHECKING=False ANSIBLE_INVENTORY_UNPARSED_FAILED=True "
 	inv := step("ansible-inventory: the switches as netbox.netbox reads them", env+"ansible-inventory -i netbox.yml --graph")
+	// the graph's hosts, one per line under their groups (`  |  |--leaf-1`)
+	hosts := map[string]bool{}
+	for _, l := range strings.Split(inv, "\n") {
+		hosts[strings.TrimLeft(strings.TrimSpace(l), "|- ")] = true
+	}
 	for _, e := range fac {
-		if !strings.Contains(inv, e.Hostname) {
+		if !hosts[e.Hostname] {
 			t.Fatalf("%s is not in the inventory NetBox gives", e.Hostname)
 		}
 	}
@@ -149,8 +154,14 @@ func TestDay0NetBox(t *testing.T) {
 		t.Fatalf("the inventory's switches include the OOB switches the site configures otherwise")
 	}
 	// what the template reads of one switch: its interfaces with their addresses and cable peers,
-	// its custom fields (the log, shortened, for when the port does not render)
-	host := step("ansible-inventory --host "+fac[0].Hostname, env+"ansible-inventory -i netbox.yml --host "+fac[0].Hostname+" | head -c 6000")
+	// its custom fields (the whole of it checked; the log shortened, for when the port does not
+	// render)
+	step("ansible-inventory --host "+fac[0].Hostname, env+"ansible-inventory -i netbox.yml --host "+fac[0].Hostname+" > /work/host.json && head -c 6000 /work/host.json")
+	b, err := os.ReadFile(filepath.Join(work, "host.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	host := string(b)
 	for _, want := range []string{`"interfaces"`, `"custom_fields"`, `"bgp_asn"`, `"link_peers"`, `"ip_addresses"`} {
 		if !strings.Contains(host, want) {
 			t.Errorf("the inventory's %s has no %s", fac[0].Hostname, want)

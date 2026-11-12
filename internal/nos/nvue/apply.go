@@ -52,8 +52,12 @@ new_as=$(awk '/^router bgp [0-9]+$/ { print $3; exit }' /etc/frr/frr.conf)
 old_as=$(vtysh -c 'show running-config' 2>/dev/null | awk '/^router bgp [0-9]+$/ { print $3; exit }')
 if [ -n "$old_as" ] && [ -z "$new_as" ]; then
   # BGP removed (a factory reset, a configuration without it): FRR's own command removes it;
-  # a restart is for an AS that changes, which frr-reload cannot do
+  # a restart is for an AS that changes, which frr-reload cannot do. Its VRFs' instances first:
+  # FRR refuses to delete the default instance while they exist
   echo "== router bgp $old_as removed"
+  for v in $(vtysh -c 'show running-config' 2>/dev/null | awk '/^router bgp [0-9]+ vrf [^ ]+$/ { print $3 " " $5 }' | tr ' ' ':'); do
+    vtysh -c 'configure terminal' -c "no router bgp ${v%%:*} vrf ${v#*:}" 2>&1 || rc=1
+  done
   vtysh -c 'configure terminal' -c "no router bgp $old_as" 2>&1 || rc=1
 elif [ -n "$old_as" ] && [ "$old_as" != "$new_as" ]; then
   echo "== router bgp $old_as is now $new_as: FRR restarts"

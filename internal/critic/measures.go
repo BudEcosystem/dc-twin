@@ -171,9 +171,8 @@ func (jd *judge) day0Measures() {
 			dev := h.DevicePath(e.Path)
 			s := switches[dev]
 			if s == nil {
-				if e.State.Field != "day0.phase" {
-					continue
-				}
+				// the observer's first look: its lease, when it has one, is committed before its
+				// phase in the same poll
 				s = &sw{first: h.time(e)}
 				switches[dev] = s
 				order = append(order, dev)

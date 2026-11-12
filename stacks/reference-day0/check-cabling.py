@@ -5,7 +5,7 @@ It reads what a site's tooling has: stack-inputs/day0's cabling.csv (the cabling
 expected-switches.json (each switch's management MAC), and its DHCP server's leases (a CSV of
 mac,address), and asks each switch's NVUE for the LLDP neighbours of the ports the plan cables
 (GET /nvue_v1/interface/<port>/lldp/neighbor, as `nv show interface <port> lldp neighbor` does).
-Every cable between two switches the tooling leased is checked at both ends: the neighbour seen
+Every cable between two factory switches is checked at both ends: the neighbour seen
 must be the far device and port the plan names. It prints one line per cable end and, last, a
 JSON summary, and exits 1
 when any cable is not as planned, as a site's validation (NetQ's `netq check topology`, PTM)
@@ -50,12 +50,14 @@ def main():
         for row in csv.reader(f):
             if len(row) >= 2:
                 leases[row[0].strip().lower()] = row[1].strip()
-    # the switches this tooling brought up: those its DHCP server leased (the OOB switches the
-    # site configures otherwise, and their cables to the management ports, are not its to check)
-    addr = {e["hostname"]: leases[e["mgmtMAC"].lower()] for e in expected if leases.get(e.get("mgmtMAC", "").lower())}
+    # the switches this tooling brings up: the factory ones (the OOB switches the site configures
+    # otherwise, and their cables to the management ports, are not its to check), each at its
+    # lease; one with none is NO-ADDRESS, its cables not as planned
+    ours = {e["hostname"] for e in expected if e.get("factory")}
+    addr = {e["hostname"]: leases.get(e.get("mgmtMAC", "").lower()) for e in expected if e["hostname"] in ours}
     with open(os.path.join(a.inputs, "cabling.csv")) as f:
         cables = [c for c in csv.DictReader(f) if c["a_interface"] and c["b_interface"]
-                  and c["a_device"] in addr and c["b_device"] in addr]
+                  and c["a_device"] in ours and c["b_device"] in ours]
     bad = []
     checked = 0
     for c in cables:
