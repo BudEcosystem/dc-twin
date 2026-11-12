@@ -170,7 +170,20 @@ func Startup(sw nos.Switch) (Tree, error) {
 			set(Tree{}, "service", "dhcp-relay", "default", "interface", i)
 		}
 	}
-	return t, Validate(nil, t)
+	// built in 5.14's grammar; a switch running 5.15 or later has it in its own
+	ver := switchVersion(sw)
+	if !ver.Less(v515) {
+		t = upgrade(t)
+	}
+	return t, ValidateAt(ver, nil, t)
+}
+
+// switchVersion is the release a switch's NVUE speaks: its build's, else DefaultVersion.
+func switchVersion(sw nos.Switch) Version {
+	if sw.Build == "" {
+		return DefaultVersion
+	}
+	return BuildVersion(sw.Build)
 }
 
 // Files is what applying a configuration writes on the switch and runs.
@@ -187,6 +200,8 @@ type Files struct {
 	// ACL is the nftables ruleset the configuration's ACLs render to (acl.go): always a
 	// replacement of the twin's own tables, so an empty configuration removes them.
 	ACL string
+	// System is what the system and service branches render to (system.go).
+	System System
 }
 
 type svi struct {
@@ -199,8 +214,10 @@ type svi struct {
 
 // Render takes a configuration, valid against the schema (Validate: every PATCH and Startup check
 // it), to the files Cumulus Linux renders from it. It refuses what the switch cannot carry: an interface it has no port for, a VNI without an NVE source address, a
-// VRF that does not exist, two VNIs on one VLAN.
+// VRF that does not exist, two VNIs on one VLAN. A configuration in 5.15's grammar is read as
+// its 5.14 equivalent (normalize).
 func Render(t Tree, sw nos.Switch) (Files, error) {
+	t = normalize(t)
 	cabled := interfaces(sw)
 	// on a BlueField's HBN, a VRF an interface is put in exists, as HBN's NVUE creates it (NICo's
 	// templates name the VRF of the DPU's own function, pf0dpu1_if, only there); a switch refuses
@@ -231,6 +248,9 @@ func Render(t Tree, sw nos.Switch) (Files, error) {
 	w("auto lo")
 	w("iface lo inet loopback")
 	for _, a := range keys(sub(lo, "ip", "address")) {
+		if a == "dhcp" {
+			return Files{}, fmt.Errorf("interface lo: a loopback has no DHCP")
+		}
 		w("    address %s", a)
 	}
 	for _, a := range keys(sub(vrfs, "default", "loopback", "ip", "address")) {
@@ -251,6 +271,12 @@ func Render(t Tree, sw nos.Switch) (Files, error) {
 			continue
 		}
 		it := sub(ifaces, name)
+		if name == nos.MgmtIf && sw.Mgmt {
+			if err := renderMgmt(w, it); err != nil {
+				return Files{}, err
+			}
+			continue
+		}
 		isSVI := strings.HasPrefix(name, "vlan") && !cabled[name]
 		if typ := str(it, "type"); typ != "" {
 			switch {
@@ -327,8 +353,36 @@ func Render(t Tree, sw nos.Switch) (Files, error) {
 			}
 			sviByID[id] = s
 			bridgeVLANs[id] = true
+		case subportRE.MatchString(name):
+			return Files{}, fmt.Errorf("interface %s: a breakout's subport: the twin records link breakout and cannot split a port, so no subport exists", name)
 		default:
 			return Files{}, fmt.Errorf("interface %s: the switch has no such port (its interfaces are its ports, vlan<id> SVIs and lo)", name)
+		}
+	}
+	// a factory switch's front-panel ports are admin down until configured ("By default,
+	// Cumulus Linux disables all data plane ports", vendor facts B): a cabled port the
+	// configuration does not name is down. A port is named by an interface entry or as an
+	// unnumbered BGP neighbour (a session that needs the port up). A switch the twin configures
+	// keeps every cabled port up, as it always has.
+	if sw.Factory != nil && !sw.Native {
+		named := map[string]bool{}
+		for _, v := range keys(vrfs) {
+			for _, n := range keys(sub(vrfs, v, "router", "bgp", "neighbor")) {
+				named[n] = true
+			}
+		}
+		var down []string
+		for p := range cabled {
+			if ifaces[p] == nil && !named[p] {
+				down = append(down, p)
+			}
+		}
+		sort.Strings(down)
+		for _, p := range down {
+			w("auto %s", p)
+			w("iface %s", p)
+			w("    link-down yes")
+			w("")
 		}
 	}
 
@@ -485,7 +539,11 @@ func Render(t Tree, sw nos.Switch) (Files, error) {
 	if err != nil {
 		return Files{}, err
 	}
-	return Files{Interfaces: b.String(), FRR: frr, Relay: relay, ACL: acl}, nil
+	system, err := renderSystem(t, sw)
+	if err != nil {
+		return Files{}, err
+	}
+	return Files{Interfaces: b.String(), FRR: frr, Relay: relay, ACL: acl, System: system}, nil
 }
 
 // renderRelay is dhcrelay's command line for the default relay: every SVI downstream, every
@@ -528,4 +586,68 @@ func renderRelay(t Tree, cabled map[string]bool, svis map[int]*svi) ([]string, e
 func bridgeMAC(sw nos.Switch) string {
 	h := sha256.Sum256([]byte("dctwin-bridge/" + sw.Hostname))
 	return fmt.Sprintf("02:%02x:%02x:%02x:%02x:%02x", h[0], h[1], h[2], h[3], h[4])
+}
+
+// renderMgmt renders a switch's management port, eth0 (D73), as Cumulus Linux has it: in the
+// management VRF, mgmt, which Cumulus creates for it (its loopback addresses and its own table),
+// with DHCP (`nv set interface eth0 ip address dhcp`) or the addresses it is given. A management
+// port in the default VRF is rendered there.
+func renderMgmt(w func(string, ...any), it Tree) error {
+	if typ := str(it, "type"); typ != "" && typ != "eth" {
+		return fmt.Errorf("interface %s: type %s: the management port is type eth", nos.MgmtIf, typ)
+	}
+	vrf := str(it, "ip", "vrf")
+	switch vrf {
+	case "", "default", "mgmt":
+	default:
+		return fmt.Errorf("interface %s: vrf %s: the management port is in vrf mgmt or the default VRF", nos.MgmtIf, vrf)
+	}
+	if vrf == "mgmt" {
+		w("auto mgmt")
+		w("iface mgmt")
+		w("    address 127.0.0.1/8")
+		w("    vrf-table auto")
+		w("")
+	}
+	addrs := keys(sub(it, "ip", "address"))
+	dhcp := false
+	var static []string
+	for _, a := range addrs {
+		if a == "dhcp" {
+			dhcp = true
+		} else {
+			static = append(static, a)
+		}
+	}
+	w("auto %s", nos.MgmtIf)
+	switch {
+	case dhcp && vrf == "mgmt":
+		// ifupdown2 runs a VRF slave's dhclient under `ip vrf exec mgmt`, which needs a cgroup a
+		// container cannot make (/sys/fs/cgroup is read-only there): dhclient runs on eth0
+		// itself, its exchange over its raw socket, which no VRF holds, its replies taken in
+		// through udp_l3mdev_accept
+		w("iface %s", nos.MgmtIf)
+		// started once: its pid file names a live dhclient (a pgrep of the command line would
+		// find this very shell, which carries it)
+		w("    post-up kill -0 $(cat /run/dhclient.%[1]s.pid 2>/dev/null) 2>/dev/null || dhclient -4 -nw -pf /run/dhclient.%[1]s.pid -lf /var/lib/dhcp/dhclient.%[1]s.leases %[1]s", nos.MgmtIf)
+		w("    pre-down dhclient -4 -x -pf /run/dhclient.%[1]s.pid %[1]s || true", nos.MgmtIf)
+	case dhcp:
+		w("iface %s inet dhcp", nos.MgmtIf)
+	default:
+		w("iface %s", nos.MgmtIf)
+	}
+	for _, a := range static {
+		w("    address %s", a)
+	}
+	for _, gw := range keys(sub(it, "ip", "gateway")) {
+		w("    gateway %s", gw)
+	}
+	if vrf == "mgmt" {
+		w("    vrf mgmt")
+	}
+	if _, down := sub(it, "link", "state")["down"]; down {
+		w("    link-down yes")
+	}
+	w("")
+	return nil
 }

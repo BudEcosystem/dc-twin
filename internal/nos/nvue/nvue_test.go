@@ -178,7 +178,7 @@ func TestValidate(t *testing.T) {
 		{[]string{"vrf", "red", "router", "bgp", "neighbor", "10.0.0.2", "remote-as"}, "external", true},
 		{[]string{"vrf", "red", "router", "bgp", "neighbor", "swp51"}, map[string]any{"type": "unnumbered"}, true},
 		{[]string{"vrf", "red", "router", "bgp", "neighbor", "not/a-peer"}, map[string]any{}, false},
-		{nil, map[string]any{"qos": map[string]any{}}, false},
+		{nil, map[string]any{"mlag": map[string]any{}}, false}, // qos is emulated since day 0 (qos roce)
 		{[]string{"bridge", "domain", "br_default", "vlan", "10", "vni"}, map[string]any{"10": nil}, true},
 	} {
 		err := Validate(c.path, c.v)

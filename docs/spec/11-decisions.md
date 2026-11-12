@@ -1278,3 +1278,74 @@ Arm of 10 GB or more. **Costs:** HBN is the twin's NVUE over FRR, not NVIDIA's; 
 offloaded, and each spliced cable copies frames in userspace; the agent does not run in a DPU OS.
 **Refines:** D52, D56, D57, D58. **Reversed if:** a BlueField at `vm` has a ConnectX its DPU OS
 can use (Q1); then NVIDIA's HBN runs on the Arm in its place.
+
+### D72 — A fabric may come up in factory state; the twin then configures nothing a day-0 tool would
+*Built (2026-11-11), [18](18-day0.md).* A fabric with `bringUp: factory` starts its switches as
+they leave the factory, each in its NOS's factory state, and the twin renders and applies no
+start-up configuration to them (D55 and D56 apply only under `bringUp: twin`, the default).
+`factory.select` limits it to some switches. **Why:** the twin applying day 0 itself means the
+software that brings a fabric up is never tested. **Reversed if:** —
+
+### D73 — A real switch's management port is a DHCP client; its management interfaces answer at that lease
+*Built (2026-11-11), [18](18-day0.md#the-management-port).* A real switch's `eth0` is a TAP
+with its port's MAC on the OOB network; the NOS's own DHCP client runs on it in VRF `mgmt` while
+the switch is powered on, its lease a `state` event in D46's form, and SSH, NVUE and gNMI answer at
+that lease. In-band access at Loopback0 remains once something configures a loopback.
+**Why:** a switch in factory state has no loopback; on a site the management port is where day 0
+reaches it. **Amends:** D55 and D56 (in band only). **Reversed if:** the model holds per-port
+leases; then the lease is the port's state, as D46 says.
+
+### D74 — ZTP is the NOS's own client where its image carries one, otherwise the twin's after the NOS's documented contract
+*Built (2026-11-11), [18](18-day0.md#ztp).* Cumulus's contract (DHCP option 239, the
+`CUMULUS-AUTOPROVISIONING` marker, `ztp -s/-r/-R`) on `generic/nvue-frr`; SONiC's ZTP document
+(option 67) on `sonic-vs` where the image does not carry `sonic-ztp` (Q25). The twin's client is
+labelled in the fidelity report. **Why:** Cumulus's ZTP is not redistributable, and the VS image
+may not carry SONiC's.
+
+### D75 — ONIE is modelled: discovery and fetch are real, the image is recognised not run
+*Built (2026-11-11), [18](18-day0.md#onie).* A switch with `install: onie` runs a stand-in for
+ONIE's install environment: ONIE's DHCP vendor class and options, its installer-name waterfall and
+its request headers are real; the fetched file is matched by sha256 or name against
+`spec.adapters.network.nos.images`, and a match boots the registry's container for that NOS in
+factory state after `installTime`. **Why:** NOS installers write a switch's disk and cannot run in a
+container; what a day-0 tool controls is discovery and what it serves. **Reversed if:** a NOS
+installer can run in the twin's containers.
+
+### D76 — `generic/nvue-frr` gains SSH and an `nv` CLI over the same emulated tree
+*Built (2026-11-11), [18](18-day0.md#the-first-push).* OpenSSH in the image, factory user
+`cumulus`, and the twin's `nv` (`set`, `unset`, `show`, `config apply/diff/replace/save/history/patch`)
+on the NVUE tree REST already serves. **Amends:** D56 (no `nv` CLI or SSH). **Reversed if:** an
+operator's Cumulus VX image runs here.
+
+### D77 — The design is handed to the day-0 tool as a site hands it, and is the oracle
+*Built (2026-11-11), [18](18-day0.md#what-the-sut-is-given).* `stack-inputs/day0/` holds the
+expected switches, the cabling plan (CSV and `topology.dot`), with `plan: given` the address plan
+the twin would have applied, and the same design as NetBox bulk-import CSVs. That plan is what the
+SUT's result is compared with; under `plan: tool` the comparison is structural. **Why:** a site's
+day-0 tool starts from a design, and the twin's own plan makes an exact oracle.
+
+### D78 — LLDP is real on real NOSes, and the twin speaks it for model endpoints
+*Built (2026-11-11), [18](18-day0.md#lldp-and-cabling).* `lldpd` in `generic/nvue-frr`,
+SONiC's `lldp` container beside `sonic-vs`, and LLDP frames from the twin on the TAPs of powered
+model hosts, BMC ports and model switches. As-built cabling may differ from the design under
+`generic/cabling` faults. **Why:** cabling validation is a day-0 step, and miscabling is the
+commonest day-0 defect.
+
+### D79 — Day 0 is integrated through NetBox with Ansible, on NVIDIA's own templates
+*Decided (2026-11-12, revised the same day), [18](18-day0.md#open-questions) Q28.* The priority
+integration is fully open source: a real NetBox (Apache-2.0) loaded from
+`stack-inputs/day0/netbox` as the source of truth, Ansible's `netbox.netbox` inventory reading
+it, and NVIDIA's `nvidia.nvue` collection pushing over NVUE's REST API, with Kea serving ZTP and
+ONIE. The fabric configuration comes from NVIDIA's own templates: those of NVIDIA's
+`enterprise-ras` `net-configurator` (MIT, nc-v8.0.0), ported to read NetBox in place of its Excel
+workbook, so the configurations are the ones NVIDIA validates. Validation of the NetQ kind (BGP,
+interfaces, LLDP cabling against the plan) is the twin's oracle and critic and, where it runs,
+an open-source collector such as SuzieQ; NetQ itself needs a licensed server and is out of scope.
+The emulated NVUE grows towards Cumulus 5.15+'s grammar (`state enabled`, the `ipv4` namespace,
+`system ntp/dns/syslog`) and the surface those templates use (route maps, prefix lists, BFD,
+multi-VRF EVPN, VRR, EVPN multihoming, RBAC), feature by feature, the customers' features
+first. `net-configurator` run unmodified, from its workbook, is a later check of the same
+emulation. **Why:** the customers run NVIDIA switches, and NetBox with Ansible is the commonest
+open day-0 stack; NVIDIA's templates make it NVIDIA's configuration without a licensed tool. The
+emulation work is the same whichever tool generates the configuration. **Reversed if:** a
+customer's day-0 tool is neither, or a customer needs NetQ itself.

@@ -171,6 +171,9 @@ type Spec struct {
 	Tmpfs map[string]string
 	// CapAdd replaces the capabilities a non-privileged switch container gets.
 	CapAdd []string
+	// Memory, when not 0, is this container's memory limit in bytes in place of the Engine's
+	// (a tool beside the switches, such as a NetBox, needs more than a switch).
+	Memory int64
 }
 
 // switchCaps are what a switch container needs when it is not privileged: it configures its own
@@ -191,8 +194,12 @@ func (d *Docker) Run(ctx context.Context, s Spec) (*Container, error) {
 			hc["UTSMode"] = s.NetworkMode
 		}
 	}
-	if d.Memory > 0 {
-		hc["Memory"], hc["MemorySwap"] = d.Memory, d.Memory
+	mem := d.Memory
+	if s.Memory > 0 {
+		mem = s.Memory
+	}
+	if mem > 0 {
+		hc["Memory"], hc["MemorySwap"] = mem, mem
 	}
 	if s.Privileged {
 		hc["Privileged"] = true

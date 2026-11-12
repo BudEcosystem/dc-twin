@@ -44,6 +44,10 @@ type ActiveFault struct {
 	LinksDown  []*model.Link
 	NotApplied []string // effects that do not apply at this fidelity (kernelLog, shim at model)
 	clearTimer uint64
+
+	// swaps are the cable pairs a generic/cabling cable-swap fault exchanged (link swapWith),
+	// undone when it clears.
+	swaps []cableSwap
 }
 
 // FaultView is what the API and scenarios see of an active fault.
@@ -338,6 +342,10 @@ func (e *Engine) applyEffects(f *ActiveFault) {
 				}
 				e.stateEvent(f.Target, "ports", nil, fmt.Sprintf("%d ports down", len(f.PortsDown)), schema.EventSource{Class: "twin", Principal: "fault"}, f.Seq, "Warning")
 			case "link":
+				if w, ok := m["swapWith"]; ok {
+					e.swapLinks(f, fmt.Sprint(f.subst(w)))
+					break
+				}
 				if f.Port != nil && f.Port.Link != nil && fmt.Sprint(m["state"]) == "down" {
 					l := f.Port.Link
 					if l.Up {
@@ -491,6 +499,7 @@ func (e *Engine) clearLocked(f *ActiveFault, why string, src schema.EventSource,
 		l.Up = true
 		e.stateEvent(l.ID, "link", "down", "up", behaviourSrc, c, "")
 	}
+	e.unswapLinks(f, c)
 	if lp := e.loopOf(f.Device); lp != nil {
 		if _, ok := f.Sets["loop.flow"]; ok {
 			lp.Flow = true
@@ -754,4 +763,171 @@ func (e *Engine) FaultTargets(sel, faultID string) ([]string, error) {
 		out = append(out, tg.path)
 	}
 	return out, nil
+}
+
+// ---------------------------------------------------------------- as-built cabling
+
+// cableSwap is one pair of cables a cable-swap fault exchanged. Near ends are the ports the fault
+// named (its target and its `with`); the far ends are what moved: as built, a's near end reaches
+// b's far end and b's near end reaches a's far end (18 — LLDP and cabling).
+type cableSwap struct {
+	a, b         *model.Link
+	nearA, nearB *model.Port
+}
+
+var faultSrc = schema.EventSource{Class: "twin", Principal: "fault"}
+
+// resolvePortOrLink finds what a cable-swap's `with` names: a link id, a port ref, or a selector
+// naming exactly one cabled port.
+func (e *Engine) resolvePortOrLink(ref string) (*model.Link, *model.Port, error) {
+	if l := e.M.LinkBy[ref]; l != nil {
+		return l, nil, nil
+	}
+	if p := e.M.Ports[ref]; p != nil {
+		return p.Link, p, nil
+	}
+	sel, err := selector.Parse(ref)
+	if err != nil {
+		return nil, nil, err
+	}
+	var hit []*model.Port
+	for r, p := range e.M.Ports {
+		if sel.MatchPort(r) {
+			hit = append(hit, p)
+		}
+	}
+	if len(hit) != 1 {
+		return nil, nil, fmt.Errorf("%q names %d ports, want exactly one", ref, len(hit))
+	}
+	return hit[0].Link, hit[0], nil
+}
+
+// swapLinks applies `link: { swapWith: <port ref or link id> }`: the target port's cable and the
+// other's exchange far ends as built, while the design (the links' A, B and ID) stays as it is.
+// It is what generic/cabling/cable-swap does, so a day-0 tool validating LLDP against the
+// cabling plan has something to find (D78). Each link gets an `asBuilt` state event, and each of
+// the four ports one naming its as-built far end, so the critic's reach of the fault covers
+// every switch the swap touches. A swap that cannot apply (an uncabled port, the same cable,
+// a cable already swapped) is recorded as not applied rather than failing the inject.
+func (e *Engine) swapLinks(f *ActiveFault, with string) {
+	if f.Port == nil || f.Port.Link == nil {
+		f.NotApplied = append(f.NotApplied, "link swapWith (the target is not a cabled port)")
+		return
+	}
+	la, nearA := f.Port.Link, f.Port
+	lb, nearB, err := e.resolvePortOrLink(with)
+	switch {
+	case err != nil:
+		f.NotApplied = append(f.NotApplied, "link swapWith: "+err.Error())
+		return
+	case lb == nil:
+		f.NotApplied = append(f.NotApplied, "link swapWith: "+with+" is not cabled")
+		return
+	case lb == la:
+		f.NotApplied = append(f.NotApplied, "link swapWith: "+with+" is the target's own cable")
+		return
+	case la.SwappedWith != nil || lb.SwappedWith != nil:
+		f.NotApplied = append(f.NotApplied, "link swapWith: a cable is already swapped by another fault")
+		return
+	}
+	if nearB == nil {
+		// a link id: its near end is the one on the target's device, else its A end
+		nearB = lb.A
+		if lb.B.Device == nearA.Device {
+			nearB = lb.B
+		}
+	}
+	sw := cableSwap{a: la, b: lb, nearA: nearA, nearB: nearB}
+	la.SwappedWith, lb.SwappedWith = lb, la
+	f.swaps = append(f.swaps, sw)
+	e.stateEvent(la.ID, "asBuilt", "as designed", "swapped with "+lb.ID, faultSrc, f.Seq, "Warning")
+	e.stateEvent(lb.ID, "asBuilt", "as designed", "swapped with "+la.ID, faultSrc, f.Seq, "Warning")
+	for _, p := range []*model.Port{nearA, la.Peer(nearA), nearB, lb.Peer(nearB)} {
+		e.stateEvent(p.Ref, "asBuilt", p.Link.Peer(p).Ref, sw.peer(p).Ref, faultSrc, f.Seq, "Warning")
+	}
+}
+
+// unswapLinks puts a cleared fault's swapped cables back as designed.
+func (e *Engine) unswapLinks(f *ActiveFault, cause uint64) {
+	for _, sw := range f.swaps {
+		ports := []*model.Port{sw.nearA, sw.a.Peer(sw.nearA), sw.nearB, sw.b.Peer(sw.nearB)}
+		was := make([]string, len(ports))
+		for i, p := range ports {
+			was[i] = sw.peer(p).Ref
+		}
+		sw.a.SwappedWith, sw.b.SwappedWith = nil, nil
+		e.stateEvent(sw.a.ID, "asBuilt", "swapped with "+sw.b.ID, "as designed", behaviourSrc, cause, "")
+		e.stateEvent(sw.b.ID, "asBuilt", "swapped with "+sw.a.ID, "as designed", behaviourSrc, cause, "")
+		for i, p := range ports {
+			e.stateEvent(p.Ref, "asBuilt", was[i], p.Link.Peer(p).Ref, behaviourSrc, cause, "")
+		}
+	}
+	f.swaps = nil
+}
+
+// AsBuilt returns the link a cable is swapped with as built (generic/cabling/cable-swap), or nil
+// when it is cabled as designed.
+func (e *Engine) AsBuilt(l *model.Link) *model.Link {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	if l == nil {
+		return nil
+	}
+	return l.SwappedWith
+}
+
+// AsBuiltPeer returns the port p's cable reaches as built: its design peer unless a cable swap
+// moved it. The substrate wires a port's veth to this, and LLDP reports it (D78).
+func (e *Engine) AsBuiltPeer(p *model.Port) *model.Port {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.asBuiltPeer(p)
+}
+
+func (e *Engine) asBuiltPeer(p *model.Port) *model.Port {
+	if p == nil || p.Link == nil {
+		return nil
+	}
+	l := p.Link
+	if l.SwappedWith == nil {
+		return l.Peer(p)
+	}
+	for _, f := range e.faults {
+		for _, sw := range f.swaps {
+			if sw.a == l || sw.b == l {
+				return sw.peer(p)
+			}
+		}
+	}
+	// swapped with no fault recording it (set on the model directly): the A ends stay
+	return cableSwap{a: l, b: l.SwappedWith, nearA: l.A, nearB: l.SwappedWith.A}.peer(p)
+}
+
+// peer is the as-built far end of p, one of the swap's four ports.
+func (sw cableSwap) peer(p *model.Port) *model.Port {
+	near, o, oNear := sw.nearA, sw.b, sw.nearB
+	if p.Link == sw.b {
+		near, o, oNear = sw.nearB, sw.a, sw.nearA
+	}
+	if p == near {
+		return o.Peer(oNear)
+	}
+	return oNear
+}
+
+// PortFaultSets is what the open faults that target a port itself set (a cable fault of
+// generic/cabling: day0.cableFlap, day0.wrongPort, day0.speedMismatch), for the substrate that
+// carries them out on the port's cable.
+func (e *Engine) PortFaultSets(p *model.Port) map[string]any {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	out := map[string]any{}
+	for _, f := range e.faults {
+		if f.Port == p {
+			for k, v := range f.Sets {
+				out[k] = v
+			}
+		}
+	}
+	return out
 }

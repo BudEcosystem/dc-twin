@@ -18,7 +18,8 @@ const DefaultBuild = "Cumulus Linux 5.6.0"
 
 // operational answers the reads NVUE serves from the switch's running state, not its
 // configuration: the system (its build), a VRF's BGP and its neighbours with their sessions'
-// state (FRR's), and a bridge domain's MAC table (the kernel's). ok is false for any other path,
+// state (FRR's), a bridge domain's MAC table (the kernel's) and a port's LLDP neighbours
+// (lldpd's). ok is false for any other path,
 // which is configuration. NVUE's include filters (?include=/*/state) are honoured.
 func (s *Server) operational(r *http.Request, p []string) (any, bool, error) {
 	rev := r.URL.Query().Get("rev")
@@ -34,6 +35,16 @@ func (s *Server) operational(r *http.Request, p []string) (any, bool, error) {
 		v = s.system()
 	case len(p) == 4 && p[0] == "bridge" && p[1] == "domain" && p[3] == "mac-table":
 		v, err = s.macTable(ctx, p[2])
+	case len(p) >= 3 && len(p) <= 5 && p[0] == "interface" && p[2] == "lldp":
+		var l map[string]any
+		l, err = s.lldp(ctx, p[1])
+		s.emit(r, Event{Op: "lldp.read", Path: "/" + strings.Join(p, "/")})
+		if err == nil {
+			var found bool
+			if v, found = Get(l, p[3:]); !found {
+				return nil, false, nil
+			}
+		}
 	case len(p) >= 4 && len(p) <= 6 && p[0] == "vrf" && p[2] == "router" && p[3] == "bgp":
 		if len(p) >= 5 && p[4] != "neighbor" {
 			return nil, false, nil
@@ -66,15 +77,20 @@ func (s *Server) system() map[string]any {
 	s.mu.Unlock()
 	m, _ := out.(map[string]any)
 	m = Clone(m)
-	build := s.sw.Build
-	if build == "" {
-		build = DefaultBuild
-	}
-	m["build"] = build
+	m["build"] = s.build()
 	if m["hostname"] == nil {
 		m["hostname"] = s.sw.Hostname
 	}
-	m["timezone"] = "Etc/UTC"
+	// the time zone configured (date-time timezone since 5.14, timezone before), else Cumulus's
+	// default (vendor facts B)
+	tz := str(m, "date-time", "timezone")
+	if tz == "" {
+		tz = str(m, "timezone")
+	}
+	if tz == "" {
+		tz = "Etc/UTC"
+	}
+	m["timezone"] = tz
 	return m
 }
 
@@ -94,7 +110,7 @@ func (s *Server) bgp(ctx context.Context, vrf string) (map[string]any, error) {
 	// FRR not answering (restarting for a new AS) is no session established: the configuration
 	// is still served, its neighbours idle
 	var peers map[string]map[string]any
-	if s.run != nil && on(m, "enable") {
+	if s.run != nil && switchOn(m) {
 		if out, err := s.run(ctx, "vtysh", "-c", "show bgp vrf "+vrf+" neighbors json"); err == nil {
 			_ = json.Unmarshal([]byte(out), &peers)
 		}
@@ -130,6 +146,84 @@ func (s *Server) bgp(ctx context.Context, vrf string) (map[string]any, error) {
 	m["configured-neighbors"] = float64(len(neighbors))
 	m["established-neighbors"] = float64(established)
 	return m, nil
+}
+
+// lldp is GET /interface/<port>/lldp: the port's LLDP neighbours as lldpd has them (`lldpcli -f
+// json0 show neighbors ports <port> details`), keyed by the neighbour's system name, each with
+// its chassis (chassis-id, system-name, system-description, management-address-ipv4) and port
+// (name, description, type, ttl), the form `nv show interface <port> lldp neighbor -o json`
+// gives on Cumulus 5.x as the twin reads NVIDIA's documentation (the key set beyond these is not
+// modelled). No lldpd answering is no neighbour.
+func (s *Server) lldp(ctx context.Context, port string) (map[string]any, error) {
+	neighbors := map[string]any{}
+	out := map[string]any{"neighbor": neighbors}
+	if s.run == nil {
+		return out, nil
+	}
+	raw, err := s.run(ctx, "lldpcli", "-f", "json0", "show", "neighbors", "ports", port, "details")
+	if err != nil {
+		return out, nil
+	}
+	var doc struct {
+		LLDP []struct {
+			Interface []struct {
+				Name    string `json:"name"`
+				Age     string `json:"age"`
+				Chassis []struct {
+					ID    []struct{ Type, Value string } `json:"id"`
+					Name  []struct{ Value string }       `json:"name"`
+					Descr []struct{ Value string }       `json:"descr"`
+					Mgmt  []struct{ Value string }       `json:"mgmt-ip"`
+				} `json:"chassis"`
+				Port []struct {
+					ID    []struct{ Type, Value string } `json:"id"`
+					Descr []struct{ Value string }       `json:"descr"`
+					TTL   []struct{ Value string }       `json:"ttl"`
+				} `json:"port"`
+			} `json:"interface"`
+		} `json:"lldp"`
+	}
+	if json.Unmarshal([]byte(raw), &doc) != nil {
+		return out, nil
+	}
+	first := func(vs []struct{ Value string }) string {
+		if len(vs) > 0 {
+			return vs[0].Value
+		}
+		return ""
+	}
+	for _, l := range doc.LLDP {
+		for _, it := range l.Interface {
+			if it.Name != port || len(it.Chassis) == 0 {
+				continue
+			}
+			c := it.Chassis[0]
+			name := first(c.Name)
+			chassis := map[string]any{"system-name": name, "system-description": first(c.Descr)}
+			if len(c.ID) > 0 {
+				chassis["chassis-id"] = c.ID[0].Value
+			}
+			if m := first(c.Mgmt); m != "" {
+				chassis["management-address-ipv4"] = m
+			}
+			np := map[string]any{}
+			if len(it.Port) > 0 {
+				pt := it.Port[0]
+				if len(pt.ID) > 0 {
+					np["name"], np["type"] = pt.ID[0].Value, pt.ID[0].Type
+				}
+				np["description"] = first(pt.Descr)
+				if ttl, err := strconv.Atoi(first(pt.TTL)); err == nil {
+					np["ttl"] = float64(ttl)
+				}
+			}
+			if name == "" {
+				name = fmt.Sprint(chassis["chassis-id"])
+			}
+			neighbors[name] = map[string]any{"chassis": chassis, "port": np}
+		}
+	}
+	return out, nil
 }
 
 // macTable is a bridge domain's MAC table from the kernel's FDB, as NVUE numbers its entries.

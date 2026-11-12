@@ -5,10 +5,40 @@
 # relay, here UNPATCHED; nftables what NVUE's ACLs render to. NVUE itself is the twin's: it renders
 # those files and runs those tools.
 #
+# A factory switch (D72, 18 — Factory state, docs/reviews/2026-11-11-day0-vendor-facts.md B) also
+# has what Cumulus ships for day 0: OpenSSH (password logins for every account but root, through
+# PAM, so an expired password is changed at login), ISC's DHCP client on eth0 asking for ZTP's
+# option 239 (dhclient.conf) and handing its lease to the twin's day-0 programs (dhclient-exit-hook),
+# lldpd, chrony (NVUE's service ntp), arping (an operator's duplicate-address check), rsyslog (system syslog), snmpd (system snmp-server; NVUE
+# starts it when configured), sudo and the time zones; sshd shows /etc/issue.net, NVUE's system
+# message pre-login, as its banner (empty until NVUE sets one). Its user
+# cumulus has the password cumulus, already expired (`chage -d 0`), so its first login changes it,
+# in the groups Cumulus's system-admin role gives (sudo, nvshow, nvset, nvapply; nvue.Roles); root
+# is locked. The twin's day-0 programs (cmd/dctwin-day0) are linked as nv, ztp and onie-discover,
+# into /opt/dctwin/bin, which the twin mounts in a factory switch (the links dangle elsewhere). A
+# switch the twin configures itself (bringUp: twin) runs none of the daemons and is reached with
+# the twin's own NVUE password, as before.
+#
 # The twin creates one container per switch with no network, moves the switch's ports into it as
 # swp<n> (n the port's place on the front panel) and runs the start script it renders.
 FROM debian:bookworm-slim
 RUN apt-get update \
  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       frr frr-pythontools ifupdown2 bridge-utils isc-dhcp-relay iproute2 procps tcpdump python3 nftables \
- && rm -rf /var/lib/apt/lists/*
+      openssh-server isc-dhcp-client lldpd chrony rsyslog snmpd sudo tzdata iputils-arping \
+ && rm -rf /var/lib/apt/lists/* \
+ && printf 'PasswordAuthentication yes\nKbdInteractiveAuthentication yes\nPermitRootLogin no\nUsePAM yes\nBanner /etc/issue.net\n' > /etc/ssh/sshd_config.d/dctwin.conf \
+ && : > /etc/issue.net \
+ && sed -i 's/^session\([[:space:]]*\)required\([[:space:]]*\)pam_loginuid.so/session\1optional\2pam_loginuid.so/' /etc/pam.d/sshd \
+ && sed -i 's/^module(load="imklog"/#&/' /etc/rsyslog.conf \
+ && groupadd -r nvshow && groupadd -r nvset && groupadd -r nvapply \
+ && useradd -m -s /bin/bash -G sudo,nvshow,nvset,nvapply cumulus \
+ && echo 'cumulus:cumulus' | chpasswd -c SHA512 \
+ && chage -d 0 cumulus \
+ && passwd -l root \
+ && mkdir -p /etc/dhcp/dhclient-exit-hooks.d /run/dctwin /opt/dctwin/bin \
+ && ln -sf /opt/dctwin/bin/dctwin-day0 /usr/bin/nv \
+ && ln -sf /opt/dctwin/bin/dctwin-day0 /usr/sbin/ztp \
+ && ln -sf /opt/dctwin/bin/dctwin-day0 /usr/sbin/onie-discover
+COPY dhclient.conf /etc/dhcp/dhclient.conf
+COPY dhclient-exit-hook /etc/dhcp/dhclient-exit-hooks.d/dctwin

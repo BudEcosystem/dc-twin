@@ -48,7 +48,15 @@ func (o *observer) loop(ctx context.Context, wg *sync.WaitGroup) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			o.poll(ctx)
+			// BGP sessions every bgpInterval once up: each read is a container exec, which a
+			// loaded NOS runtime queues (ports are read from the namespace, no exec)
+			o.mu.Lock()
+			bgp := time.Since(o.lastBGP) >= bgpInterval
+			if bgp {
+				o.lastBGP = time.Now()
+			}
+			o.mu.Unlock()
+			o.pollWith(ctx, bgp)
 		}
 	}
 }
@@ -64,12 +72,17 @@ type bgpSummary struct {
 	} `json:"ipv4Unicast"`
 }
 
-func (o *observer) poll(ctx context.Context) {
+// bgpInterval is how often the observer reads FRR's sessions after up.
+const bgpInterval = 10 * time.Second
+
+func (o *observer) poll(ctx context.Context) { o.pollWith(ctx, true) }
+
+func (o *observer) pollWith(ctx context.Context, bgp bool) {
 	for _, sw := range o.s.switches {
 		host := sw.plan.Config.Hostname
 		e := sw.plan.NOS
 		if cmd := e.PortStateCommand(); cmd != nil {
-			if o.s.docker != nil {
+			if o.s.docker != nil && bgp { // an exec too (SONiC's APPL_DB): as often as BGP
 				cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 				out, _, err := o.s.docker.Exec(cctx, sw.c.ID, cmd...)
 				cancel()
@@ -102,11 +115,11 @@ func (o *observer) poll(ctx context.Context) {
 				o.set(host, sw.plan.Device.Path+":"+port, "operState", st, "")
 			}
 		}
-		if len(sw.plan.Config.Routed) == 0 || o.s.docker == nil {
-			continue
+		if !bgp || len(sw.plan.Config.Routed) == 0 || o.s.docker == nil || sw.plan.Config.Factory != nil {
+			continue // a factory switch's sessions are the day-0 observer's to read
 		}
 		cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-		out, _, err := o.s.docker.Exec(cctx, sw.routing().ID, "vtysh", "-c", "show bgp summary json")
+		out, _, err := o.s.docker.Exec(cctx, sw.routing().ID, "timeout", "10", "vtysh", "-c", "show bgp summary json")
 		cancel()
 		if err != nil {
 			continue
@@ -168,8 +181,20 @@ func (o *observer) sessionsDown() []string {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	var down []string
+	factory := map[string]bool{}
 	for _, sw := range o.s.switches {
+		if sw.plan.Config.Factory != nil {
+			factory[sw.plan.Config.Hostname] = true
+		}
+	}
+	for _, sw := range o.s.switches {
+		if sw.plan.Config.Factory != nil {
+			continue // its sessions are the software under test's to bring up (D72)
+		}
 		for _, r := range sw.plan.Config.Routed {
+			if peer, _, _ := strings.Cut(r.PeerName, ":"); factory[peer] {
+				continue // nor is a session to a factory switch up before day 0
+			}
 			key := sw.plan.Device.Path + " bgp " + r.Peer.String()
 			if o.state[key] != "Established" {
 				down = append(down, fmt.Sprintf("%s→%s (%s)", sw.plan.Config.Hostname, r.PeerName, orNone(o.state[key])))

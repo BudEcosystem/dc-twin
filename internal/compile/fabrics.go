@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/BudEcosystem/dc-twin/internal/model"
 	"github.com/BudEcosystem/dc-twin/internal/nos"
@@ -102,6 +103,103 @@ func (c *compiler) fabrics() {
 		}
 		c.genOOB(f, c.placeIn(fs))
 	}
+	for _, fs := range c.est.Spec.Fabrics {
+		if f := c.m.Fabrics[fs.Name]; f != nil {
+			c.bringUp(fs, f)
+		}
+	}
+}
+
+// bringUp checks and defaults how a fabric's real switches start (D72, 18 — The estate).
+func (c *compiler) bringUp(fs schema.Fabric, f *model.Fabric) {
+	f.BringUp = fs.BringUp
+	switch fs.BringUp {
+	case "", "twin":
+		f.BringUp = "twin"
+		if fs.Factory != nil {
+			c.errf("fabric %s: factory is set but bringUp is not factory", fs.Name)
+		}
+		return
+	case "factory":
+	default:
+		c.errf("fabric %s: bringUp %q: twin or factory", fs.Name, fs.BringUp)
+		return
+	}
+	if fs.NOS == "none" {
+		c.errf("fabric %s: bringUp factory needs a real nos: a model switch (nos none) has no factory state", fs.Name)
+		return
+	}
+	if sub := c.est.Spec.Adapters.Network.Substrate; sub != "tap" {
+		c.errf("fabric %s: bringUp factory needs spec.adapters.network.substrate: tap", fs.Name)
+	}
+	ff := schema.FabricFactory{}
+	if fs.Factory != nil {
+		ff = *fs.Factory
+	}
+	out := &model.FabricFactory{Install: ff.Install, ZTP: ff.ZTP != "disabled", Plan: ff.Plan, BootTime: 90 * time.Second, InstallTime: 5 * time.Minute, Devices: map[*model.Device]bool{}}
+	switch ff.Install {
+	case "":
+		out.Install = "preinstalled"
+	case "preinstalled":
+	case "onie":
+		if len(c.est.Spec.Adapters.Network.NOS.Images) == 0 {
+			c.errf("fabric %s: factory.install onie needs spec.adapters.network.nos.images: the installers ONIE's discovery recognises", fs.Name)
+		}
+	default:
+		c.errf("fabric %s: factory.install %q: preinstalled or onie", fs.Name, ff.Install)
+	}
+	switch ff.ZTP {
+	case "", "enabled", "disabled":
+	default:
+		c.errf("fabric %s: factory.ztp %q: enabled or disabled", fs.Name, ff.ZTP)
+	}
+	switch ff.Plan {
+	case "":
+		out.Plan = "given"
+	case "given", "tool":
+	default:
+		c.errf("fabric %s: factory.plan %q: given or tool", fs.Name, ff.Plan)
+	}
+	for _, d := range []struct {
+		name string
+		v    string
+		to   *time.Duration
+	}{{"bootTime", ff.BootTime, &out.BootTime}, {"installTime", ff.InstallTime, &out.InstallTime}} {
+		if d.v == "" {
+			continue
+		}
+		x, err := time.ParseDuration(d.v)
+		if err != nil || x < 0 {
+			c.errf("fabric %s: factory.%s %q: a duration (90s, 5m)", fs.Name, d.name, d.v)
+			continue
+		}
+		*d.to = x
+	}
+	sel, err := selector.Parse(ff.Select)
+	if err != nil {
+		c.errf("fabric %s: factory.select: %v", fs.Name, err)
+		return
+	}
+	// the fabric's switches, as twin.NOSSwitches finds them: those it generated and those its
+	// cables reach
+	sws := append([]*model.Device{}, f.Devices...)
+	for _, l := range c.m.Links {
+		if l.Fabric != f.Name {
+			continue
+		}
+		for _, p := range []*model.Port{l.A, l.B} {
+			// a switch's management port cabled in this fabric does not make it this fabric's
+			if p.Role != "management" {
+				sws = append(sws, p.Device)
+			}
+		}
+	}
+	for _, d := range sws {
+		if d.BaseClass == "switch" && (ff.Select == "" || sel.MatchPath(d.Path)) {
+			out.Devices[d] = true
+		}
+	}
+	f.Factory = out
 }
 
 // placeIn finds the rack generated switches go into: the fabric's placeIn, else the hall's

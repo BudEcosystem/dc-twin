@@ -11,6 +11,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"github.com/BudEcosystem/dc-twin/internal/day0"
 	"io"
 	"net"
 	"net/http"
@@ -430,6 +431,34 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, links)
 	case p == "/facility" && r.Method == http.MethodGet:
 		writeJSON(w, eng.Facility())
+	case p == "/fabric/day0" && r.Method == http.MethodGet:
+		// the day-0 observer's view of every factory switch (18 — Converged): its phase, its
+		// difference from the design, and what it was observed to be
+		src, ok := s.T.Net.L2.(day0Source)
+		if !ok {
+			writeJSON(w, map[string]any{"factory": false, "switches": []any{}})
+			break
+		}
+		v, obs := src.Day0()
+		d := src.Design()
+		writeJSON(w, map[string]any{"factory": len(d.Switches) > 0, "plan": d.Plan, "switches": v, "observed": obs})
+	case p == "/switch/factory-reset" && r.Method == http.MethodPost:
+		// a factory switch back to its NOS's factory state, its ZTP armed again (18)
+		src, ok := s.T.Net.L2.(factoryResetter)
+		if !ok {
+			jsonErr(w, http.StatusConflict, "the substrate runs no factory switches")
+			break
+		}
+		reset := src.FactoryReset
+		if u, _ := body["uninstall"].(bool); u {
+			// ONIE's uninstall as well: the switch back to ONIE, its NOS installed again
+			reset = src.FactoryUninstall
+		}
+		if err := reset(r.Context(), str("path")); err != nil {
+			jsonErr(w, http.StatusBadRequest, err.Error())
+			break
+		}
+		writeJSON(w, map[string]any{"reset": str("path")})
 	case p == "/domains" && r.Method == http.MethodGet:
 		writeJSON(w, eng.Domains())
 	case p == "/endpoints" && r.Method == http.MethodGet:
@@ -661,4 +690,17 @@ func currentAccount(d *model.Device) (user, pass string) {
 		return admin.User, admin.Password
 	}
 	return d.Identity.BMCUser, d.Identity.BMCPassword
+}
+
+// day0Source is a substrate that runs factory switches and holds them against the design (the
+// TAP substrate, 18).
+type day0Source interface {
+	Day0() ([]day0.Verdict, map[string]day0.Observed)
+	Design() day0.Design
+}
+
+// factoryResetter is a substrate that can return a factory switch to its factory state (18).
+type factoryResetter interface {
+	FactoryReset(ctx context.Context, path string) error
+	FactoryUninstall(ctx context.Context, path string) error
 }

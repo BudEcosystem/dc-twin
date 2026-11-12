@@ -181,6 +181,56 @@ requests answer 404 (it reads `LeakDetection` on every chassis, most of which ha
 `generic/hygiene/error-ratio` warns on every run, a finding about the reference stack rather than
 the twin.
 
+## Day 0
+
+[18 — Day 0](spec/18-day0.md), built 2026-11-11. A fabric with `bringUp: factory` starts its
+switches in their NOS's factory state on the TAP substrate. The software under test then brings
+them up through DHCP, ZTP, ONIE, NVUE, `nv`, SSH and SONiC's CLI, and the twin's day-0 observer
+holds each switch against the design it wrote to `stack-inputs/day0/`. The suites run with
+`RUN=TestDay0… MODE=native scripts/linux-substrate-e2e.sh` (x86_64 Linux, rootless Podman). The
+test plays the site's tooling with Kea and an HTTP server, and reads nothing but
+`stack-inputs/day0` and its own DHCP leases.
+
+| Suite | What it shows | Result (pnap, every suite on the final code 2026-11-12, three at a time) |
+|---|---|---|
+| `TestDay0Cumulus` | Four `generic/nvue-frr` factory switches lease on `eth0` (VRF `mgmt`) through the twin-configured OOB relay. Kea hands each its option 239 by vendor class; ZTP fetches with Cumulus's headers and needs the marker. The script's `nv` calls configure the underlay and change the factory password, and the fabric converges | **PASS**: converged 22 s after `up`; NVUE refuses the factory password afterwards |
+| `TestDay0ONIE` | The same switches with no NOS. ONIE's discovery leases with `onie_vendor:<platform>`, takes option 114, fetches with ONIE's headers, and the twin recognises the installer by name; the NOS boots and its ZTP brings it up | **PASS**: installed and converged 40 s after `up` |
+| `TestDay0API` | ZTP off. The tool finds each switch by MAC in its own leases, logs in over SSH with the expired factory password (PAM's forced change), then pushes half the switches through NVUE's REST revision workflow and half with `nv` over SSH | **PASS**: converged 8 s after the first push |
+| `TestDay0Cabling` | `generic/cabling`'s cable swap before ZTP. The swapped /31 sessions stay down and the oracle names them. The reference stack's `check-cabling.py`, which reads LLDP through NVUE, names both swapped cables. Then the missing, dead, speed-mismatch, wrong-port and flapping cable faults each take a session down | **PASS**: converged 8 s after the cables were put back; the check passed once lldpd's TTL ran out; every cable fault's session came back when it cleared |
+| `TestDay0Faults` | One `generic/day0` fault per switch before boot: the lease without the ZTP option, the script cut short, the ZTP server unreachable, the switch dead on arrival. None converges, each for its reason; cleared and factory-reset, the fabric converges | **PASS** |
+| `TestLLDPDecodedByTcpdump` | The twin's LLDP frames decoded by tcpdump's 802.1AB dissector, every TLV named and none malformed | **PASS** |
+| `TestDay0Ansible` | ZTP off. NVIDIA's `nvidia.nvue` collection (1.2.9, from Galaxy) runs in a container on the OOB network. It reads the leases, changes the factory password at first login, then opens one revision per switch, stages `system`, `interface`, `router` and `vrf` in it, applies with `force` and `wait`, and reads the applied `system` back. The play runs again on the converged fabric, then again after every switch is factory-reset | **PASS**: converged 6 s after the first push, still converged after the rerun, converged 8 s after the push that followed the reset; the critic's `day0/fabric` passes |
+| `TestDay0Sonic` | Four `sonic-vs` factory switches. The twin's DHCP client takes option 67, the ZTP document's `configdb-json` dynamic URL (by serial) loads each `config_db.json`, and SONiC's managers and frrcfgd take it to the kernel and FRR | **PASS**: converged 22 s after `up` |
+| `TestDay0ReferenceCumulus`, `TestDay0ReferenceSonic` | The reference stack (`stacks/reference-day0`) as a site runs it: `render.py`'s Kea configuration and per-serial ZTP files, unchanged, for Cumulus and for SONiC | **PASS**: converged 30 s and 20 s after `up`; the critic passes, the SONiC run with the stack declared in the estate |
+| `TestDay0ONIEFaults` | ONIE's faults before boot: power lost during the install (back to discovery, again and again), the installer rejected (fetched, never installed), a slow boot (still in ONIE when the others have installed) | **PASS**: once cleared, all four installed and converged 1 m 30 s later |
+| `TestDay0MgmtFaults` | On a converged fabric: NTP unreachable (the switch's requests stop reaching the tooling's SNTP server while the others' continue), and a duplicate management address (`arping -D` on the switch's `eth0` finds a second responder) | **PASS**: both detected, both recovered when cleared |
+| `TestDay0NetBox` | NetBox + Ansible (`compat/netbox-ansible`, D79). NetBox 4.2.9 is loaded through its own CSV import and the leases are recorded as OOB addresses. net-configurator nc-v8.0.0's own password bootstrap runs unmodified. Its spine template, ported onto NetBox's data, is pushed by `nvidia.nvue` over REST to switches on Cumulus 5.18.3's grammar | **PASS**: all 17 CSVs imported, bootstrap 9 s, push 12 s, converged 10 s after the push; the critic passes |
+| `TestDay0SonicPush` | ZTP off on four factory `sonic-vs` switches. The tooling logs in over SSH as `admin` with SONiC's factory password and loads each switch's `config_db.json` with `sudo config load -y` and `config save -y`. gNMI Get and Set work at the management lease, with the estate CA's client certificate | **PASS**: converged 4 s after the SSH push; gNMI Get returned the pushed hostname and the Set's VRF reached CONFIG_DB |
+| `TestDay0PlanTool` | `plan: tool`: no `plan.json`. The tooling allocates its own loopbacks, /31s and AS numbers from `cabling.csv`, and the oracle judges the result by its structure | **PASS**: converged 20 s after `up` on the tool's plan; the critic passes |
+
+Every suite above also checks the critic's day-0 measures: each factory switch's
+`day0.toConverged`, logged with the others (time to lease, to ZTP, to ZTP done; applies, failed
+applies, ZTP failures; the fabric's median and maximum; refused changes). `TestDay0ONIE` also
+covers ONIE's uninstall: the switch goes back to ONIE, reinstalls, and converges 16 s later.
+`TestDay0Cumulus` checks that a preinstalled switch's uninstall is refused.
+
+The NVUE changes (the 5.15+ grammar, the LLDP read, `nv config apply --confirm`) were also run
+against the suites that use NVUE outside day 0, in the same pass: `TestNVUE`, `TestRealNOS`,
+`TestDPUIsolation` (HBN) and `TestSonicVS` all **PASS**.
+
+The tooling's own definitions are checked in unit tests:
+- `internal/day0`'s `TestNetBoxImportForms` checks the `netbox/` CSVs against NetBox 4.2.9's import forms, read from its source by `scripts/netbox-import-schema.py`.
+- `internal/day0/ztp`'s `TestSonicZTPReference` runs the twin's ZTP engine on all 87 ZTP JSON documents in sonic-ztp's tests and on the tooling's own, under sonic-ztp's rules.
+
+[18](spec/18-day0.md#as-built) says what each one found.
+
+The test's Kea selects by what each client sends: Cumulus's vendor class (option 60), ONIE's
+`onie_vendor:` class, and SONiC's user class (option 77), compared as raw bytes because Kea 2.6
+reads 77 as RFC 3004 records. `stacks/reference-day0/render.py` writes the same configuration
+per MAC from `stack-inputs/day0`. Observers read factory switches without exec: their files
+through `/proc/<pid>/root`, FRR over its vty sockets and SONiC's CONFIG_DB over its redis socket.
+Only LLDP is an exec, once a minute.
+
 ## The reference stack
 
 `cmd/refstack` exists so scenarios can run end to end against software that reaches the twin only

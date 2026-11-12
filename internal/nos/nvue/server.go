@@ -2,7 +2,6 @@ package nvue
 
 import (
 	"context"
-	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -34,12 +33,19 @@ type Runner func(ctx context.Context, args ...string) (string, error)
 // Event is one NVUE write a client made, for the twin's event log (D71, I-07): what it did (the
 // revision's state change, or a change made in it), the revision, the client, and the result.
 type Event struct {
-	Op       string // revision.create, revision.change, revision.delete, revision.apply
+	// revision.create, revision.change, revision.refuse (a change the schema refused, Issue
+	// saying why), revision.delete, revision.apply, revision.detach, config.save, lldp.read
+	Op       string
 	Revision string
 	Path     string
-	Client   string
-	State    string // the revision's state after it
-	Issue    string
+	// Client is <user>@<address>: the user the request authenticated as (by HTTP Basic, or the
+	// invoking user of the switch's own `nv` over the local trust path) and where it came from.
+	Client string
+	User   string
+	// Via is how the client reached NVUE: rest, or nv (the switch's `nv` CLI, D76).
+	Via   string
+	State string // the revision's state after it
+	Issue string
 }
 
 // revision states, as NVUE names them
@@ -67,6 +73,10 @@ type revision struct {
 	state   string
 	issue   string
 	output  string
+	// user is who created it, created and applied when (applied zero: never), for `nv config
+	// history`
+	user             string
+	created, applied time.Time
 }
 
 // Server is one switch's NVUE: its revisions and the applied configuration.
@@ -75,8 +85,20 @@ type Server struct {
 	password string
 	apply    Applier
 
-	run    Runner
-	notify func(Event)
+	run       Runner
+	notify    func(Event)
+	onApplied func()
+
+	// auth checks a request's HTTP Basic credentials against the switch's accounts; nil: the
+	// single password of User (a switch the twin configures, D56)
+	auth    Authenticator
+	authSet bool
+	// authForget forgets the authenticator's cached successes (shadowAuthenticator), after an apply
+	authForget func()
+	// token is the local trust path's secret (SetLocalToken); "" refuses the path
+	token     string
+	groupsMu  sync.Mutex
+	groupSeen map[string]groupsAt
 
 	applyMu sync.Mutex // one apply at a time, as NVUE serialises them
 	mu      sync.Mutex // the state below; never held while the switch applies
@@ -85,11 +107,15 @@ type Server struct {
 	files   Files // the applied configuration's
 	revs    map[string]*revision
 	next    int
+	// pending is each user's pending revision, the one `nv set` and `nv unset` stage changes in
+	// and `nv config apply` applies, as NVUE keeps one per user (vendor facts C.2)
+	pending map[string]string
 }
 
 // NewServer makes a switch's NVUE. Its applied configuration is empty until ApplyStartup.
 func NewServer(sw nos.Switch, password string, apply Applier) *Server {
-	return &Server{sw: sw, password: password, apply: apply, applied: Tree{}, revs: map[string]*revision{}, next: 1}
+	return &Server{sw: sw, password: password, apply: apply, applied: Tree{}, revs: map[string]*revision{}, next: 1,
+		pending: map[string]string{}, groupSeen: map[string]groupsAt{}}
 }
 
 // ApplyStartup applies the configuration the model gives the switch (Startup) as its first
@@ -101,7 +127,7 @@ func (s *Server) ApplyStartup(ctx context.Context) error {
 	}
 	s.mu.Lock()
 	s.startup = Clone(t)
-	r := &revision{tree: Clone(t), changes: []change{{v: t}}, state: statePending}
+	r := &revision{tree: Clone(t), changes: []change{{v: t}}, state: statePending, user: "system", created: time.Now()}
 	s.revs[s.newID()] = r
 	s.mu.Unlock()
 	s.applyRevision(ctx, r)
@@ -119,18 +145,42 @@ func (s *Server) newID() string {
 	return id
 }
 
-// SetRunner gives NVUE the switch's operational state, read by running commands in it.
-func (s *Server) SetRunner(r Runner) { s.run = r }
+// SetRunner gives NVUE the switch's operational state, read by running commands in it. On a
+// factory switch (D72) it also makes the switch's own accounts what the REST API authenticates
+// against (ShadowAuthenticator), unless SetAuthenticator chose otherwise, as Cumulus's NVUE
+// authenticates through PAM.
+func (s *Server) SetRunner(r Runner) {
+	s.run = r
+	if s.sw.Factory != nil && !s.authSet && r != nil {
+		s.auth, s.authForget = shadowAuthenticator(r)
+	}
+}
 
 // OnWrite makes every write a client makes an Event.
 func (s *Server) OnWrite(f func(Event)) { s.notify = f }
+
+// OnApplied is called after every revision NVUE applies (applied or apply_fail: what the switch
+// now runs changed), outside NVUE's locks: where the substrate learns that the API's listening
+// addresses (ListeningAddresses) may have changed.
+func (s *Server) OnApplied(f func()) { s.onApplied = f }
+
+// ListeningAddresses are the addresses the applied configuration has NVUE's REST API listen at
+// (`nv set system api listening-address <ip>`, vendor facts B and C), sorted; none: every
+// address, as Cumulus's nginx "listens on all addresses for the target port" then (5.14).
+func (s *Server) ListeningAddresses() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return keys(sub(s.applied, "system", "api", "listening-address"))
+}
 
 func (s *Server) emit(r *http.Request, e Event) {
 	if s.notify == nil {
 		return
 	}
-	if u, _, ok := r.BasicAuth(); ok {
-		e.Client = u + "@" + r.RemoteAddr
+	who := principalOf(r)
+	e.User, e.Via = who.user, who.via
+	if e.User != "" {
+		e.Client = e.User + "@" + r.RemoteAddr
 	} else {
 		e.Client = r.RemoteAddr
 	}
@@ -183,7 +233,6 @@ func (s *Server) applyRevision(ctx context.Context, r *revision) {
 		out += s.reimport(ctx, prev, t)
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	r.tree, r.output = t, out
 	switch {
 	case rerr != nil:
@@ -191,9 +240,19 @@ func (s *Server) applyRevision(ctx context.Context, r *revision) {
 	case aerr != nil:
 		r.state, r.issue = stateApplyFail, aerr.Error()
 		s.applied, s.files = Clone(t), files
+		r.applied = time.Now()
 	default:
 		r.state, r.issue = stateApplied, ""
 		s.applied, s.files = Clone(t), files
+		r.applied = time.Now()
+	}
+	changed := rerr == nil
+	s.mu.Unlock()
+	if changed && s.authForget != nil {
+		s.authForget()
+	}
+	if changed && s.onApplied != nil {
+		s.onApplied()
 	}
 }
 
@@ -201,15 +260,29 @@ func (s *Server) applyRevision(ctx context.Context, r *revision) {
 // applied by default, startup, or a revision's id), PATCH (a JSON merge: null unsets) and DELETE
 // of a path in a pending revision, and the revisions themselves: POST /nvue_v1/revision creates
 // one from the applied configuration, PATCH /nvue_v1/revision/<id> {"state":"apply"} applies it,
-// GET reads its state. Every request authenticates as User, by HTTP Basic.
+// GET reads its state. Every request authenticates (auth.go): on a switch the twin configures as
+// User, by HTTP Basic, with the switch's one password; on a factory switch as any of its
+// accounts, as Cumulus's NVUE authenticates through PAM; and from the switch's own `nv` by the
+// local trust path. The twin's own endpoints for `nv` are under /nvue_v1/dctwin (cliEndpoint).
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	u, p, ok := r.BasicAuth()
-	if !ok || u != User || subtle.ConstantTimeCompare([]byte(p), []byte(s.password)) != 1 {
-		w.Header().Set("WWW-Authenticate", `Basic realm="nvue"`)
-		problem(w, http.StatusUnauthorized, "Unauthorized", "authenticate as "+User)
+	who, code, why := s.authenticate(r)
+	if code != 0 {
+		if code == http.StatusUnauthorized {
+			w.Header().Set("WWW-Authenticate", `Basic realm="nvue"`)
+			problem(w, code, "Unauthorized", why)
+		} else {
+			problem(w, code, "Forbidden", why)
+		}
 		return
 	}
-	rest, ok := strings.CutPrefix(r.URL.Path, "/nvue_v1")
+	r = r.WithContext(context.WithValue(r.Context(), principalKey{}, who))
+	if code, why := s.authorize(r, who); code != 0 {
+		problem(w, code, "Forbidden", why)
+		return
+	}
+	// the escaped path, so a segment holding a slash (an address with its prefix length,
+	// 10.0.0.0%2F24) stays one segment
+	rest, ok := strings.CutPrefix(r.URL.EscapedPath(), "/nvue_v1")
 	if !ok {
 		problem(w, http.StatusNotFound, "Not Found", r.URL.Path)
 		return
@@ -226,6 +299,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(path) > 0 && path[0] == "revision" {
 		s.revision(w, r, path[1:])
+		return
+	}
+	if len(path) > 0 && path[0] == "dctwin" {
+		s.cliEndpoint(w, r, path[1:])
 		return
 	}
 	switch r.Method {
@@ -277,7 +354,7 @@ func (s *Server) get(w http.ResponseWriter, r *http.Request, path []string) {
 	}
 	s.mu.Unlock()
 	if !found {
-		if err := Validate(path, nil); err != nil {
+		if err := ValidateAt(s.Version(), path, nil); err != nil {
 			problem(w, http.StatusNotFound, "Not Found", err.Error())
 			return
 		}
@@ -290,9 +367,16 @@ func (s *Server) change(w http.ResponseWriter, r *http.Request, path []string) {
 	id := r.URL.Query().Get("rev")
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// refused is the schema's refusal of the change, by name (a path the twin does not emulate,
+	// or not in this release): reported apart, as a gap on the twin's side, not the client's
+	var refused error
 	defer func() {
 		if rv := s.revs[id]; rv != nil {
-			s.emit(r, Event{Op: "revision.change", Revision: id, Path: "/" + strings.Join(path, "/"), State: rv.state})
+			op, issue := "revision.change", ""
+			if refused != nil {
+				op, issue = "revision.refuse", refused.Error()
+			}
+			s.emit(r, Event{Op: op, Revision: id, Path: "/" + strings.Join(path, "/"), State: rv.state, Issue: issue})
 		}
 	}()
 	rv := s.revs[id]
@@ -308,7 +392,8 @@ func (s *Server) change(w http.ResponseWriter, r *http.Request, path []string) {
 		return
 	}
 	if r.Method == http.MethodDelete {
-		if err := Validate(path, nil); err != nil {
+		if err := ValidateAt(s.Version(), path, nil); err != nil {
+			refused = err
 			problem(w, http.StatusBadRequest, "Bad Request", err.Error())
 			return
 		}
@@ -333,10 +418,13 @@ func (s *Server) change(w http.ResponseWriter, r *http.Request, path []string) {
 			return
 		}
 	}
-	if err := Validate(path, v); err != nil {
+	if err := ValidateAt(s.Version(), path, v); err != nil {
+		refused = err
 		problem(w, http.StatusBadRequest, "Bad Request", err.Error())
 		return
 	}
+	path, v = withChoices(path, v)
+	path, v = hashPasswords(path, v)
 	Patch(rv.tree, path, v)
 	rv.changes = append(rv.changes, change{path: path, v: v})
 	out, _ := Get(rv.tree, path)
@@ -365,7 +453,7 @@ func (s *Server) revision(w http.ResponseWriter, r *http.Request, rest []string)
 			writeJSON(w, http.StatusOK, out)
 		case http.MethodPost:
 			id := s.newID()
-			rv := &revision{tree: Clone(s.applied), state: statePending}
+			rv := &revision{tree: Clone(s.applied), state: statePending, user: principalOf(r).user, created: time.Now()}
 			s.revs[id] = rv
 			s.emit(r, Event{Op: "revision.create", Revision: id, State: rv.state})
 			writeJSON(w, http.StatusOK, map[string]any{id: status(rv)})
@@ -440,6 +528,7 @@ func problem(w http.ResponseWriter, code int, title, detail string) {
 // configuration), it never gives zebra their router MACs and the VRF routes into a black hole
 // (FRR 8.4). It runs after the switch's tools have applied, without the state lock.
 func (s *Server) reimport(ctx context.Context, prev, next Tree) string {
+	prev, next = normalize(prev), normalize(next)
 	var out strings.Builder
 	asn := str(next, "router", "bgp", "autonomous-system")
 	for _, v := range keys(sub(next, "vrf")) {

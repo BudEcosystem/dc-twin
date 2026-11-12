@@ -124,11 +124,29 @@ func sonicManagement(t *testing.T, stateDir string, sub *tap.Substrate, leaf, ag
 	out, _ = sub.Exec(ctx, leaf, "ip", "-br", "link", "show", "type", "vrf")
 	t.Logf("kernel VRF support: %v; %s's VRF devices:\n%s", vrf, leaf, indent(out))
 	if vrf == nil {
-		waitFor(t, 30*time.Second, "Vrf-tenant-a in the leaf's kernel and FRR", func() bool {
-			k, _ := sub.Exec(ctx, leaf, "ip", "link", "show", "Vrf-tenant-a")
-			f, _ := sub.RoutingExec(ctx, leaf, "vtysh", "-c", "show running-config")
+		// frrcfgd takes a VRF's vni to FRR with `vtysh -d zebra` (its table-to-daemon map gives VRF
+		// to zebra), and FRR 10 configures a VRF through mgmtd, which `-d zebra` leaves out: the
+		// pinned build's FRR refuses it ("mgmtd is not running"), so a VNI written to CONFIG_DB
+		// never reaches FRR. That is a FINDING in SONiC when it is the cause (frrcfgd's own command
+		// reproduced), a failure otherwise.
+		var k, f string
+		ok := eventually(30*time.Second, func() bool {
+			k, _ = sub.Exec(ctx, leaf, "ip", "-d", "link", "show", "Vrf-tenant-a")
+			f, _ = sub.RoutingExec(ctx, leaf, "vtysh", "-c", "show running-config")
 			return strings.Contains(k, "vrf") && strings.Contains(f, "vrf Vrf-tenant-a\n vni 10001")
 		})
+		finding := false
+		if !ok && strings.Contains(k, "vrf") && strings.Contains(f, "vrf Vrf-tenant-a\n") {
+			repro, _ := sub.RoutingExec(ctx, leaf, "vtysh", "-d", "zebra", "-c", "configure terminal", "-c", "vrf Vrf-tenant-a", "-c", "vni 10001")
+			if strings.Contains(repro, "mgmtd is not running") {
+				finding = true
+				t.Logf("FINDING (SONiC: frrcfgd with FRR 10 at the pinned build): the kernel has Vrf-tenant-a and FRR the VRF, not its vni; frrcfgd's own command, vtysh -d zebra ... vni 10001, is refused: %q", strings.TrimSpace(repro))
+			}
+		}
+		if !ok && !finding {
+			logs, _ := sub.Exec(ctx, leaf, "sh", "-c", "grep -iE 'vrfmgrd|vrforch|Vrf-tenant' /var/log/syslog | tail -15")
+			t.Fatalf("Vrf-tenant-a is not in the leaf's kernel and FRR after 30 s:\nkernel: %s\nFRR:\n%s\nsyslog:\n%s", k, indent(f), indent(logs))
+		}
 	} else {
 		t.Logf("the Docker host's kernel has no VRF devices (%v): vrfmgrd and FRR refuse Vrf-tenant-a, as the fidelity report says", vrf)
 	}

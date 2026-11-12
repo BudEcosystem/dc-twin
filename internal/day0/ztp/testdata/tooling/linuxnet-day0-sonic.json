@@ -1,0 +1,1 @@
+{"ztp": {"01-configdb-json": {"dynamic-url": {"source": {"prefix": "http://10.90.1.10:8080/ztp/configdb/", "identifier": "serial-number", "suffix": ".json"}}, "clear-config": false, "overwrite-device-metadata": true}, "02-connectivity-check": {"ping-hosts": ["10.90.1.10"], "ignore-result": true}}}

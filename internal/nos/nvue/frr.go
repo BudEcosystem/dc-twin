@@ -55,10 +55,13 @@ func renderFRR(t Tree, sw nos.Switch, l3 map[string]int) (string, error) {
 	if err := renderPolicy(w, sub(t, "router", "policy")); err != nil {
 		return "", err
 	}
+	renderBFD(w, sub(t, "router", "bfd"))
 
 	asn := str(t, "router", "bgp", "autonomous-system")
 	rid := str(t, "router", "bgp", "router-id")
-	if !on(t, "router", "bgp", "enable") || asn == "" {
+	// BGP runs once it has an AS, unless turned off: Cumulus's own examples configure it with
+	// `nv set router bgp autonomous-system <n>` and neighbours, never `router bgp enable on`
+	if str(t, "router", "bgp", "enable") == "off" || asn == "" {
 		for _, name := range keys(vrfs) {
 			if on(t, "vrf", name, "router", "bgp", "enable") {
 				return "", fmt.Errorf("vrf %s router bgp is on and router bgp has no autonomous-system or is off", name)
@@ -72,7 +75,14 @@ func renderFRR(t Tree, sw nos.Switch, l3 map[string]int) (string, error) {
 		if name != "default" && !on(bgp, "enable") {
 			continue
 		}
-		if err := renderBGP(w, bgp, name, asn, rid, evpn, l3[name] != 0); err != nil {
+		// graceful restart is NVUE's global router bgp's; the twin gives it to the default VRF's
+		// instance, the fabric's (whether Cumulus also renders it in each tenant VRF's is
+		// UNCONFIRMED)
+		var gr map[string]any
+		if name == "default" {
+			gr = sub(t, "router", "bgp", "graceful-restart")
+		}
+		if err := renderBGP(w, bgp, gr, name, asn, rid, evpn, l3[name] != 0); err != nil {
 			return "", err
 		}
 	}
@@ -249,6 +259,12 @@ func renderPolicy(w func(string, ...any), pol map[string]any) error {
 				return err
 			}
 			w("route-map %s %s %s", name, a, seq)
+			if d := str(r, "description"); d != "" {
+				w(" description %s", d)
+			}
+			// match type (ipv4, ipv6) is the family the rule's prefix list and length are read
+			// in; FRR has no match of its own for it, so a rule matching only its type and an
+			// interface (net-configurator's LOOPBACK_BGP) renders as its interface match
 			m := sub(r, "match")
 			if pl := str(m, "ip-prefix-list"); pl != "" {
 				if str(m, "type") == "ipv6" {
@@ -297,11 +313,66 @@ func renderPolicy(w func(string, ...any), pol map[string]any) error {
 			if tag := str(set, "tag"); tag != "" {
 				w(" set tag %s", tag)
 			}
+			if bw := str(set, "ext-community-bw"); bw != "" {
+				line, err := extCommunityBW(bw)
+				if err != nil {
+					return fmt.Errorf("%s: set ext-community-bw %s: %w", at, bw, err)
+				}
+				w(" set extcommunity bandwidth %s", line)
+			}
 			w("exit")
 		}
 	}
 	w("!")
 	return nil
+}
+
+// extCommunityBW is FRR's `set extcommunity bandwidth` for NVUE's set ext-community-bw: the
+// link bandwidth weighted ECMP spreads by (net-configurator's WEIGHTED_ECMP sets multipaths, the
+// number of paths, FRR's num-multipaths). The -non-transitive spellings are UNCONFIRMED.
+func extCommunityBW(v string) (string, error) {
+	switch v {
+	case "multipaths":
+		return "num-multipaths", nil
+	case "cumulative":
+		return "cumulative", nil
+	case "multipaths-non-transitive":
+		return "num-multipaths non-transitive", nil
+	case "cumulative-non-transitive":
+		return "cumulative non-transitive", nil
+	}
+	if n, err := strconv.Atoi(v); err == nil && n >= 1 && n <= 25600 {
+		return v, nil
+	}
+	return "", fmt.Errorf("a bandwidth in Mbps (1 to 25600), cumulative or multipaths")
+}
+
+// renderBFD renders router bfd's profiles as FRR's bfd node, which bfdd reads: the detection
+// multiplier and the receive and transmit intervals (NVUE's min-rx-interval and min-tx-interval,
+// milliseconds). Nothing when router bfd is off.
+func renderBFD(w func(string, ...any), bfd map[string]any) {
+	profiles := sub(bfd, "profile")
+	if len(profiles) == 0 || str(bfd, "enable") == "off" || str(bfd, "state") == "disabled" {
+		return
+	}
+	w("bfd")
+	for _, name := range keys(profiles) {
+		p := sub(profiles, name)
+		w(" profile %s", name)
+		if m := str(p, "detect-multiplier"); m != "" {
+			w("  detect-multiplier %s", m)
+		}
+		if rx := str(p, "min-rx-interval"); rx != "" {
+			w("  receive-interval %s", rx)
+		}
+		if tx := str(p, "min-tx-interval"); tx != "" {
+			w("  transmit-interval %s", tx)
+		}
+		w(" exit")
+		w(" !")
+	}
+	w("exit")
+	w("!")
 }
 
 // families NVUE has, and FRR's name for each
@@ -312,7 +383,7 @@ var families = []struct{ nvue, frr string }{
 }
 
 // renderBGP renders one VRF's router bgp.
-func renderBGP(w func(string, ...any), bgp map[string]any, vrf, asn, rid string, evpn, l3vni bool) error {
+func renderBGP(w func(string, ...any), bgp, gr map[string]any, vrf, asn, rid string, evpn, l3vni bool) error {
 	if a := str(bgp, "autonomous-system"); a != "" {
 		asn = a
 	}
@@ -334,6 +405,23 @@ func renderBGP(w func(string, ...any), bgp map[string]any, vrf, asn, rid string,
 	}
 	if str(bgp, "path-selection", "multipath", "bandwidth") == "ignore" {
 		w(" bgp bestpath bandwidth ignore")
+	}
+	// graceful restart: full is FRR's bgp graceful-restart, off its graceful-restart-disable,
+	// helper-only FRR's default; the timers are FRR's restart, select-defer and stalepath times
+	switch str(gr, "mode") {
+	case "full":
+		w(" bgp graceful-restart")
+	case "off":
+		w(" bgp graceful-restart-disable")
+	}
+	if v := str(gr, "restart-time"); v != "" {
+		w(" bgp graceful-restart restart-time %s", v)
+	}
+	if v := str(gr, "path-selection-deferral-time"); v != "" {
+		w(" bgp graceful-restart select-defer-time %s", v)
+	}
+	if v := str(gr, "stale-routes-time"); v != "" {
+		w(" bgp graceful-restart stalepath-time %s", v)
 	}
 	groups := sub(bgp, "peer-group")
 	neighbors := sub(bgp, "neighbor")
@@ -379,6 +467,19 @@ func renderBGP(w func(string, ...any), bgp map[string]any, vrf, asn, rid string,
 				ra = "0"
 			}
 			w(" neighbor %s advertisement-interval %s", id, ra)
+		}
+		// BFD for the session, through bfdd: a profile of router bfd's, its own timers (FRR's
+		// order: multiplier, receive, transmit), or on with bfdd's defaults
+		if b := sub(p, "bfd"); b != nil && str(b, "enable") != "off" {
+			prof, mult, rx, tx := str(b, "profile"), str(b, "detect-multiplier"), str(b, "min-rx-interval"), str(b, "min-tx-interval")
+			switch {
+			case prof != "":
+				w(" neighbor %s bfd profile %s", id, prof)
+			case mult != "" || rx != "" || tx != "":
+				w(" neighbor %s bfd %s %s %s", id, or(mult, "3"), or(rx, "300"), or(tx, "300"))
+			case on(b, "enable"):
+				w(" neighbor %s bfd", id)
+			}
 		}
 	}
 	for _, g := range keys(groups) {
@@ -442,11 +543,14 @@ func familyLines(fam string, af, bgp, groups, neighbors map[string]any, vrf stri
 		for _, n := range keys(sub(af, "network")) {
 			add("network %s", n)
 		}
-		if on(af, "redistribute", "connected", "enable") {
-			add("redistribute connected")
-		}
-		if on(af, "redistribute", "static", "enable") {
-			add("redistribute static")
+		for _, r := range []string{"connected", "static"} {
+			if on(af, "redistribute", r, "enable") {
+				if rm := str(af, "redistribute", r, "route-map"); rm != "" {
+					add("redistribute %s route-map %s", r, rm)
+				} else {
+					add("redistribute %s", r)
+				}
+			}
 		}
 		if m := str(af, "multipaths", "ebgp"); m != "" {
 			add("maximum-paths %s", m)
@@ -564,6 +668,14 @@ func without(list []string, v string) []string {
 		}
 	}
 	return out
+}
+
+// or is v, or def when v is "".
+func or(v, def string) string {
+	if v == "" {
+		return def
+	}
+	return v
 }
 
 // without2 is a copy of an object without one key.

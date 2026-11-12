@@ -26,10 +26,12 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/BudEcosystem/dc-twin/internal/adapter/dhcp"
 	"github.com/BudEcosystem/dc-twin/internal/compile"
@@ -46,16 +48,22 @@ type Plan struct {
 	Endpoints []*EndpointPlan
 	// HostPorts are vm hosts' data ports cabled to a real NOS (D57).
 	HostPorts []*HostPortPlan
-	Bridges   []*BridgePlan
-	Switches  []*SwitchPlan
-	Links     []*LinkPlan
-	Attach    []*AttachPlan
+	// Mgmt are factory switches' management ports on the OOB network (D73).
+	Mgmt     []*MgmtPlan
+	Bridges  []*BridgePlan
+	Switches []*SwitchPlan
+	Links    []*LinkPlan
+	Attach   []*AttachPlan
 	// Skipped counts BMC ports given no endpoint, by reason.
 	Skipped map[string]int
 	// HostSkipped counts vm hosts' data ports not spliced onto a real NOS, by reason.
 	HostSkipped map[string]int
 	// NOSMemory is every NOS container's memory limit in bytes (0: none).
 	NOSMemory int64
+	// Day0Binaries is the directory of the twin's day-0 programs on the Docker host, mounted in
+	// every factory switch (spec.adapters.network.nos.day0Binaries, else beside the twin's own
+	// executable); "" when there is none.
+	Day0Binaries string
 }
 
 // EndpointPlan is one BMC management port's endpoint.
@@ -98,6 +106,28 @@ type HostPortPlan struct {
 	Vlan string
 }
 
+// MgmtPlan is a real switch's management port, eth0 in its container, cabled to the OOB
+// network as a BMC's port is (D73): a veth whose switch end is eth0 with the port's MAC and
+// whose other end is the OOB switch's port: a port of its segment's bridge on a model switch, or
+// the OOB NOS's front-panel port, an access port of its segment's VLAN. The NOS's own DHCP client
+// leases on it.
+type MgmtPlan struct {
+	Index   int
+	Ref     string // the management port, "device:port"
+	MAC     net.HardwareAddr
+	Network string
+	Rack    string
+	Port    *model.Port
+	Peer    *model.Port
+	Switch  *SwitchPlan
+	// TwinIf is the veth end's name in the twin's namespace (a bridge port) or, on a real OOB
+	// NOS, PeerIf its name there.
+	TwinIf string
+	Bridge *BridgePlan
+	OOB    *SwitchPlan
+	PeerIf string
+}
+
 // BridgePlan is a model switch segment: one Linux bridge per rack segment per network.
 type BridgePlan struct {
 	Index   int
@@ -119,6 +149,8 @@ type SwitchPlan struct {
 	// host's binary translation for its platform (SONiC-VS's linux/amd64 on aarch64).
 	Emulated bool
 	Config   nos.Switch
+	// nvueToken is a factory switch's local token for `nv` (nvue.SetLocalToken), made at up
+	nvueToken string
 }
 
 // LinkPlan is a fabric link between two real switches. APort and BPort are the cable's ends as
@@ -175,6 +207,15 @@ func BuildPlan(m *model.Model, est *schema.Estate, outputs map[string]string, ho
 		return nil, fmt.Errorf("spec.adapters.network.nos.memory: %w", err)
 	}
 	p.NOSMemory = mem
+	// the Cumulus release generic/nvue-frr's switches run: their NVUE's grammar and build
+	cumulusBuild := ""
+	if v := opts.NOS.CumulusVersion; v != "" {
+		ver, err := nvue.ParseVersion(v)
+		if err != nil {
+			return nil, fmt.Errorf("spec.adapters.network.nos.cumulusVersion: %w", err)
+		}
+		cumulusBuild = nvue.Build(ver)
+	}
 	segs := map[string]dhcp.Segment{}
 	for _, s := range dhcp.PlanSegments(m) {
 		segs[s.Network+"|"+s.Rack] = s
@@ -212,6 +253,9 @@ func BuildPlan(m *model.Model, est *schema.Estate, outputs map[string]string, ho
 		sp := &SwitchPlan{Device: d, NOS: e, Image: image, Emulated: emulated,
 			Container: unsafeName.ReplaceAllString("dctwin-"+est.Metadata.Name+"-"+host, "-"),
 			Config:    nos.Switch{Path: d.Path, Hostname: host, Profile: d.ProfileName, MAC: switchMAC(d), Panel: frontPanel(d)}}
+		if e.Name == nos.NVUEFRR {
+			sp.Config.Build = cumulusBuild
+		}
 		p.Switches = append(p.Switches, sp)
 		byDev[d] = sp
 	}
@@ -319,6 +363,9 @@ func BuildPlan(m *model.Model, est *schema.Estate, outputs map[string]string, ho
 	if err := planHostPorts(p, m, byDev, vlans, outputs); err != nil {
 		return nil, err
 	}
+	if err := planFactory(p, m, est, byDev, hbn, segs, bridges, vlans, outputs); err != nil {
+		return nil, err
+	}
 	for _, sp := range p.Switches {
 		var keys []string
 		for k := range vlans[sp] {
@@ -350,6 +397,9 @@ func BuildPlan(m *model.Model, est *schema.Estate, outputs map[string]string, ho
 	facesDPU := map[*SwitchPlan]bool{}
 	for _, l := range links {
 		a, b := byDev[l.A.Device], byDev[l.B.Device]
+		if l.A.Role == "management" || l.B.Role == "management" {
+			continue
+		}
 		if a != nil && b != nil && hbn[a] != hbn[b] {
 			facesDPU[a], facesDPU[b] = !hbn[a], !hbn[b]
 		}
@@ -359,7 +409,7 @@ func BuildPlan(m *model.Model, est *schema.Estate, outputs map[string]string, ho
 			continue // its AS is NICo's (the fnn-asn pool), set through NVUE
 		}
 		sp.Config.EVPN = len(hbn) > 0
-		if len(sp.Config.Vlans) > 0 || facesDPU[sp] {
+		if len(sp.Config.Vlans) > 0 || facesDPU[sp] || strings.HasPrefix(sp.Device.Name, "leaf-") {
 			asn[sp] = 65101 + leaf // a leaf: its own AS (RFC 7938)
 			leaf++
 		} else {
@@ -370,6 +420,11 @@ func BuildPlan(m *model.Model, est *schema.Estate, outputs map[string]string, ho
 	for _, l := range links {
 		a, b := byDev[l.A.Device], byDev[l.B.Device]
 		if a == nil || b == nil {
+			continue
+		}
+		if l.A.Role == "management" || l.B.Role == "management" {
+			// a switch's management port on the OOB network is not a fabric link: a factory
+			// switch's is planned as its management port (D73), another's is not cabled in
 			continue
 		}
 		i := len(p.Links)
@@ -672,4 +727,129 @@ func relayTargets(n *model.Network, outputs map[string]string) ([]netip.Addr, er
 		return nil, fmt.Errorf("network %s: server %q is not an IPv4 address a relay can forward to", n.Name, addr)
 	}
 	return []netip.Addr{a}, nil
+}
+
+// planFactory marks the switches of factory fabrics (D72) and plans their management ports onto
+// the OOB network (D73).
+func planFactory(p *Plan, m *model.Model, est *schema.Estate, byDev map[*model.Device]*SwitchPlan, hbn map[*SwitchPlan]bool,
+	segs map[string]dhcp.Segment, bridges map[string]*BridgePlan, vlans vlanSet, outputs map[string]string) error {
+	scale := est.Spec.TimeScale
+	if scale <= 0 {
+		scale = 1
+	}
+	if dir := est.Spec.Adapters.Network.NOS.Day0Binaries; dir != "" {
+		if !filepath.IsAbs(dir) {
+			return fmt.Errorf("spec.adapters.network.nos.day0Binaries %q: an absolute path on the Docker host", dir)
+		}
+		p.Day0Binaries = dir
+	} else if exe, err := os.Executable(); err == nil {
+		if _, err := os.Stat(filepath.Join(filepath.Dir(exe), "dctwin-day0")); err == nil {
+			p.Day0Binaries = filepath.Dir(exe)
+		}
+	}
+	var images []nos.Image
+	for _, im := range est.Spec.Adapters.Network.NOS.Images {
+		images = append(images, nos.Image{SHA256: strings.ToLower(im.Match.SHA256), Name: im.Match.Name, NOS: im.NOS, Version: im.Version})
+	}
+	var names []string
+	for n := range m.Fabrics {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		f := m.Fabrics[name]
+		if f.Factory == nil {
+			continue
+		}
+		for _, sp := range p.Switches {
+			if hbn[sp] || !f.Factory.Devices[sp.Device] {
+				continue
+			}
+			if why := sp.NOS.FactoryCapable(); why != "" {
+				return fmt.Errorf("fabric %s: switch %s cannot start in factory state: %s", f.Name, sp.Device.Path, why)
+			}
+			d := sp.Device
+			id := nos.Identity{Serial: d.Identity.Serial, BaseMAC: sp.Config.MAC, MgmtMAC: sp.Config.MAC,
+				Arch: map[string]string{"aarch64": "arm64"}[compile.HostArch()]}
+			if id.Arch == "" {
+				id.Arch = "x86_64"
+			}
+			if pr := d.Profile; pr != nil {
+				id.Manufacturer, id.Model, id.PartNumber, id.Platform = pr.Spec.Identity.Manufacturer, pr.Spec.Identity.Model, pr.Spec.Identity.PartNumber, pr.Spec.Identity.Platform
+			}
+			if id.Platform == "" {
+				// ONIE's generic form for a platform the profile does not name
+				id.Platform = id.Arch + "-dctwin_" + unsafeName.ReplaceAllString(strings.ToLower(strings.TrimPrefix(d.ProfileName, "generic/")), "_") + "-r0"
+			}
+			sp.Config.Factory = &nos.Factory{Install: f.Factory.Install, ZTP: f.Factory.ZTP, Identity: id, Images: images,
+				BootTime: time.Duration(float64(f.Factory.BootTime) * scale), InstallTime: time.Duration(float64(f.Factory.InstallTime) * scale)}
+			if err := planMgmt(p, m, sp, byDev, segs, bridges, vlans, outputs); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// planMgmt cables a factory switch's management port (its first management-role Ethernet port,
+// mgmt0) to the OOB network it is cabled to in the model.
+func planMgmt(p *Plan, m *model.Model, sp *SwitchPlan, byDev map[*model.Device]*SwitchPlan,
+	segs map[string]dhcp.Segment, bridges map[string]*BridgePlan, vlans vlanSet, outputs map[string]string) error {
+	d := sp.Device
+	var port *model.Port
+	for _, x := range d.Ports {
+		if x.Kind == "ethernet" && x.Role == "management" && x.Component == nil {
+			port = x
+			break
+		}
+	}
+	switch {
+	case port == nil:
+		return fmt.Errorf("switch %s: its profile has no management port, which a factory switch's DHCP and day-0 tooling need (D73)", d.Path)
+	case port.Link == nil:
+		return fmt.Errorf("switch %s: its management port %s is not cabled: put the switch in a rack with a management switch (oob-flat cables it)", d.Path, port.Name)
+	}
+	n := m.Networks[port.Network]
+	if n == nil || (n.DHCP != "twin" && n.DHCP != "stack") {
+		return fmt.Errorf("switch %s: its management port %s is on no network with DHCP", d.Path, port.Ref)
+	}
+	r := d.RackOf()
+	if r == nil {
+		return fmt.Errorf("switch %s: a factory switch must be in a rack", d.Path)
+	}
+	seg, ok := segs[port.Network+"|"+r.Path]
+	if !ok {
+		return fmt.Errorf("switch %s: rack %s has no segment on network %s", d.Path, r.Name, port.Network)
+	}
+	mac, err := net.ParseMAC(port.MAC)
+	if err != nil {
+		return fmt.Errorf("switch %s: its management port has no MAC", d.Path)
+	}
+	peer := port.Link.Peer(port)
+	mp := &MgmtPlan{Index: len(p.Mgmt), Ref: port.Ref, MAC: mac, Network: port.Network, Rack: r.Path, Port: port, Peer: peer, Switch: sp}
+	mp.TwinIf = fmt.Sprintf("m%05x", mp.Index)
+	if osp := byDev[peer.Device]; osp != nil {
+		mp.OOB, mp.PeerIf = osp, osp.NOS.Interface(osp.Config, peer.Name)
+		if mp.PeerIf == "" {
+			return fmt.Errorf("switch %s: %s's port %s is not a front-panel port %s can carry", osp.Device.Path, port.Ref, peer.Name, osp.NOS.Name)
+		}
+		v, err := vlans.get(osp, seg, n, outputs)
+		if err != nil {
+			return err
+		}
+		v.Ports = append(v.Ports, peer.Name)
+	} else {
+		key := seg.Network + "|" + seg.Rack
+		b := bridges[key]
+		if b == nil {
+			b = &BridgePlan{Index: len(p.Bridges), Network: seg.Network, Rack: seg.Rack, Segment: seg}
+			b.Name = fmt.Sprintf("b%04x", b.Index)
+			bridges[key] = b
+			p.Bridges = append(p.Bridges, b)
+		}
+		mp.Bridge = b
+	}
+	sp.Config.Mgmt = true
+	p.Mgmt = append(p.Mgmt, mp)
+	return nil
 }

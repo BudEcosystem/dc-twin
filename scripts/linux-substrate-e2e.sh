@@ -78,7 +78,10 @@ mode=${MODE:-container}
 work=$(mktemp -d "${TMPDIR:-/tmp}/dctwin-linuxnet.XXXXXX")
 log="$work/linux-substrate-e2e.log"
 name=dctwin-linuxnet-$$
-estates='linuxnet-nos linuxnet-model linuxnet-sonic linuxnet-nvue linuxnet-vm-nos linuxnet-dpu linuxnet-dpu-agent'
+# SCOPE (estate names) limits cleanup to one run's estates, their probes and Kea containers, so
+# runs of different suites can share a host side by side; unset, cleanup takes every suite's
+scope=${SCOPE:-}
+estates='linuxnet-nos linuxnet-model linuxnet-sonic linuxnet-nvue linuxnet-vm-nos linuxnet-dpu linuxnet-dpu-agent linuxnet-day0-cumulus linuxnet-day0-sonic linuxnet-day0-onie linuxnet-day0-api linuxnet-day0-cabling'
 
 case $mode in
   container)
@@ -111,7 +114,13 @@ cleanup() {
   [ "$mode" = container ] && { docker rm -f "$name" >/dev/null 2>&1 || true; }
   # anything a crashed run left: the switch containers and their volumes (labelled by estate), the
   # test's Kea, and in a native run the namespaces the twin and the tests name
-  for f in $(for e in $estates; do echo "label=dc-twin.estate=$e"; done) label=dc-twin.test=linuxnet; do
+  [ -n "$scope" ] && estates=$scope
+  testlabel=label=dc-twin.test=linuxnet
+  [ -n "$scope" ] && testlabel=
+  # twice: a switch container cannot go while the sidecars in its namespace are there, and the
+  # first pass may meet it before them
+  for pass in 1 2; do
+  for f in $(for e in $estates; do echo "label=dc-twin.estate=$e"; done) $testlabel; do
     "${eng[@]}" ps -aq --filter "$f" 2>/dev/null | while read -r id; do
       case $("${eng[@]}" inspect -f '{{.Name}}' "$id") in /dctwin-*|dctwin-*) "${eng[@]}" rm -f "$id" >/dev/null ;; esac
     done
@@ -119,8 +128,17 @@ cleanup() {
       case $v in dctwin-*) "${eng[@]}" volume rm -f "$v" >/dev/null ;; esac
     done
   done
+  done
   if [ "$mode" = native ]; then
-    for ns in $(ip netns list 2>/dev/null | awk '{print $1}' | grep -E '^dctwin-(linuxnet-|probe-)' || true); do
+    pat='^dctwin-(linuxnet-|probe-)'
+    if [ -n "$scope" ]; then
+      pat='^dctwin-('$(for e in $scope; do printf '%s|probe-%s|' "$e" "${e#linuxnet-}"; done | sed 's/|$//')')$'
+      # the scoped run's own Kea containers (named for their estate)
+      for e in $scope; do
+        "${eng[@]}" ps -aq --filter label=dc-twin.test=linuxnet --filter name="dctwin-kea-$e-" 2>/dev/null | while read -r id; do "${eng[@]}" rm -f "$id" >/dev/null; done
+      done
+    fi
+    for ns in $(ip netns list 2>/dev/null | awk '{print $1}' | grep -E "$pat" || true); do
       sudo ip netns del "$ns" || true
     done
     [ -n "$svc" ] && { kill "$svc" 2>/dev/null || sudo kill "$svc" 2>/dev/null || true; }
@@ -136,14 +154,14 @@ if [ "$mode" = native ]; then
     sock="$work/podman.sock"
     podman system service --time=0 "unix://$sock" >"$work/podman-service.log" 2>&1 &
     svc=$!
-    for _ in $(seq 1 100); do test -S "$sock" && break; sleep 0.1; done
+    for _ in $(seq 1 600); do test -S "$sock" && break; sleep 0.1; done
     test -S "$sock" || { echo "FAIL: the Podman API service did not start (see $work/podman-service.log)" >&2; exit 1; }
     engine_host="unix://$sock"
   elif [ "${eng[1]:-}" = podman ]; then
     sock="$work/podman.sock"
     sudo podman system service --time=0 "unix://$sock" >"$work/podman-service.log" 2>&1 &
     svc=$!
-    for _ in $(seq 1 100); do sudo test -S "$sock" && break; sleep 0.1; done
+    for _ in $(seq 1 600); do sudo test -S "$sock" && break; sleep 0.1; done
     sudo test -S "$sock" || { echo "FAIL: the Podman API service did not start (see $work/podman-service.log)" >&2; exit 1; }
     engine_host="unix://$sock"
   else
@@ -185,6 +203,9 @@ sonic_bgp_sha256=c1daf6372d1eca20eeac6da7a7f52678a1964e2d215ff30edc6cb3a1b794116
 sonic_gnmi=dctwin-sonic-gnmi:master.1250767-408ffc98c
 sonic_gnmi_url='https://sonic-build.azurewebsites.net/api/sonic/artifacts?branchName=master&buildId=1250767&platform=vs&target=target/docker-sonic-gnmi.gz'
 sonic_gnmi_sha256=864ed2431d7f6b963fff005dbb458d84e0b8ae12779b20fbd96ccd29027a9244
+sonic_lldp=dctwin-sonic-lldp:master.1250767-408ffc98c
+sonic_lldp_url='https://sonic-build.azurewebsites.net/api/sonic/artifacts?branchName=master&buildId=1250767&platform=vs&target=target/docker-lldp.gz'
+sonic_lldp_sha256=728214e5726229075248a3227e59c4f9b5639502c2b543e479281dd8ada4a022
 # sonic_artifact <local tag> <url> <sha256> <the tarball's own repository>
 sonic_artifact() {
   "${eng[@]}" image inspect "$1" >/dev/null 2>&1 && return
@@ -201,7 +222,7 @@ sonic_artifact() {
   if [ -n "$prior" ]; then "${eng[@]}" tag "$prior" "$4:latest"; else "${eng[@]}" rmi "$4:latest" >/dev/null; fi
   rm -f "$work/$4.gz"
 }
-case $run in *Sonic*)
+case $run in *Sonic*|*TestDay0*)
   if ! "${eng[@]}" image inspect "$sonic_vs" >/dev/null 2>&1; then
     echo "pulling $sonic_vs (linux/amd64)"
     "${eng[@]}" pull -q --platform linux/amd64 "$sonic_vs" >/dev/null
@@ -209,12 +230,27 @@ case $run in *Sonic*)
   sonic_artifact "$sonic_relay" "$sonic_relay_url" "$sonic_relay_sha256" docker-dhcp-relay
   sonic_artifact "$sonic_bgp" "$sonic_bgp_url" "$sonic_bgp_sha256" docker-fpm-frr
   sonic_artifact "$sonic_gnmi" "$sonic_gnmi_url" "$sonic_gnmi_sha256" docker-sonic-gnmi
+  case $run in *TestDay0*) sonic_artifact "$sonic_lldp" "$sonic_lldp_url" "$sonic_lldp_sha256" docker-lldp ;; esac
 ;; esac
 case $run in TestSonicVS) ;; *) image dctwin-nos-frr-dhcrelay:bookworm "$root/test/linuxnet/nos/Containerfile" "$root/test/linuxnet/nos" ;; esac
-case $run in *TestNVUE*|*TestVMHosts*|*TestDPU*|*TestHBN*) image dctwin-nos-nvue-frr:bookworm "$root/test/linuxnet/nos-nvue/Containerfile" "$root/test/linuxnet/nos-nvue" ;; esac
+case $run in *TestNVUE*|*TestVMHosts*|*TestDPU*|*TestHBN*|*TestDay0*) image dctwin-nos-nvue-frr:bookworm "$root/test/linuxnet/nos-nvue/Containerfile" "$root/test/linuxnet/nos-nvue" ;; esac
+# the NetBox + Ansible day-0 integration (compat/netbox-ansible): NetBox 4.2.9 with PostgreSQL and
+# Valkey, from quay.io and ECR Public (no Docker Hub), and its controller (net-configurator nc-v8.0.0)
+case $run in *TestDay0NetBox*|TestDay0)
+  for i in quay.io/netboxcommunity/netbox:v4.2.9-3.2.1 public.ecr.aws/docker/library/postgres:17-alpine public.ecr.aws/valkey/valkey:8.0-alpine; do
+    "${eng[@]}" image inspect "$i" >/dev/null 2>&1 || "${eng[@]}" pull -q "$i" >/dev/null
+  done
+  image dctwin-netbox-ansible:test "$root/compat/netbox-ansible/Containerfile" "$root/compat/netbox-ansible" ;;
+esac
+# NVIDIA's nvidia.nvue Ansible collection from Galaxy, the client TestDay0Ansible drives NVUE with
+case $run in *TestDay0*) image dctwin-ansible-nvue:test "$root/test/linuxnet/ansible/Containerfile" "$root/test/linuxnet/ansible" ;; esac
 case $run in *TestDPU*|*TestHBN*) image dctwin-nos-hbn:bookworm "$root/test/linuxnet/nos-hbn/Containerfile" "$root/test/linuxnet/nos-hbn" ;; esac
 
 (cd "$root" && CGO_ENABLED=0 GOOS=linux GOARCH=$goarch go test -c -o "$work/linuxnet.test" ./test/linuxnet/)
+# the twin's day-0 programs a factory switch mounts (18: ZTP, nv, ONIE's discovery, a DHCP client)
+mkdir -p "$work/day0"
+(cd "$root" && CGO_ENABLED=0 GOOS=linux GOARCH=$goarch go build -o "$work/day0/dctwin-day0" ./cmd/dctwin-day0)
+chmod 755 "$work" "$work/day0"
 
 if [ "$mode" = native ]; then
   testpath=$PATH
@@ -238,7 +274,7 @@ if [ "$mode" = native ]; then
   cp -R "$root/test/linuxnet/testdata" "$work/test/linuxnet/"
   cp -R "$root/internal/nos/nvue/testdata/nico" "$work/test/linuxnet/testdata/"
   # its own network namespace, loopback up: the twin's loopback endpoints are not the host's
-  sudo env DCTWIN_LINUXNET=1 DCTWIN_HOLD="${HOLD:-}" DCTWIN_HBN_BINARIES="${HBN_BINARIES:-}" DCTWIN_NOS_MEMORY="${NOS_MEMORY:-}" DCTWIN_ASSETS="${DCTWIN_ASSETS:-$HOME/.cache/dc-twin/assets}" DOCKER_HOST="$engine_host" PATH="$testpath" unshare --net sh -c \
+  sudo env DCTWIN_LINUXNET=1 DCTWIN_HOLD="${HOLD:-}" DCTWIN_HBN_BINARIES="${HBN_BINARIES:-}" DCTWIN_DAY0_BINARIES="$work/day0" DCTWIN_REFERENCE_DAY0="$root/stacks/reference-day0" DCTWIN_COMPAT_NETBOX="$root/compat/netbox-ansible" DCTWIN_RUN="${DCTWIN_RUN:-}" DCTWIN_NOS_MEMORY="${NOS_MEMORY:-}" DCTWIN_ASSETS="${DCTWIN_ASSETS:-$HOME/.cache/dc-twin/assets}" DOCKER_HOST="$engine_host" PATH="$testpath" unshare --net sh -c \
     'ip link set lo up && cd "$1" && exec "$2" -test.v -test.count=1 -test.timeout=45m -test.run "$3"' \
     sh "$work/test/linuxnet" "$work/linuxnet.test" "$run" 2>&1 | tee "$log"
   rc=${PIPESTATUS[0]}
@@ -248,9 +284,10 @@ else
   runner=dctwin-linuxnet-e2e:cf-$(sha256 "$root/test/linuxnet/Containerfile" | cut -c1-12)
   image "$runner" "$root/test/linuxnet/Containerfile" "$root/test/linuxnet"
   docker create --name "$name" --privileged --pid=host -v /var/run/docker.sock:/var/run/docker.sock \
-    -e DCTWIN_LINUXNET=1 -e DCTWIN_NOS_MEMORY="${NOS_MEMORY:-}" "$runner" \
+    -e DCTWIN_LINUXNET=1 -e DCTWIN_NOS_MEMORY="${NOS_MEMORY:-}" -e DCTWIN_DAY0_BINARIES=/work/day0 "$runner" \
     /work/linuxnet.test -test.v -test.count=1 -test.timeout=45m -test.run "$run" >/dev/null
   docker cp "$work/linuxnet.test" "$name:/work/linuxnet.test"
+  docker cp "$work/day0" "$name:/work/day0"
   docker cp "$root/test/linuxnet/testdata" "$name:/work/test/linuxnet/testdata"
   docker cp "$root/internal/nos/nvue/testdata/nico" "$name:/work/test/linuxnet/testdata/nico"
   docker start -a "$name" 2>&1 | tee "$log"

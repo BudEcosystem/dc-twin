@@ -1,0 +1,14 @@
+# dc-twin (D73, D74): the management port's lease, for the twin's day-0 programs (its ZTP client
+# reads the provisioning URL, option 239, from it): after every dhclient-script run on eth0, the
+# reason and every new_* variable, as shell-quoted key='value' lines, in /run/dctwin/dhcp-eth0.env.
+# dhclient-script sources this file, so it sets only dctwin_* variables and never exits.
+if [ "$interface" = eth0 ]; then
+	mkdir -p /run/dctwin
+	{
+		for dctwin_v in reason $(set | sed -n 's/^\(new_[A-Za-z0-9_]*\)=.*/\1/p' | sort -u); do
+			eval "dctwin_val=\${$dctwin_v}"
+			printf "%s='%s'\n" "$dctwin_v" "$(printf '%s' "$dctwin_val" | sed "s/'/'\\\\''/g")"
+		done
+	} > /run/dctwin/dhcp-eth0.env.new && mv /run/dctwin/dhcp-eth0.env.new /run/dctwin/dhcp-eth0.env
+	unset dctwin_v dctwin_val
+fi

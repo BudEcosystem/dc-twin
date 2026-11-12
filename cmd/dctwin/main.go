@@ -37,6 +37,10 @@ const usage = `dctwin — a datacenter twin
             [--token-file FILE] [--allow-remote-control]
             [--log-max 2G] [--log-age 168h] [--log-segment 256M]   the event log on disk (D27)
   dctwin status | down | report [--json] | endpoints | domains | ui
+  dctwin fabric status [--json]       each factory switch's day-0 phase against the design (18)
+  dctwin switch reset <path> --factory [--uninstall]
+                                        a factory switch back to its factory state, ZTP re-armed;
+                                        --uninstall: back to ONIE, which installs the NOS again
   dctwin get <selector> [--json]
   dctwin events [--since N] [--select S] [--kind K] [--follow] [--no-reads]
   dctwin power on|off|graceful|restart|cycle|ac-cycle <selector>
@@ -440,6 +444,58 @@ func client(cmd string, args []string) error {
 			}
 		}
 		return nil
+	case "fabric":
+		if len(args) == 0 || args[0] != "status" {
+			return fmt.Errorf("fabric status: each factory switch's day-0 phase and its difference from the design (18)")
+		}
+		b, err := a.do("GET", "/fabric/day0", nil, "")
+		if err != nil || jsonOut {
+			return print(b, err)
+		}
+		var st struct {
+			Factory  bool `json:"factory"`
+			Plan     string
+			Switches []struct {
+				Path      string
+				Phase     string
+				Converged bool
+				Diffs     []string
+			}
+			Observed map[string]struct {
+				Hostname string
+				Mgmt     string
+			}
+		}
+		if err := json.Unmarshal(b, &st); err != nil {
+			return err
+		}
+		if !st.Factory {
+			fmt.Println("no factory fabric: every switch is configured by the twin (bringUp: twin)")
+			return nil
+		}
+		done := 0
+		for _, sw := range st.Switches {
+			if sw.Converged {
+				done++
+			}
+		}
+		fmt.Printf("day 0 (plan: %s): %d of %d factory switches converged\n", st.Plan, done, len(st.Switches))
+		for _, sw := range st.Switches {
+			o := st.Observed[sw.Path]
+			fmt.Printf("  %-44s %-16s host %-24s mgmt %s\n", sw.Path, sw.Phase, o.Hostname, o.Mgmt)
+			for _, d := range sw.Diffs {
+				fmt.Printf("      %s\n", d)
+			}
+		}
+		return nil
+	case "switch":
+		factory, rest := hasFlag(args, "--factory")
+		uninstall, rest := hasFlag(rest, "--uninstall")
+		if len(rest) != 2 || rest[0] != "reset" || !factory {
+			return fmt.Errorf("switch reset <path> --factory [--uninstall]: a factory switch back to its NOS's factory state, its ZTP armed again; with --uninstall back to ONIE, which installs its NOS again (18)")
+		}
+		b, _ := json.Marshal(map[string]any{"path": rest[1], "uninstall": uninstall})
+		return print(a.do("POST", "/switch/factory-reset", b, "application/json"))
 	case "down":
 		return print(a.do("POST", "/down", nil, ""))
 	case "report":
