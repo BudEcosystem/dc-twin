@@ -788,6 +788,22 @@ func planFactory(p *Plan, m *model.Model, est *schema.Estate, byDev map[*model.D
 			}
 		}
 	}
+	// a switch the twin configures that a factory switch's front panel is cabled to runs LLDP, as
+	// Cumulus does by default: a day-0 tool validates the factory switch's cabling by its
+	// neighbours (18 — Z7d: the OOB leaves' uplinks to the aggregation switch)
+	for _, sp := range p.Switches {
+		if sp.Config.Factory == nil {
+			continue
+		}
+		for _, port := range sp.Device.Ports {
+			if port.Link == nil || port.Role == "management" {
+				continue
+			}
+			if peer := byDev[port.Link.Peer(port).Device]; peer != nil && peer.Config.Factory == nil {
+				peer.Config.LLDP = true
+			}
+		}
+	}
 	return nil
 }
 

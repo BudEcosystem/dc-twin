@@ -325,6 +325,9 @@ type Switch struct {
 	Factory *Factory
 	// Mgmt: the switch's management port (eth0) is cabled into it (D73).
 	Mgmt bool
+	// LLDP: the switch runs LLDP though the twin configures it (Cumulus's default, service lldp):
+	// a factory switch is cabled to it, whose day-0 tool reads its neighbours (18 — Z7d).
+	LLDP bool
 }
 
 // Unnumbered is a fabric port with an unnumbered eBGP session to whatever is cabled to it.
@@ -555,7 +558,7 @@ func (e Entry) nvueStartScript(sw Switch) string {
 	w("done")
 	w("log \"ports present: $want\"")
 	if sw.Factory != nil {
-		factoryPreamble(w, sw.Factory)
+		factoryPreamble(w, sw.Factory, true)
 	}
 	w("ip link set lo up")
 	w("mkdir -p /run/network /etc/network/interfaces.d /var/log/frr /var/run/frr && chown frr:frr /var/log/frr /var/run/frr")
@@ -573,17 +576,28 @@ func (e Entry) nvueStartScript(sw Switch) string {
 		w("command -v sshd >/dev/null 2>&1 && /usr/sbin/sshd || log 'no sshd in the image'")
 		w("# lldpd and rsyslog are started by NVUE's factory apply (service lldp, system syslog)")
 	}
-	w("# the DHCP relay NVUE configures: dhcrelay with the arguments its apply writes, restarted when")
-	w("# it ends (an apply that changes them ends it); one that ends at once is retried every 30 s,")
-	w("# its log kept to its last 200 lines")
+	w("# the DHCP relays NVUE configures, one line of /run/dctwin-relay each (\"<vrf> <dhcrelay's")
+	w("# arguments>\"): one dhcrelay per line, a tenant VRF's bound to it (dctwin-vrf-exec, as Cumulus")
+	w("# runs dhcrelay@<vrf>), each restarted when it ends; one that ends at once is retried every 30 s.")
+	w("# An apply that changes the file ends them all, and they start again from it. The log is kept")
+	w("# to its last 200 lines")
 	w("(")
 	w("  while :; do")
 	w("    a=$(cat /run/dctwin-relay 2>/dev/null)")
 	w("    if [ -z \"$a\" ]; then sleep 1; continue; fi")
-	w("    t=$(date +%%s)")
-	w("    dhcrelay $a </dev/null >>/var/log/dhcrelay.log 2>&1")
-	w("    tail -n 200 /var/log/dhcrelay.log > /var/log/dhcrelay.log.1 && mv /var/log/dhcrelay.log.1 /var/log/dhcrelay.log")
-	w("    if [ $(($(date +%%s) - t)) -lt 5 ] && [ \"$a\" = \"$(cat /run/dctwin-relay 2>/dev/null)\" ]; then sleep 30; else sleep 1; fi")
+	w("    printf '%%s\\n' \"$a\" | while read -r vrf args; do")
+	w("      [ -n \"$vrf\" ] || continue")
+	w("      (")
+	w("        while [ \"$a\" = \"$(cat /run/dctwin-relay 2>/dev/null)\" ]; do")
+	w("          t=$(date +%%s)")
+	w("          if [ \"$vrf\" = default ]; then dhcrelay $args; else dctwin-vrf-exec \"$vrf\" dhcrelay $args; fi </dev/null >>/var/log/dhcrelay.log 2>&1")
+	w("          tail -n 200 /var/log/dhcrelay.log > /var/log/dhcrelay.log.1 && mv /var/log/dhcrelay.log.1 /var/log/dhcrelay.log")
+	w("          if [ $(($(date +%%s) - t)) -lt 5 ]; then sleep 30; else sleep 1; fi")
+	w("        done")
+	w("      ) &")
+	w("    done")
+	w("    while [ \"$a\" = \"$(cat /run/dctwin-relay 2>/dev/null)\" ]; do sleep 1; done")
+	w("    pkill -x dhcrelay 2>/dev/null || true")
 	w("  done")
 	w(") &")
 	w("log started")

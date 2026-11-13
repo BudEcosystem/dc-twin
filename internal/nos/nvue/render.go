@@ -49,6 +49,17 @@ func interfaces(sw nos.Switch) map[string]bool {
 	return out
 }
 
+// panel is every front-panel port the switch has, cabled or not: a port a configuration may name
+// (a real switch has all of them). An uncabled one has no link in the twin, so nothing renders
+// for it.
+func panel(sw nos.Switch) map[string]bool {
+	out := map[string]bool{}
+	for _, p := range sw.Panel {
+		out[Port(sw, p.Name)] = true
+	}
+	return out
+}
+
 // vlanID reads a nos.Vlan's id from its name (Vlan1000).
 func vlanID(v nos.Vlan) (int, error) {
 	id, err := strconv.Atoi(strings.TrimPrefix(v.Name, "Vlan"))
@@ -67,6 +78,9 @@ func Startup(sw nos.Switch) (Tree, error) {
 	t := Tree{}
 	set := func(v any, path ...string) { Patch(t, path, v) }
 	set(sw.Hostname, "system", "hostname")
+	if sw.LLDP {
+		set(Tree{}, "service", "lldp")
+	}
 	if sw.Loopback.IsValid() {
 		set(Tree{}, "interface", "lo", "ip", "address", sw.Loopback.String()+"/32")
 		set("loopback", "interface", "lo", "type")
@@ -210,6 +224,9 @@ type svi struct {
 	vrf      string
 	vrrMAC   string // the VRR's MAC, the SVI's own
 	vrrAddrs []string
+	// l3: the SVI of a VRF's L3 VNI, which Cumulus names vlan<id>_l3 (a relay's
+	// upstream-interface names it so); the twin's device is vlan<id>
+	l3 bool
 }
 
 // Render takes a configuration, valid against the schema (Validate: every PATCH and Startup check
@@ -218,7 +235,7 @@ type svi struct {
 // its 5.14 equivalent (normalize).
 func Render(t Tree, sw nos.Switch) (Files, error) {
 	t = normalize(t)
-	cabled := interfaces(sw)
+	cabled, ports := interfaces(sw), panel(sw)
 	// on a BlueField's HBN, a VRF an interface is put in exists, as HBN's NVUE creates it (NICo's
 	// templates name the VRF of the DPU's own function, pf0dpu1_if, only there); a switch refuses
 	// a VRF that does not exist
@@ -266,28 +283,41 @@ func Render(t Tree, sw nos.Switch) (Files, error) {
 	}
 	var members []string
 	sviByID := map[int]*svi{}
+	// mgmtVRF: eth0 is in vrf mgmt, whose stanza renderMgmt writes
+	mgmtVRF := false
+	// bonds: each bond's members, which must be cabled ports in no other bond
+	bonds, memberOf, err := bondsOf(ifaces, cabled)
+	if err != nil {
+		return Files{}, err
+	}
 	for _, name := range keys(ifaces) {
 		if name == "lo" {
 			continue
 		}
 		it := sub(ifaces, name)
 		if name == nos.MgmtIf && sw.Mgmt {
-			if err := renderMgmt(w, it); err != nil {
+			in, err := renderMgmt(w, it)
+			if err != nil {
 				return Files{}, err
 			}
+			mgmtVRF = in
 			continue
 		}
 		isSVI := strings.HasPrefix(name, "vlan") && !cabled[name]
+		_, isBond := bonds[name]
 		if typ := str(it, "type"); typ != "" {
 			switch {
-			case typ == "svi" && !isSVI, typ == "swp" && !cabled[name], typ == "loopback":
+			case typ == "svi" && !isSVI, typ == "swp" && !cabled[name] && !ports[name], typ == "bond" && !isBond, typ == "loopback":
 				return Files{}, fmt.Errorf("interface %s: type %s: the switch has no such %s", name, typ, typ)
-			case typ != "svi" && typ != "swp":
-				return Files{}, fmt.Errorf("interface %s: type %s: the twin's NVUE has swp, svi and loopback interfaces", name, typ)
+			case typ != "svi" && typ != "swp" && typ != "bond":
+				return Files{}, fmt.Errorf("interface %s: type %s: the twin's NVUE has swp, bond, svi and loopback interfaces", name, typ)
 			}
 		}
+		if b := memberOf[name]; b != "" && (len(keys(sub(it, "ip", "address"))) > 0 || sub(it, "bridge", "domain") != nil || str(it, "ip", "vrf") != "") {
+			return Files{}, fmt.Errorf("interface %s: a member of bond %s has no address, bridge or VRF of its own", name, b)
+		}
 		switch {
-		case cabled[name]:
+		case cabled[name] || isBond:
 			for _, d := range keys(sub(it, "bridge", "domain")) {
 				if d != Bridge {
 					return Files{}, fmt.Errorf("interface %s: bridge domain %s: only %s is emulated", name, d, Bridge)
@@ -302,6 +332,9 @@ func Render(t Tree, sw nos.Switch) (Files, error) {
 			w("iface %s", name)
 			if d := str(it, "description"); d != "" {
 				w("    alias %s", d)
+			}
+			if isBond {
+				renderBond(w, sub(it, "bond"), bonds[name])
 			}
 			for _, a := range addrs {
 				w("    address %s", a)
@@ -343,6 +376,9 @@ func Render(t Tree, sw nos.Switch) (Files, error) {
 			if vrr := sub(it, "ip", "vrr"); vrr != nil && str(vrr, "enable") != "off" {
 				_, down := sub(vrr, "state")["down"]
 				mac := str(vrr, "mac-address")
+				if mac == "" || mac == "auto" {
+					mac = vrrAutoMAC(t)
+				}
 				va := keys(sub(vrr, "address"))
 				if len(va) > 0 && !down {
 					if _, err := net.ParseMAC(mac); err != nil {
@@ -353,6 +389,9 @@ func Render(t Tree, sw nos.Switch) (Files, error) {
 			}
 			sviByID[id] = s
 			bridgeVLANs[id] = true
+		case ports[name]:
+			// an uncabled front-panel port: kept in the configuration, as the switch keeps it,
+			// with no link to render
 		case subportRE.MatchString(name):
 			return Files{}, fmt.Errorf("interface %s: a breakout's subport: the twin records link breakout and cannot split a port, so no subport exists", name)
 		default:
@@ -366,6 +405,9 @@ func Render(t Tree, sw nos.Switch) (Files, error) {
 	// keeps every cabled port up, as it always has.
 	if sw.Factory != nil && !sw.Native {
 		named := map[string]bool{}
+		for m := range memberOf {
+			named[m] = true
+		}
 		for _, v := range keys(vrfs) {
 			for _, n := range keys(sub(vrfs, v, "router", "bgp", "neighbor")) {
 				named[n] = true
@@ -411,17 +453,28 @@ func Render(t Tree, sw nos.Switch) (Files, error) {
 				return Files{}, fmt.Errorf("vrf default: an L3 VNI is a tenant VRF's")
 			}
 			v, _ := strconv.Atoi(n)
-			for bridgeVLANs[next] {
+			// the VLAN the configuration gives the L3 VNI (vrf <x> evpn vlan), else the next of
+			// NVUE's reserved range
+			id := 0
+			if want := str(vrfs, name, "evpn", "vlan"); want != "" {
+				id, _ = strconv.Atoi(want)
+				if id < 1 || id > 4094 || bridgeVLANs[id] {
+					return Files{}, fmt.Errorf("vrf %s: evpn vlan %s: not a VLAN free for its L3 VNI", name, want)
+				}
+			} else {
+				for bridgeVLANs[next] {
+					next++
+				}
+				if next > 4094 {
+					return Files{}, fmt.Errorf("vrf %s: L3 VNI %d: no VLAN left from %d to 4094 to carry it", name, v, l3VLANBase)
+				}
+				id = next
 				next++
 			}
-			if next > 4094 {
-				return Files{}, fmt.Errorf("vrf %s: L3 VNI %d: no VLAN left from %d to 4094 to carry it", name, v, l3VLANBase)
-			}
 			l3[name] = v
-			vnis = append(vnis, vni{v, next})
-			sviByID[next] = &svi{id: next, vrf: name}
-			bridgeVLANs[next] = true
-			next++
+			vnis = append(vnis, vni{v, id})
+			sviByID[id] = &svi{id: id, vrf: name, l3: true}
+			bridgeVLANs[id] = true
 		}
 	}
 	seen := map[int]bool{}
@@ -455,7 +508,7 @@ func Render(t Tree, sw nos.Switch) (Files, error) {
 		members = append(members, dev)
 	}
 	for _, name := range keys(vrfs) {
-		if !tenant(name) {
+		if !tenant(name) || (name == "mgmt" && mgmtVRF) {
 			continue
 		}
 		w("auto %s", name)
@@ -493,6 +546,25 @@ func Render(t Tree, sw nos.Switch) (Files, error) {
 		w("    hwaddress %s", bridgeMAC(sw))
 		w("")
 	}
+	relay, err := renderRelays(t, cabled, sviByID)
+	if err != nil {
+		return Files{}, err
+	}
+	// a relay's upstream on a VRF's L3 VNI SVI (NVIDIA Config Manager's OOB-Leaf: vlan<id>_l3,
+	// unnumbered in symmetric routing): ISC's dhcrelay discards a reply that arrives on an
+	// interface with no IPv4 address, which Cumulus's own relay does not (NVIDIA's design relays
+	// there). The twin gives such an SVI its VRF's loopback, a /32 the VRF already holds, so the
+	// image's dhcrelay takes the server's reply there (UNCONFIRMED as Cumulus's mechanism; its
+	// outcome, the reply relayed, is the design's).
+	relayUp := map[string]bool{}
+	for _, line := range relay {
+		f := strings.Fields(line)
+		for i := 0; i+1 < len(f); i++ {
+			if f[i] == "-iu" {
+				relayUp[f[i+1]] = true
+			}
+		}
+	}
 	var sviIDs []int
 	for id := range sviByID {
 		sviIDs = append(sviIDs, id)
@@ -504,6 +576,20 @@ func Render(t Tree, sw nos.Switch) (Files, error) {
 		w("iface vlan%d", id)
 		for _, a := range s.addrs {
 			w("    address %s", a)
+		}
+		if s.l3 && len(s.addrs) == 0 && relayUp[fmt.Sprintf("vlan%d", id)] {
+			addrs := keys(sub(t, "vrf", s.vrf, "loopback", "ip", "address"))
+			if len(addrs) == 0 {
+				// a VRF with no loopback of its own: the switch's, a /32 no other interface of the
+				// VRF holds
+				addrs = keys(sub(t, "interface", "lo", "ip", "address"))
+			}
+			if len(addrs) == 0 && sw.Loopback.IsValid() {
+				addrs = []string{sw.Loopback.String() + "/32"}
+			}
+			for _, a := range addrs {
+				w("    address %s", a)
+			}
 		}
 		w("    vlan-raw-device %s", Bridge)
 		w("    vlan-id %d", id)
@@ -527,10 +613,6 @@ func Render(t Tree, sw nos.Switch) (Files, error) {
 	if err != nil {
 		return Files{}, err
 	}
-	relay, err := renderRelay(t, cabled, sviByID)
-	if err != nil {
-		return Files{}, err
-	}
 	bridged := map[string]bool{}
 	for _, m := range members {
 		bridged[m] = true
@@ -546,40 +628,229 @@ func Render(t Tree, sw nos.Switch) (Files, error) {
 	return Files{Interfaces: b.String(), FRR: frr, Relay: relay, ACL: acl, System: system}, nil
 }
 
-// renderRelay is dhcrelay's command line for the default relay: every SVI downstream, every
-// port upstream, the servers last; `-a` appends option 82 and `-m discard` drops a request that
-// already carries one, as Cumulus runs it.
-func renderRelay(t Tree, cabled map[string]bool, svis map[int]*svi) ([]string, error) {
+// renderRelays is the switch's DHCP relays, one dhcrelay per VRF that has one, each line of Relay
+// "<vrf> <dhcrelay's arguments>": every downstream SVI with -id, every upstream interface with -iu,
+// the servers last; `-a` appends option 82 and `-m discard` drops a request that already carries
+// one, as Cumulus runs it. A VRF's relay is either the plain form (server, interface: SVIs are
+// downstream, ports upstream) or server groups (NVIDIA Config Manager's: a group's servers and
+// upstream interfaces, and the downstream interfaces relayed to it). A relay in a tenant VRF runs
+// bound to that VRF (the switch's dctwin-vrf-exec, 18 — Z7a), as Cumulus runs dhcrelay@<vrf>.
+//
+// What the emulation does not carry is refused by name: two server groups in one VRF (one
+// dhcrelay per VRF, as both would take its port 67), and the default VRF's relay beside another
+// VRF's (an unbound socket on port 67 takes every VRF's, through udp_l3mdev_accept).
+func renderRelays(t Tree, cabled map[string]bool, svis map[int]*svi) ([]string, error) {
 	relays := sub(t, "service", "dhcp-relay")
-	for _, k := range keys(relays) {
-		if k != "default" {
-			return nil, fmt.Errorf("service dhcp-relay %s: only the default VRF's relay is emulated", k)
+	var out []string
+	for _, vrf := range keys(relays) {
+		args, err := renderRelay(t, vrf, sub(relays, vrf), cabled, svis)
+		if err != nil {
+			return nil, err
+		}
+		if args != nil {
+			out = append(out, vrf+" "+strings.Join(args, " "))
 		}
 	}
-	r := sub(relays, "default")
-	servers := keys(sub(r, "server"))
+	if len(out) > 1 {
+		for _, l := range out {
+			if strings.HasPrefix(l, "default ") {
+				return nil, fmt.Errorf("service dhcp-relay default beside another VRF's relay: the emulation runs one relay on port 67 per VRF device, and the default VRF has none")
+			}
+		}
+	}
+	return out, nil
+}
+
+func renderRelay(t Tree, vrf string, r map[string]any, cabled map[string]bool, svis map[int]*svi) ([]string, error) {
+	at := "service dhcp-relay " + vrf
+	if vrf != "default" && sub(t, "vrf", vrf) == nil {
+		return nil, fmt.Errorf("%s: vrf %s does not exist", at, vrf)
+	}
+	// an interface's VRF: an SVI's, a port's (ip vrf), or default
+	vrfOf := func(i string) string {
+		if id, ok := sviID(i); ok && svis[id] != nil {
+			return orDefault(svis[id].vrf)
+		}
+		return orDefault(str(t, "interface", i, "ip", "vrf"))
+	}
+	// an interface the relay names, as the twin's device: vlan<id>_l3 is the L3 VNI's SVI
+	resolve := func(i string, down bool) (string, error) {
+		if id, ok := sviID(i); ok {
+			s := svis[id]
+			if s == nil || (strings.HasSuffix(i, "_l3") && !s.l3) {
+				return "", fmt.Errorf("%s interface %s: no such SVI", at, i)
+			}
+			return "vlan" + strconv.Itoa(id), nil
+		}
+		if cabled[i] && !down {
+			return i, nil
+		}
+		return "", fmt.Errorf("%s interface %s: no such interface", at, i)
+	}
+	inVRF := func(i string) error {
+		if v := vrfOf(i); v != vrf {
+			return fmt.Errorf("%s interface %s: in vrf %s, not %s", at, i, v, vrf)
+		}
+		return nil
+	}
+	var down, up, servers []string
+	if groups := sub(r, "server-group"); len(groups) > 0 {
+		if len(keys(sub(r, "server"))) > 0 || len(keys(sub(r, "interface"))) > 0 {
+			return nil, fmt.Errorf("%s: server and interface beside server-group: one form per VRF", at)
+		}
+		if len(groups) > 1 {
+			return nil, fmt.Errorf("%s: %d server groups: the emulation runs one dhcrelay per VRF, one group's", at, len(groups))
+		}
+		name := keys(groups)[0]
+		g := sub(groups, name)
+		servers = keys(sub(g, "server"))
+		for _, i := range keys(sub(g, "upstream-interface")) {
+			d, err := resolve(i, false)
+			if err != nil {
+				return nil, err
+			}
+			if err := inVRF(i); err != nil {
+				return nil, err
+			}
+			up = append(up, d)
+		}
+		for _, i := range keys(sub(r, "downstream-interface")) {
+			if gn := str(r, "downstream-interface", i, "server-group-name"); gn != name {
+				return nil, fmt.Errorf("%s downstream-interface %s: server-group-name %q is not a group", at, i, gn)
+			}
+			if _, ok := sviID(i); !ok {
+				return nil, fmt.Errorf("%s downstream-interface %s: the emulation relays from SVIs", at, i)
+			}
+			d, err := resolve(i, true)
+			if err != nil {
+				return nil, err
+			}
+			if err := inVRF(i); err != nil {
+				return nil, err
+			}
+			down = append(down, d)
+		}
+	} else {
+		if len(keys(sub(r, "downstream-interface"))) > 0 {
+			return nil, fmt.Errorf("%s: downstream-interface names a server group, and there is none", at)
+		}
+		servers = keys(sub(r, "server"))
+		for _, i := range keys(sub(r, "interface")) {
+			id, isSVI := sviID(i)
+			// a VRF's L3 VNI SVI is its relay's way to the server (Cumulus's EVPN relay names
+			// vlan<id>_l3 in the plain form, upstream), whatever it is called
+			l3 := isSVI && svis[id] != nil && svis[id].l3
+			d, err := resolve(i, isSVI && !l3)
+			if err != nil {
+				return nil, err
+			}
+			if err := inVRF(i); err != nil {
+				return nil, err
+			}
+			if isSVI && !l3 {
+				down = append(down, d)
+			} else {
+				up = append(up, d)
+			}
+		}
+	}
 	if len(servers) == 0 {
+		if len(down) > 0 {
+			return nil, fmt.Errorf("%s: interfaces to relay from and no server", at)
+		}
 		return nil, nil
 	}
-	var down, up []string
-	for _, i := range keys(sub(r, "interface")) {
-		switch {
-		case strings.HasPrefix(i, "vlan"):
-			id, _ := strconv.Atoi(strings.TrimPrefix(i, "vlan"))
-			if svis[id] == nil {
-				return nil, fmt.Errorf("service dhcp-relay default interface %s: no such SVI", i)
-			}
-			down = append(down, i)
-		case cabled[i]:
-			up = append(up, i)
-		default:
-			return nil, fmt.Errorf("service dhcp-relay default interface %s: no such interface", i)
-		}
-	}
 	if len(down) == 0 {
-		return nil, fmt.Errorf("service dhcp-relay default: servers and no SVI to relay from")
+		return nil, fmt.Errorf("%s: servers and no SVI to relay from", at)
 	}
 	return nos.DHCRelayArgs(down, up, servers), nil
+}
+
+// bondsOf is the configuration's bonds (an interface of type bond, or with a bond's settings), each
+// with its members, and the bond each member is in. A member is a cabled port, in one bond.
+func bondsOf(ifaces map[string]any, cabled map[string]bool) (map[string][]string, map[string]string, error) {
+	bonds, memberOf := map[string][]string{}, map[string]string{}
+	for _, name := range keys(ifaces) {
+		it := sub(ifaces, name)
+		if str(it, "type") != "bond" && sub(it, "bond") == nil {
+			continue
+		}
+		if cabled[name] || len(name) > 15 || strings.ContainsAny(name, " /") {
+			return nil, nil, fmt.Errorf("interface %s: not a name a bond can have", name)
+		}
+		members := keys(sub(it, "bond", "member"))
+		if len(members) == 0 {
+			return nil, nil, fmt.Errorf("interface %s: a bond has members (bond member <port>)", name)
+		}
+		for _, m := range members {
+			if !cabled[m] {
+				return nil, nil, fmt.Errorf("interface %s: bond member %s: the switch has no such port", name, m)
+			}
+			if o := memberOf[m]; o != "" {
+				return nil, nil, fmt.Errorf("interface %s: bond member %s is in bond %s already", name, m, o)
+			}
+			memberOf[m] = name
+		}
+		bonds[name] = members
+	}
+	return bonds, memberOf, nil
+}
+
+// renderBond is a bond's ifupdown2 lines: its members, and LACP (802.3ad, Cumulus's default) or a
+// static bond (balance-xor). lacp-bypass, which lets a bond forward before LACP is up, is
+// Cumulus's own kernel change and is recorded only (18 — Fidelity).
+func renderBond(w func(string, ...any), b map[string]any, members []string) {
+	w("    bond-slaves %s", strings.Join(members, " "))
+	if str(b, "mode") == "static" {
+		w("    bond-mode balance-xor")
+	} else {
+		w("    bond-mode 802.3ad")
+		rate := "1"
+		if str(b, "lacp-rate") == "slow" {
+			rate = "0"
+		}
+		w("    bond-lacp-rate %s", rate)
+	}
+	w("    bond-miimon 100")
+	for _, k := range []struct{ nvue, ifup string }{{"down-delay", "bond-downdelay"}, {"up-delay", "bond-updelay"}} {
+		if v := str(b, k.nvue); v != "" {
+			w("    %s %s", k.ifup, v)
+		}
+	}
+}
+
+// sviID reads an SVI's VLAN from its name: vlan<id>, or vlan<id>_l3 (an L3 VNI's, as Cumulus
+// names it).
+func sviID(name string) (int, bool) {
+	if !strings.HasPrefix(name, "vlan") {
+		return 0, false
+	}
+	id, err := strconv.Atoi(strings.TrimSuffix(strings.TrimPrefix(name, "vlan"), "_l3"))
+	return id, err == nil && id >= 1 && id <= 4094
+}
+
+func orDefault(vrf string) string {
+	if vrf == "" {
+		return "default"
+	}
+	return vrf
+}
+
+// vrrAutoMAC is VRR's MAC when the configuration gives none (mac-address auto, or unset): system
+// global fabric-mac when set, else Cumulus's 00:00:5E:00:01:<fabric-id>, the VRRP range with the
+// fabric id (system global fabric-id, 1 by default) as its last byte (Cumulus Linux 5.14's VRR
+// page; UNCONFIRMED for an unset mac-address, which NVIDIA Config Manager's configurations leave)
+func vrrAutoMAC(t Tree) string {
+	if m := str(t, "system", "global", "fabric-mac"); m != "" {
+		return strings.ToLower(m)
+	}
+	id := 1
+	if f := str(t, "system", "global", "fabric-id"); f != "" {
+		if n, err := strconv.Atoi(f); err == nil && n >= 1 && n <= 255 {
+			id = n
+		}
+	}
+	return fmt.Sprintf("00:00:5e:00:01:%02x", id)
 }
 
 // bridgeMAC is the switch's bridge MAC: a locally administered address from its hostname.
@@ -592,15 +863,21 @@ func bridgeMAC(sw nos.Switch) string {
 // management VRF, mgmt, which Cumulus creates for it (its loopback addresses and its own table),
 // with DHCP (`nv set interface eth0 ip address dhcp`) or the addresses it is given. A management
 // port in the default VRF is rendered there.
-func renderMgmt(w func(string, ...any), it Tree) error {
+func renderMgmt(w func(string, ...any), it Tree) (bool, error) {
 	if typ := str(it, "type"); typ != "" && typ != "eth" {
-		return fmt.Errorf("interface %s: type %s: the management port is type eth", nos.MgmtIf, typ)
+		return false, fmt.Errorf("interface %s: type %s: the management port is type eth", nos.MgmtIf, typ)
 	}
+	// an eth0 whose configuration names no VRF is in mgmt, as Cumulus's NVUE has it: NVIDIA Config
+	// Manager's configurations never set interface eth0 ip vrf and route the management network
+	// in vrf mgmt (18, Z7a); `ip vrf default` takes it out
 	vrf := str(it, "ip", "vrf")
+	if vrf == "" {
+		vrf = "mgmt"
+	}
 	switch vrf {
-	case "", "default", "mgmt":
+	case "default", "mgmt":
 	default:
-		return fmt.Errorf("interface %s: vrf %s: the management port is in vrf mgmt or the default VRF", nos.MgmtIf, vrf)
+		return false, fmt.Errorf("interface %s: vrf %s: the management port is in vrf mgmt or the default VRF", nos.MgmtIf, vrf)
 	}
 	if vrf == "mgmt" {
 		w("auto mgmt")
@@ -649,5 +926,5 @@ func renderMgmt(w func(string, ...any), it Tree) error {
 		w("    link-down yes")
 	}
 	w("")
-	return nil
+	return vrf == "mgmt", nil
 }

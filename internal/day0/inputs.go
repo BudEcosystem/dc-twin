@@ -20,7 +20,8 @@ import (
 //   - topology.dot: the switch-to-switch cables in the form Cumulus's PTM reads;
 //   - plan.json, only with plan: given: the address plan the twin would have applied itself;
 //   - netbox/: the same design as NetBox bulk-import CSVs, with a README naming the version and
-//     the import order.
+//     the import order;
+//   - nvcm/: the same design as NVIDIA Config Manager's Design Builder blueprint (nvcm.go).
 //
 // Every file is written in a fixed order (switches by path, cables by id), so the same estate
 // gives the same bytes and a tool's fixtures can be diffed. With plan: tool a plan.json left by
@@ -46,6 +47,16 @@ func WriteInputs(dir string, d Design) error {
 	}
 	for name, data := range netboxCSVs(d) {
 		files[filepath.Join("netbox", name)] = data
+	}
+	nv, err := nvcmFiles(d, d.Release)
+	if err != nil {
+		return err
+	}
+	for name, data := range nv {
+		files[filepath.Join("nvcm", name)] = data
+		if err := os.MkdirAll(filepath.Dir(filepath.Join(dir, "nvcm", name)), 0o755); err != nil {
+			return err
+		}
 	}
 	names := make([]string, 0, len(files))
 	for n := range files {

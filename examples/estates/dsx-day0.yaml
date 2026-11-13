@@ -1,0 +1,51 @@
+# A DSX OS site's day 0 (18 — Z7d), the estate test/linuxnet's TestDay0NVCMBMC runs: the OOB
+# fabric's server-rack management switches leave the factory and are NVIDIA Config Manager's
+# OOB-Leafs, brought up by NVCM's DHCP and ZTP through the OOB aggregation switch, the one switch
+# the twin configures; the servers' BMCs lease from NICo's DHCP through the relays NVCM renders on
+# the leaves (VRF OOB, over EVPN to the aggregation switch). Kea (NVCM's edge) attaches at the
+# aggregation switch's eth128, the site's tooling at eth127.
+apiVersion: dc-twin/v1alpha1
+kind: Estate
+metadata:
+  name: dsx-day0
+spec:
+  seed: 2027
+  clock: wall
+  timeScale: 0.05
+  packs: [generic@0.1.0]
+  fidelity: { default: model }
+  sites:
+    - name: site-1
+      halls:
+        - name: hall-a
+          rows:
+            - name: a
+              positions: 4
+              racks:
+                - { name: r01, position: 1, format: generic/cpu-rack, params: { servers: 1 }, feeds: [A, B] }
+                - { name: r02, position: 2, format: generic/cpu-rack, params: { servers: 1 }, feeds: [A, B] }
+                - { name: n01, position: 4, format: generic/network-rack, feeds: [A, B] }
+  networks:
+    oob: { role: management, dhcp: stack, cidr: 10.30.0.0/20, fabric: oob, server: 10.90.0.10 }
+  fabrics:
+    - name: oob
+      template: oob-flat
+      nos: generic/nvue-frr
+      bringUp: factory
+      factory: { install: preinstalled, ztp: enabled, bootTime: 60s, installTime: 2m, plan: given, select: "r01/mgmt-switch r02/mgmt-switch" }
+  stacks: []
+  facility:
+    power:
+      feeds: [{ name: A, capacityW: 200000 }, { name: B, capacityW: 200000 }]
+  adapters:
+    network:
+      substrate: tap
+      nos:
+        cumulusVersion: "5.14.0"
+        day0Binaries: ./bin
+        images: []
+      attach:
+        - { container: nvcm-edge, port: "oob-agg-1:eth128", address: 10.90.0.10/24, gateway: 10.90.0.1, interface: eth0 }
+        - { netns: site-tooling, port: "oob-agg-1:eth127", address: 10.90.1.10/24, gateway: 10.90.1.1, interface: probe0 }
+        # the BMCs' DHCP (NICo's forge-dhcp-server), in VRF OOB on the aggregation switch
+        - { container: nico-dhcp, port: "oob-agg-1:eth125", address: 10.90.2.10/24, gateway: 10.90.2.1, interface: svc0 }

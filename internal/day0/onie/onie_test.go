@@ -607,3 +607,22 @@ func TestMainFlags(t *testing.T) {
 		t.Errorf("bad flag: %d", rc)
 	}
 }
+
+// onie-install -i's URL, from the NOS (a firmware the day-0 tool serves, NVIDIA Config Manager's
+// /v1/device/<id>/firmware): ONIE fetches it first, whatever DHCP offers, and installs its image.
+func TestInstallStaticURL(t *testing.T) {
+	img := []byte("#!/bin/sh\n# the day-0 tool's firmware\n")
+	h := newHarness(t, []nos.Image{{Name: "^firmware$", NOS: testNOS, Version: "5.14.0"}})
+	h.srv.serve("/v1/device/abc/firmware", img)
+	h.e.StaticURL = fmt.Sprintf("http://onie-server:%d/v1/device/abc/firmware", h.srv.port())
+	if err := h.run(); err != nil {
+		t.Fatalf("run: %v\n%s", err, h.log)
+	}
+	s := h.status(t)
+	if s.Phase != PhaseInstalled || s.Version != "5.14.0" || s.URL != h.e.StaticURL {
+		t.Errorf("status %+v", s)
+	}
+	if got := h.srv.got(); len(got) != 1 || !strings.HasSuffix(got[0], "/v1/device/abc/firmware") {
+		t.Errorf("requests: %q", got)
+	}
+}

@@ -77,16 +77,17 @@ old=$(cat /run/dctwin-relay 2>/dev/null || true)
 if [ "$3" != "$old" ]; then
   printf '%s' "$3" > /run/dctwin-relay
   pkill -x dhcrelay 2>/dev/null || true
-  if [ -n "$3" ]; then echo "dhcrelay $3"; else echo "no relay"; fi
+  if [ -n "$3" ]; then printf '%s\n' "$3" | sed 's/^/dhcrelay in vrf /'; else echo "no relay"; fi
 else
   echo "unchanged"
 fi
 # a relay that cannot run (an interface it cannot open) fails the apply, saying why
 if [ -n "$3" ]; then
+  want=$(printf '%s\n' "$3" | grep -c .)
   n=0
-  until pgrep -x dhcrelay >/dev/null 2>&1; do
+  until [ "$(pgrep -x dhcrelay 2>/dev/null | grep -c .)" -ge "$want" ]; do
     n=$((n+1))
-    if [ $n -gt 10 ]; then echo "dhcrelay is not running:"; tail -n 5 /var/log/dhcrelay.log; rc=1; break; fi
+    if [ $n -gt 10 ]; then echo "dhcrelay is not running (want $want):"; tail -n 5 /var/log/dhcrelay.log; rc=1; break; fi
     sleep 0.5
   done
 fi
@@ -122,7 +123,7 @@ END { if (m) { print "(errors)"; for (i = 1; i <= m; i++) print e[i]; print "(la
 // ApplyArgs are ApplyScript's arguments for rendered files.
 func ApplyArgs(f Files) []string {
 	y := f.System
-	return []string{f.Interfaces, f.FRR, strings.Join(f.Relay, " "), f.ACL, strings.Join(f.Recreate, " "),
+	return []string{f.Interfaces, f.FRR, strings.Join(f.Relay, "\n"), f.ACL, strings.Join(f.Recreate, " "),
 		y.Hostname, y.Timezone, y.Users, y.NTP, y.NTPVRF, y.DNS, y.Syslog, y.LLDP, y.Banner, y.MOTD, y.SNMP}
 }
 

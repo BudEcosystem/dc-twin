@@ -9,10 +9,12 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"regexp"
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	yaml "go.yaml.in/yaml/v3"
 
@@ -44,8 +46,10 @@ func (c *client) run(args []string) int {
 			return 2
 		}
 		err = c.config(args[1], args[2:])
+	case "action":
+		err = c.action(args[1:])
 	default:
-		err = fmt.Errorf("nv %s: not emulated by the twin's nv (set, unset, show, config)", args[0])
+		err = fmt.Errorf("nv %s: not emulated by the twin's nv (set, unset, show, config, action)", args[0])
 	}
 	switch {
 	case err == nil:
@@ -203,9 +207,9 @@ func (c *client) show(args []string) error {
 	var path []string
 	if len(o.words) > 0 {
 		var err error
-		if w := o.words; len(w) >= 3 && w[0] == "interface" && w[2] == "lldp" {
-			// a port's LLDP neighbours: operational state, which NVUE serves and its
-			// configuration schema does not name
+		if w := o.words; len(w) >= 3 && w[0] == "interface" && w[2] == "lldp" || w[0] == "platform" {
+			// a port's LLDP neighbours, the platform: operational state, which NVUE serves and
+			// its configuration schema does not name
 			path = w
 		} else if path, _, err = nvue.CLIPath(o.words, false); err != nil {
 			return err
@@ -356,6 +360,8 @@ func (c *client) config(cmd string, args []string) error {
 			return fmt.Errorf("nv config %s <file>", cmd)
 		}
 		return c.file(o.words[0], cmd == "replace")
+	case "confirm":
+		return c.confirm()
 	case "save":
 		_, err := c.call(http.MethodPost, []string{"dctwin", "save"}, nil, nil)
 		return err
@@ -388,13 +394,10 @@ func (c *client) config(cmd string, args []string) error {
 	return fmt.Errorf("nv config %s: not emulated by the twin's nv (apply, diff, replace, patch, save, show, history, detach, revision)", cmd)
 }
 
-// apply is `nv config apply`: the user's pending revision, or the one named (a number), or a
-// configuration made the pending one first (applied, startup, empty). The twin's NVUE never
-// prompts, so --y, -y, --assume-yes and --assume-no all apply. --confirm (an apply Cumulus rolls
-// back unless confirmed in time) applies and keeps the configuration: the twin models no rollback
-// timer, so an apply is never rolled back, and says so; --confirm-yes, the confirmation, then has
-// nothing left to confirm and succeeds (NVIDIA's net-configurator applies with --confirm and
-// confirms with --confirm-yes in a new session).
+// apply is `nv config apply [<rev>|applied|startup|empty]`. The twin's NVUE never prompts, so
+// --y, -y, --assume-yes and --assume-no all apply. --confirm [<time>] applies with NVUE's
+// commit-confirm: the configuration before it comes back unless the apply is confirmed within the
+// time (10 minutes when none is given), which --confirm-yes, or `nv config confirm`, does.
 func (c *client) apply(args []string) error {
 	var yes, ayes, no, confirm, confirmYes bool
 	o, err := parse(args, nil, map[string]*bool{"-y": &yes, "--y": &yes, "--assume-yes": &ayes, "--assume-no": &no,
@@ -403,15 +406,19 @@ func (c *client) apply(args []string) error {
 		return err
 	}
 	if confirmYes {
-		fmt.Fprintln(c.out, "Confirmed: the twin's NVUE keeps every apply (no rollback timer)")
-		return nil
+		return c.confirm()
 	}
+	window := 0
 	if confirm {
-		// --confirm [<time>]: the rollback timer's length, which nothing here counts down
+		window = 600
 		if len(o.words) > 0 && regexp.MustCompile(`^[0-9]+[smh]?$`).MatchString(o.words[0]) {
+			d, err := time.ParseDuration(o.words[0] + map[bool]string{true: "s", false: ""}[regexp.MustCompile(`^[0-9]+$`).MatchString(o.words[0])])
+			if err != nil || d < time.Second {
+				return fmt.Errorf("nv config apply --confirm %s: a time (600, 90s, 10m)", o.words[0])
+			}
+			window = int(d.Seconds())
 			o.words = o.words[1:]
 		}
-		fmt.Fprintln(c.out, "Warning: --confirm: the twin's NVUE models no rollback timer; the apply is kept")
 	}
 	if len(o.words) > 1 {
 		return fmt.Errorf("nv config apply [<rev>]")
@@ -450,7 +457,11 @@ func (c *client) apply(args []string) error {
 		}
 		id = target
 	}
-	b, err := c.call(http.MethodPatch, []string{"revision", id}, nil, map[string]any{"state": "apply", "auto-prompt": map[string]any{"ays": "ays_yes"}})
+	body := map[string]any{"state": "apply", "auto-prompt": map[string]any{"ays": "ays_yes"}}
+	if window > 0 {
+		body["state-controls"] = map[string]any{"confirm": window}
+	}
+	b, err := c.call(http.MethodPatch, []string{"revision", id}, nil, body)
 	if err != nil {
 		return err
 	}
@@ -462,8 +473,12 @@ func (c *client) apply(args []string) error {
 		} `json:"transition"`
 	}
 	_ = json.Unmarshal(b, &st)
-	if st.State == "applied" {
+	switch st.State {
+	case "applied":
 		fmt.Fprintf(c.out, "applied [rev_id: %s]\n", id)
+		return nil
+	case "ays":
+		fmt.Fprintf(c.out, "applied [rev_id: %s]: confirm within %d s (nv config confirm), or it is rolled back\n", id, window)
 		return nil
 	}
 	fmt.Fprintf(c.errw, "Error: revision %s: %s\n", id, st.State)
@@ -475,6 +490,26 @@ func (c *client) apply(args []string) error {
 
 // replace makes the user's pending revision a tree, whole: everything removed, then the tree
 // merged.
+// confirm keeps the revision a commit-confirm applied (`nv config confirm`, `nv config apply
+// --confirm-yes`).
+func (c *client) confirm() error {
+	b, err := c.call(http.MethodGet, []string{"revision"}, nil, nil)
+	if err != nil {
+		return err
+	}
+	for _, id := range sortedIDs(revs(b)) {
+		if revs(b)[id]["state"] != "ays" {
+			continue
+		}
+		if _, err := c.call(http.MethodPatch, []string{"revision", id}, nil, map[string]any{"state": "apply", "auto-prompt": map[string]any{"ays": "ays_yes"}}); err != nil {
+			return err
+		}
+		fmt.Fprintf(c.out, "confirmed [rev_id: %s]\n", id)
+		return nil
+	}
+	return fmt.Errorf("no apply is waiting for its confirmation")
+}
+
 func (c *client) replace(t any) (string, error) {
 	id, err := c.pending(true)
 	if err != nil {
@@ -689,6 +724,13 @@ func (c *client) file(name string, replace bool) error {
 	if err != nil {
 		return err
 	}
+	// a file is one change to the revision, as NVUE takes it: its sets and unsets as one merge
+	// patch (null removes), unless an unset is followed by a set under the same path, which a
+	// merge cannot say
+	if doc, ok := mergeOps(ops); ok {
+		_, err = c.call(http.MethodPatch, nil, url.Values{"rev": {id}}, doc)
+		return err
+	}
 	for _, o := range ops {
 		if o.del {
 			_, err = c.call(http.MethodDelete, o.path, url.Values{"rev": {id}}, nil)
@@ -700,6 +742,65 @@ func (c *client) file(name string, replace bool) error {
 		}
 	}
 	return nil
+}
+
+// mergeOps is a file's changes as one merge patch from the root, null where a removal is; false
+// when a set lands at or under a path an earlier unset removed (the merge would keep what the
+// unset took away).
+func mergeOps(ops []op) (map[string]any, bool) {
+	doc := map[string]any{}
+	var removed [][]string
+	for _, o := range ops {
+		if o.del {
+			if len(o.path) == 0 {
+				return nil, false
+			}
+			if under(o.path, removed) {
+				continue // its ancestor is already removed
+			}
+			nvue.Patch(doc, o.path[:len(o.path)-1], map[string]any{})
+			parent := doc
+			for _, p := range o.path[:len(o.path)-1] {
+				parent = parent[p].(map[string]any)
+			}
+			parent[o.path[len(o.path)-1]] = nil
+			removed = append(removed, o.path)
+			continue
+		}
+		if !o.setLeaves(removed) {
+			return nil, false
+		}
+		if len(o.path) == 0 {
+			m, ok := o.v.(map[string]any)
+			if !ok {
+				return nil, false
+			}
+			nvue.Patch(doc, nil, m)
+		} else {
+			nvue.Patch(doc, o.path, o.v)
+		}
+	}
+	return doc, true
+}
+
+// setLeaves reports whether a set touches nothing an earlier unset removed.
+func (o op) setLeaves(removed [][]string) bool {
+	for _, p := range leaves(o.path, o.v) {
+		if under(p, removed) {
+			return false
+		}
+	}
+	return len(o.path) == 0 || !under(o.path, removed)
+}
+
+// under reports whether a path is at or below one of the paths given.
+func under(p []string, of [][]string) bool {
+	for _, r := range of {
+		if len(p) >= len(r) && strings.Join(p[:len(r)], "\x00") == strings.Join(r, "\x00") {
+			return true
+		}
+	}
+	return false
 }
 
 // op is one change a file makes: a merge at a path, or a removal.
@@ -984,3 +1085,78 @@ func sortedKeys[V any](m map[string]V) []string {
 }
 
 func sortedAny(m map[string]any) []string { return sortedKeys(m) }
+
+// action is `nv action`: of NVUE's actions, the twin's nv carries out `fetch system` (NVIDIA Config
+// Manager's boot script fetches its startup.yaml with it from 5.16): `nv action fetch system
+// file-path <path> uri <uri> [file-permissions <octal>] [vrf <vrf>]`, the file fetched over HTTP,
+// HTTPS or SFTP (Cumulus's schemes) by the switch's curl, in the VRF when one is given (through the
+// twin's ip vrf exec, clsys), and written with the permissions (0644 when none).
+func (c *client) action(args []string) error {
+	if len(args) >= 2 && args[0] == "reboot" && args[1] == "system" {
+		// the switch's reboot (clsys's, which the twin carries out)
+		for _, a := range args[2:] {
+			if a != "no-confirm" && a != "force" {
+				return fmt.Errorf("nv action reboot system %s: not emulated (no-confirm, force)", a)
+			}
+		}
+		cmd := exec.Command("reboot")
+		cmd.Stdout, cmd.Stderr = c.out, c.errw
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("reboot: %v", err)
+		}
+		return nil
+	}
+	if len(args) < 2 || args[0] != "fetch" || args[1] != "system" {
+		return fmt.Errorf("nv action %s: not emulated by the twin's nv (fetch system, reboot system)", strings.Join(args, " "))
+	}
+	kv := map[string]string{}
+	rest := args[2:]
+	for i := 0; i < len(rest); i += 2 {
+		switch rest[i] {
+		case "file-path", "uri", "file-permissions", "vrf":
+		default:
+			return fmt.Errorf("nv action fetch system: %q is not file-path, uri, file-permissions or vrf", rest[i])
+		}
+		if i+1 >= len(rest) {
+			return fmt.Errorf("nv action fetch system %s: a value is missing", rest[i])
+		}
+		kv[rest[i]] = rest[i+1]
+	}
+	path, uri := kv["file-path"], kv["uri"]
+	if path == "" || uri == "" {
+		return fmt.Errorf("nv action fetch system: file-path and uri are needed")
+	}
+	if !strings.HasPrefix(path, "/") {
+		return fmt.Errorf("nv action fetch system file-path %s: an absolute path", path)
+	}
+	u, err := url.Parse(uri)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https" && u.Scheme != "sftp" && u.Scheme != "scp") || u.Host == "" {
+		return fmt.Errorf("nv action fetch system uri %s: an http, https, sftp or scp URI", uri)
+	}
+	perm := os.FileMode(0o644)
+	if p := kv["file-permissions"]; p != "" {
+		n, err := strconv.ParseUint(p, 8, 32)
+		if err != nil || n > 0o777 {
+			return fmt.Errorf("nv action fetch system file-permissions %s: octal permissions", p)
+		}
+		perm = os.FileMode(n)
+	}
+	argv := []string{"curl", "--fail", "--silent", "--show-error", "--insecure", "--output", path + ".nvfetch", uri}
+	if v := kv["vrf"]; v != "" && v != "default" {
+		argv = append([]string{c.ipCmd, "vrf", "exec", v}, argv...)
+	}
+	cmd := exec.Command(argv[0], argv[1:]...)
+	cmd.Stdout, cmd.Stderr = c.errw, c.errw
+	if err := cmd.Run(); err != nil {
+		_ = os.Remove(path + ".nvfetch")
+		return fmt.Errorf("fetching %s: %v", uri, err)
+	}
+	if err := os.Chmod(path+".nvfetch", perm); err != nil {
+		return err
+	}
+	if err := os.Rename(path+".nvfetch", path); err != nil {
+		return err
+	}
+	fmt.Fprintf(c.out, "Action succeeded\n")
+	return nil
+}

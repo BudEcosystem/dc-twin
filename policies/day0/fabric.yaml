@@ -12,7 +12,12 @@
 #     ztp-done, ztp-failed, configured, converged), `mgmt.lease` (the address, "" when lost),
 #     `hostname`, `credentials` (factory or changed), `lldp <port>` (<system>:<port>);
 #   - the SUT's requests to a switch (source class `stack`): NVUE's network.config.*, SONiC's
-#     gNMI and CLI writes as network.config.write, LLDP reads as network.lldp.read;
+#     gNMI and CLI writes as network.config.write, LLDP reads as network.lldp.read; a SONiC
+#     switch's CLI over SSH, each command as the twin's sshd ForceCommand reports it
+#     (network.config.apply, .save, .change, .stage, .reset, network.account.write; reads as
+#     network.lldp.read, network.bgp.read, network.config.read); a new boot URL in a switch's lease
+#     (network.ztp.provision, protocol dhcp), the site's DHCP re-arming a switch's day 0, which is
+#     how a tool acts on a switch whose ZTP a fault stopped;
 #   - generic/cabling faults, whose reach is every switch at an end of a swapped cable (the
 #     engine's asBuilt events on the four ports).
 apiVersion: dc-twin/v1alpha1

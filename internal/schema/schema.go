@@ -1317,6 +1317,10 @@ type EventRequest struct {
 	// Class is the canonical request's class (read, write, destructive, other; 17).
 	Class  string `json:"class,omitempty"`
 	Status int    `json:"status,omitempty"`
+	// Detail is what a request carried that its target does not say: an NVUE change's switch
+	// spelling as sent and as held ("spelling": "enable->state", 18 — Z7a, Q30); a refused
+	// change's reason ("issue")
+	Detail map[string]string `json:"detail,omitempty"`
 }
 
 type EventState struct {

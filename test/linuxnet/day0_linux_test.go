@@ -68,6 +68,18 @@ type day0Case struct {
 	// plan is given (stack-inputs/day0 holds the twin's address plan) or tool (the tooling
 	// allocates its own: toolPlan)
 	plan string
+	// images, when set, is spec.adapters.network.nos.images (YAML), whatever the install
+	images string
+	// dhcp, when set, is the container the site's DHCP runs in, attached to the OOB network at
+	// 10.90.0.10 as dhcpIface, in place of the harness's Kea (a day-0 tool's own, NVCM's edge)
+	dhcp, dhcpIface string
+	// noTooling: the harness serves no HTTP at the tooling's address (the day-0 tool serves its
+	// own there)
+	noTooling bool
+	// file is the estate under testdata ("" tap-day0.yaml)
+	file string
+	// bmcDHCP is the container a DSX estate's BMC DHCP runs in (tap-day0-dsx.yaml)
+	bmcDHCP string
 }
 
 // day0Run is a running day-0 estate and the tooling around it.
@@ -91,6 +103,8 @@ type day0Run struct {
 	installer []byte
 	// www is the reference tooling's rendered files, served at / (reference runs)
 	www string
+	// mux is the tooling's HTTP server's, which a suite may add its handlers to
+	mux *http.ServeMux
 	// ntpFrom counts the NTP requests the tooling's NTP server answered, by source address
 	ntpFrom map[string]int
 }
@@ -136,19 +150,30 @@ func startDay0(t *testing.T, c day0Case) *day0Run {
 	suffix := strconv.Itoa(os.Getpid())
 	keaName, probeName := "dctwin-kea-"+c.estate+"-"+suffix, "dctwin-probe-"+strings.TrimPrefix(c.estate, "linuxnet-")
 	r.p = newProbe(t, probeName)
-	r.serve(t)
+	if !c.noTooling {
+		r.serve(t)
+	}
 	r.serveNTP(t)
-	r.kea = startDay0Kea(t, d, keaName, c.reference)
+	keaIface := "svc0"
+	if c.dhcp != "" {
+		keaName, keaIface = c.dhcp, orDefault(c.dhcpIface, "eth0")
+		r.kea = &nos.Container{ID: c.dhcp, Name: c.dhcp}
+	} else {
+		r.kea = startDay0Kea(t, d, keaName, c.reference)
+	}
 	onie := "[]"
 	if c.install == "onie" {
 		onie = fmt.Sprintf(`[{ match: { name: "^onie-installer" }, nos: %s, version: "5.13.1" }]`, c.nos)
+	}
+	if c.images != "" {
+		onie = c.images
 	}
 	stacks := "[]"
 	if c.reference {
 		stacks = "[{ name: reference-day0@0.1.0 }]"
 	}
-	est := loadEstate(t, "tap-day0.yaml", map[string]string{"STACKS": stacks, "CUMULUS_VERSION": c.cumulus, "PLAN_MODE": orDefault(c.plan, "given"), "ESTATE_NAME": c.estate, "FABRIC_NOS": c.nos, "INSTALL_MODE": c.install,
-		"ZTP_MODE": c.ztp, "BOOT_TIME": orDefault(c.boot, "60s"), "DAY0_BINARIES": bin, "ONIE_IMAGES": onie, "KEA_CONTAINER": keaName, "PROBE_NETNS": probeName})
+	est := loadEstate(t, orDefault(c.file, "tap-day0.yaml"), map[string]string{"STACKS": stacks, "CUMULUS_VERSION": c.cumulus, "PLAN_MODE": orDefault(c.plan, "given"), "ESTATE_NAME": c.estate, "FABRIC_NOS": c.nos, "INSTALL_MODE": c.install,
+		"ZTP_MODE": c.ztp, "BOOT_TIME": orDefault(c.boot, "60s"), "DAY0_BINARIES": bin, "ONIE_IMAGES": onie, "KEA_CONTAINER": keaName, "KEA_IFACE": keaIface, "PROBE_NETNS": probeName, "BMC_DHCP_CONTAINER": c.bmcDHCP})
 	start := time.Now()
 	r.tw, r.sub, _ = up(t, est)
 	t.Logf("up returned after %s: the OOB fabric configured by the twin, the frontend's switches in factory state", time.Since(start).Round(time.Second))
@@ -277,6 +302,28 @@ func (r *day0Run) judge(allow ...string) *critic.Judgement {
 		t.Fatalf("the critic: %v", err)
 	}
 	t.Logf("the critic, day0/fabric: verdict %s\n%s", j.Verdict, indent(j.Text()))
+	// what the tool's requests that failed were (hygiene's error ratio counts them), by protocol,
+	// method, canonical request, target and status
+	if evs, err := critic.ReadLog(critic.StateDir(r.tw)); err == nil {
+		failed := map[string]int{}
+		for _, e := range evs {
+			if q := e.Request; e.Kind == "request" && e.Source.Class == "stack" && q != nil && q.Status >= 400 {
+				k := fmt.Sprintf("%s %s %s %s → %d", q.Protocol, q.Method, q.Canonical, q.Target, q.Status)
+				if why := q.Detail["issue"]; why != "" {
+					k += ": " + strings.Join(strings.Fields(why), " ")
+				}
+				failed[k]++
+			}
+		}
+		var lines []string
+		for k, n := range failed {
+			lines = append(lines, fmt.Sprintf("%4d  %s", n, k))
+		}
+		sort.Sort(sort.Reverse(sort.StringSlice(lines)))
+		if len(lines) > 0 {
+			t.Logf("the tool's failed requests:\n%s", indent(strings.Join(lines, "\n")))
+		}
+	}
 	// the day-0 measures (18 — Measures): every factory switch has its time to converged
 	var ms []string
 	conv := map[string]bool{}
@@ -561,6 +608,7 @@ func (p *probe) open(network, addr string) (net.Listener, net.PacketConn, error)
 // config_db.json (its dynamic URL carries the serial), and the ONIE installer.
 func (r *day0Run) serve(t *testing.T) {
 	mux := http.NewServeMux()
+	r.mux = mux
 	record := func(h http.HandlerFunc) http.HandlerFunc {
 		return func(w http.ResponseWriter, req *http.Request) {
 			r.mu.Lock()
@@ -832,7 +880,7 @@ func (r *day0Run) dumpSwitches() {
 			continue
 		}
 		out, err := r.sub.Exec(context.Background(), sp.Device.Path, "sh", "-c",
-			"ip -br addr; cat "+nos.Day0State+"/ztp/status.json "+nos.Day0State+"/onie/status.json 2>/dev/null; tail -n 30 /var/lib/cumulus/ztp/ztp_state.log /var/log/autoprovision /var/log/dctwin-dhcp.log 2>/dev/null; cat /run/dctwin/dhcp-eth0.env 2>/dev/null")
+			"ip -br addr; cat "+nos.Day0State+"/ztp/status.json "+nos.Day0State+"/onie/status.json 2>/dev/null; tail -n 30 /var/lib/cumulus/ztp/ztp_state.log /var/log/autoprovision /var/log/ztp.log /var/log/dctwin-dhcp.log 2>/dev/null; cat /run/dctwin/dhcp-eth0.env 2>/dev/null")
 		r.t.Logf("%s (%v):\n%s", sp.Config.Hostname, err, indent(out))
 	}
 }

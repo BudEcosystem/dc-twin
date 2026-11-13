@@ -224,6 +224,8 @@ type nosSwitch struct {
 	nvuePassword string
 	// factoryUp: a factory switch has booted and its factory configuration is applied (D72).
 	factoryUp atomic.Bool
+	// rebooting: a reboot the switch asked for is being carried out (reboot_linux.go)
+	rebooting atomic.Bool
 }
 
 // routing is the container a switch's routing daemons run in: its bgp sidecar, or the switch's.
@@ -1140,6 +1142,7 @@ func (s *Substrate) startNVUE(sw *nosSwitch) error {
 		return out, nil
 	}
 	sw.nvue = nvue.NewServer(sw.plan.Config, sw.nvuePassword, apply)
+	sw.nvue.SetActions(s.nvueActions(sw))
 	sw.nvue.SetRunner(func(ctx context.Context, args ...string) (string, error) {
 		out, code, err := s.docker.Exec(ctx, id, args...)
 		if err == nil && code != 0 {
@@ -1172,15 +1175,27 @@ func (s *Substrate) startNVUE(sw *nosSwitch) error {
 			}
 		}
 		user, addr, _ := strings.Cut(ev.Client, "@")
-		if sw.plan.Config.Factory != nil && ev.Op == "revision.apply" {
+		if sw.plan.Config.Factory != nil && ev.Op == "revision.apply" && ev.State != "invalid" {
 			// a configuration a client applied: Cumulus's ZTP no longer runs on a switch someone
-			// configured by hand (docs/reviews/2026-11-11-day0-vendor-facts.md A)
+			// configured by hand (docs/reviews/2026-11-11-day0-vendor-facts.md A). A revision the
+			// switch refused (invalid) changed nothing, and leaves ZTP to retry: a ZTP script whose
+			// nv config apply failed is retried, not taken for a hand's configuration
 			go func() {
 				_ = s.docker.ExecDetached(s.ctx, id, "sh", "-c", "mkdir -p /run/dctwin && touch /run/dctwin/nvue-user-applied")
 			}()
 		}
+		detail := map[string]string{}
+		if ev.Spelling != "" {
+			detail["spelling"] = ev.Spelling
+		}
+		if ev.Issue != "" {
+			detail["issue"] = ev.Issue // why the switch refused the change
+		}
+		if len(detail) == 0 {
+			detail = nil
+		}
 		s.eng.LogRead(engine.Request{Path: path, Canonical: canonical, Protocol: "nvue", Method: ev.Op, Target: target,
-			Source: schema.EventSource{Class: "stack", Principal: user, Address: addr}}, status)
+			Source: schema.EventSource{Class: "stack", Principal: user, Address: addr}, Detail: detail}, status)
 	})
 	ctx, cancel := context.WithTimeout(s.ctx, 5*time.Minute)
 	defer cancel()

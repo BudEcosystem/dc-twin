@@ -71,6 +71,12 @@ type node struct {
 	// rename, for a kToggle leaf (5.15's state), is the 5.14 switch it replaces (enable), which
 	// normalize renders it as
 	rename string
+	// alias: a switch one release's CLI does not have (5.14's enable on 5.15 and later, 5.15's state
+	// before) that a tree, a startup.yaml or a REST PATCH, may still carry (Q30): it is refused by
+	// name on the CLI only
+	alias bool
+	// keyed, for a leaf: NVUE's JSON may hold the value as an object of one key ({"2x": {}})
+	keyed bool
 }
 
 func obj(kids map[string]*node) *node { return &node{kids: kids} }
@@ -113,7 +119,11 @@ func peerAF() *node {
 	return obj(toggle(map[string]*node{
 		"policy":                    policy,
 		"default-route-origination": obj(enable),
-		"aspath":                    obj(map[string]*node{"allow-my-asn": obj(with(enable, map[string]*node{"occurrences": lf(kInt), "origin": lf(kOnOff)}))}),
+		"aspath": obj(map[string]*node{
+			"allow-my-asn": obj(with(enable, map[string]*node{"occurrences": lf(kInt), "origin": lf(kOnOff)})),
+			// FRR's remove-private-AS (remove) and its replace-AS form (replace)
+			"private-as": oneOf("remove", "replace"),
+		}),
 	}))
 }
 
@@ -172,7 +182,9 @@ var link = obj(map[string]*node{
 	"mtu":            lf(kInt),
 	"speed":          lf(kSpeed),
 	"auto-negotiate": lf(kOnOff),
-	"breakout":       lf(kBreakout),
+	// NVUE's JSON keys a breakout ({"2x": {}}, as NVCM's startup.yaml writes it); `nv set … link
+	// breakout 2x` gives the same tree. A bare string is still taken, as the twin's own trees have it
+	"breakout": &node{leaf: kBreakout, keyed: true},
 })
 
 // Roles are the roles of `nv set system aaa user <name> role` (Cumulus Linux 5.14's User
@@ -248,7 +260,7 @@ var schema = obj(map[string]*node{
 		// service lldp before (normalize renders them as those). association-type pool is
 		// chrony's pool
 		"ntp": since(v515, "service ntp <vrf> server <host>", obj(map[string]*node{
-			"server": any_(obj(map[string]*node{"iburst": lf(kOnOff), "association-type": oneOf("server", "pool")}), kHost),
+			"server": any_(obj(with(state, map[string]*node{"iburst": lf(kOnOff), "association-type": oneOf("server", "pool")})), kHost),
 			"vrf":    lf(kString),
 		})),
 		"dns":  since(v515, "service dns <vrf> server <address>", obj(map[string]*node{"server": any_(empty, kAddr)})),
@@ -267,9 +279,25 @@ var schema = obj(map[string]*node{
 		}))),
 		// What Just Happened: Spectrum's ASIC reports the packets it drops and why. Recorded:
 		// the twin forwards in the kernel, with no ASIC to report from (18 — Fidelity)
-		"wjh": obj(with(state, map[string]*node{
+		"wjh": obj(toggle(map[string]*node{
 			"channel": any_(obj(map[string]*node{"trigger": any_(empty, kString)}), kString),
 		})),
+		// The rest is recorded and rendered to nothing: what the ASIC or the platform does, which
+		// the twin's kernel forwarding has no part of (18 — Fidelity). global is the switch's
+		// fabric-wide MACs and ids (EVPN multihoming's and VRR's); security password-hardening is
+		// PAM's password rules, which the twin's PAM does not enforce; reboot mode is how the next
+		// reboot runs (cold, warm, fast)
+		"global": obj(map[string]*node{
+			"fabric-mac": lf(kString), "fabric-id": lf(kInt), "anycast-mac": lf(kString),
+			"anycast-id": lf(kInt), "system-mac": lf(kString),
+		}),
+		"security": obj(map[string]*node{"password-hardening": obj(state)}),
+		"reboot":   obj(map[string]*node{"mode": oneOf("cold", "warm", "fast")}),
+		// ACLs on the switch's own traffic (the control plane), as `acl <name>` defines them:
+		// rendered as an interface's control-plane ACL is, on the input hook
+		"control-plane": obj(map[string]*node{"acl": any_(obj(map[string]*node{
+			"inbound": empty, "outbound": empty,
+		}), kString)}),
 	}),
 	"router": obj(map[string]*node{
 		"bgp": obj(toggle(map[string]*node{
@@ -285,6 +313,8 @@ var schema = obj(map[string]*node{
 			}),
 		})),
 		"vrr": obj(toggle(nil)),
+		// Spectrum's adaptive routing: recorded (18 — Fidelity), on the router and per port
+		"adaptive-routing": obj(toggle(map[string]*node{"link-utilization-threshold": lf(kOnOff)})),
 		// BFD's profiles (FRR's bfd profile), which a peer's bfd profile names. The switch is
 		// renamed in 5.15 as router bgp's is (UNCONFIRMED for bfd)
 		"bfd": obj(toggle(map[string]*node{
@@ -359,8 +389,36 @@ var schema = obj(map[string]*node{
 			"address": any_(empty, kPrefix),
 			"gateway": any_(empty, kAddr),
 		})),
-		"vrf":    since(v515, "ip vrf", lf(kString)),
-		"bridge": obj(map[string]*node{"domain": any_(obj(map[string]*node{"access": lf(kInt)}), kString)}),
+		"vrf": since(v515, "ip vrf", lf(kString)),
+		"bridge": obj(map[string]*node{"domain": any_(obj(map[string]*node{
+			"access": lf(kInt),
+			// a port's STP: recorded with the bridge's (bridge domain stp)
+			"stp": obj(map[string]*node{
+				"admin-edge": lf(kOnOff), "auto-edge": lf(kOnOff), "bpdu-guard": lf(kOnOff),
+				"bpdu-filter": lf(kOnOff), "network": lf(kOnOff), "restrrole": lf(kOnOff),
+			}),
+		}), kString)}),
+		// recorded: the ASIC's PFC watchdog and adaptive routing (18 — Fidelity). NVCM writes the
+		// watchdog's state enable|disable in every release
+		"qos":    obj(map[string]*node{"pfc-watchdog": obj(map[string]*node{"state": oneOf("enable", "disable")})}),
+		"router": obj(map[string]*node{"adaptive-routing": obj(toggle(map[string]*node{"link-utilization-threshold": lf(kInt)}))}),
+		// EVPN multihoming on a port: uplink is FRR's evpn mh uplink (a core-facing port whose loss
+		// takes the segments down); segment, on a bond, its Ethernet segment
+		"evpn": obj(map[string]*node{"multihoming": obj(map[string]*node{
+			"uplink": lf(kOnOff),
+			"segment": obj(toggle(map[string]*node{
+				"df-preference": lf(kInt), "local-id": lf(kInt), "mac-address": lf(kString), "identifier": lf(kString),
+			})),
+		})}),
+		// a bond (ifupdown2's bond-slaves, the kernel's 802.3ad), its members and LACP
+		"bond": obj(map[string]*node{
+			"member":      any_(empty, kString),
+			"lacp-bypass": lf(kOnOff),
+			"mode":        oneOf("lacp", "static"),
+			"lacp-rate":   oneOf("fast", "slow"),
+			"down-delay":  lf(kInt),
+			"up-delay":    lf(kInt),
+		}),
 		"acl": any_(obj(map[string]*node{
 			"inbound":  obj(map[string]*node{"control-plane": empty}),
 			"outbound": obj(map[string]*node{"control-plane": empty}),
@@ -368,10 +426,20 @@ var schema = obj(map[string]*node{
 	}), kString),
 	"bridge": obj(map[string]*node{"domain": any_(obj(map[string]*node{
 		"vlan": any_(obj(map[string]*node{"vni": any_(empty, kInt)}), kInt),
+		// the bridge's spanning tree: recorded (ifupdown2's mstpctl attributes need mstpd, which the
+		// image does not run; the twin's fabrics have no loops for it to break, 18 — Fidelity)
+		"stp": obj(map[string]*node{"priority": lf(kInt), "state": choiceOf("up", "down")}),
 	}), kString)}),
 	"vrf": any_(obj(map[string]*node{
-		"evpn":     obj(toggle(map[string]*node{"vni": any_(empty, kInt)})),
-		"loopback": obj(map[string]*node{"ip": obj(map[string]*node{"address": any_(empty, kPrefix)})}),
+		// vlan: the L3 VNI's VLAN, NVUE's choice when unset (Cumulus picks one from its reserved range)
+		"evpn": obj(toggle(map[string]*node{"vni": any_(empty, kInt), "vlan": lf(kInt)})),
+		// a VRF's loopback: ip address, or ipv4 address as 5.15 names an interface's. Both are taken
+		// in every release: NVCM 1.4.1's 5.16.1 configurations write ipv4 for one role (cleaf) and ip
+		// for another (tor), and which a 5.15+ switch refuses is UNCONFIRMED (Q30)
+		"loopback": obj(map[string]*node{
+			"ip":   obj(map[string]*node{"address": any_(empty, kPrefix)}),
+			"ipv4": obj(map[string]*node{"address": any_(empty, kPrefix)}),
+		}),
 		"router": obj(map[string]*node{
 			"bgp": obj(toggle(map[string]*node{
 				"autonomous-system": lf(kInt),
@@ -410,11 +478,28 @@ var schema = obj(map[string]*node{
 		"source":          obj(map[string]*node{"address": lf(kAddr)}),
 		"arp-nd-suppress": lf(kOnOff),
 	}))}),
-	"evpn": obj(toggle(nil)),
+	"evpn": obj(toggle(map[string]*node{
+		// EVPN multihoming (FRR's evpn mh): its timers; the segments are on bonds
+		"multihoming": obj(toggle(map[string]*node{
+			"startup-delay": lf(kInt), "mac-holdtime": lf(kInt), "neighbor-holdtime": lf(kInt),
+		})),
+		// what EVPN advertises beyond MACs: an SVI's address (advertise-svi-ip) and the gateway's
+		// MAC and address (advertise-default-gw)
+		"route-advertise": obj(map[string]*node{
+			"svi-ip": lf(kOnOff), "default-gateway": lf(kOnOff), "nexthop-setting": lf(kString),
+		}),
+	})),
 	"service": obj(map[string]*node{
 		"dhcp-relay": any_(obj(map[string]*node{
 			"server":    any_(empty, kAddr),
 			"interface": any_(empty, kString),
+			// the relay as server groups: each group's servers and the interfaces towards them,
+			// and the downstream interfaces relayed to a group (NVCM's form; dhcrelay -iu and -id)
+			"server-group": any_(obj(map[string]*node{
+				"server":             any_(empty, kAddr),
+				"upstream-interface": any_(empty, kString),
+			}), kString),
+			"downstream-interface": any_(obj(map[string]*node{"server-group-name": lf(kString)}), kString),
 		}), kString),
 		// per VRF, as Cumulus has them to 5.14 (vendor facts C.3): service ntp <vrf> server <host>
 		// and service dns <vrf> server <address>; system ntp, dns and lldp from 5.15
@@ -428,6 +513,11 @@ var schema = obj(map[string]*node{
 	// between pools) likewise
 	"qos": obj(map[string]*node{
 		"roce": obj(toggle(map[string]*node{"mode": oneOf("lossless", "lossy")})),
+		// priority flow control's buffers and thresholds: recorded, as roce is
+		"pfc": any_(obj(map[string]*node{
+			"port-buffer": lf(kInt), "switch-priority": any_(empty, kInt), "xoff-threshold": lf(kInt),
+			"xon-threshold": lf(kInt), "cable-length": lf(kInt), "rx": lf(kString), "tx": lf(kString),
+		}), kString),
 		"traffic-pool": any_(obj(map[string]*node{
 			"memory-percent":  lf(kInt),
 			"switch-priority": any_(empty, kInt),
@@ -452,7 +542,10 @@ var schema = obj(map[string]*node{
 
 // lldp is lldpd's settings: service lldp to 5.14, system lldp from 5.15
 var lldp = obj(map[string]*node{
-	"state":              oneOf("enabled", "disabled"),
+	"state": oneOf("enabled", "disabled"),
+	// lldpd's TLVs and transmit mode: recorded (lldpd sends what it sends)
+	"dot1-tlv":           lf(kOnOff),
+	"mode":               oneOf("default", "force-send-lldp"),
 	"tx-interval":        lf(kInt),
 	"tx-hold-multiplier": lf(kInt),
 })
@@ -477,9 +570,13 @@ func ValidateAt(ver Version, path []string, v any) error {
 
 func (n *node) child(name string) (*node, error) { return n.childAt(Version{}, name) }
 
-func (n *node) childAt(ver Version, name string) (*node, error) {
+// childAt is a child as a tree names it; childCLI as the CLI does (gateIn).
+func (n *node) childAt(ver Version, name string) (*node, error)  { return n.childIn(ver, name, false) }
+func (n *node) childCLI(ver Version, name string) (*node, error) { return n.childIn(ver, name, true) }
+
+func (n *node) childIn(ver Version, name string, cli bool) (*node, error) {
 	if c, ok := n.kids[name]; ok {
-		if err := c.gate(ver, name); err != nil {
+		if err := c.gateIn(ver, name, cli); err != nil {
 			return nil, err
 		}
 		return c, nil
@@ -548,7 +645,10 @@ func checkKey(k kind, name string) error {
 }
 
 var (
-	userName  = regexp.MustCompile(`^[a-z_][a-z0-9_-]{0,31}$`)
+	// a user name as Debian's useradd takes it, upper case included: NVIDIA Config Manager's
+	// bootstrap data names its account nvConfigManager (whether NVUE's own pattern allows upper
+	// case is UNCONFIRMED; Cumulus's useradd does)
+	userName  = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_.-]{0,31}$`)
 	hostName  = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)*\.?$`)
 	tzName    = regexp.MustCompile(`^[A-Za-z0-9_+-]+(/[A-Za-z0-9_+-]+)*$`)
 	speedRE   = regexp.MustCompile(`^([0-9]+[MG]|auto)$`)
@@ -575,6 +675,13 @@ func (n *node) validate(ver Version, at string, v any) error {
 		return fmt.Errorf("%s: %v is not one of %s", at, v, strings.Join(n.enum, ", "))
 	}
 	if n.leaf != 0 {
+		if m, ok := v.(map[string]any); ok && n.keyed && len(m) == 1 {
+			for k, e := range m {
+				if em, ok := e.(map[string]any); ok && len(em) == 0 {
+					return checkLeaf(ver, n.leaf, at, k)
+				}
+			}
+		}
 		return checkLeaf(ver, n.leaf, at, v)
 	}
 	m, ok := v.(map[string]any)

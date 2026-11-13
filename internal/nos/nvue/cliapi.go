@@ -9,6 +9,8 @@ import (
 	"time"
 
 	yaml "go.yaml.in/yaml/v3"
+
+	"github.com/BudEcosystem/dc-twin/internal/nos"
 )
 
 // StartupFile is where Cumulus keeps the startup configuration (vendor facts B), which `nv
@@ -130,11 +132,24 @@ func (s *Server) pendingOf(user string) (string, *revision) {
 }
 
 func (s *Server) build() string {
-	if s.sw.Build != "" {
-		return s.sw.Build
+	if b := s.swNow().Build; b != "" {
+		return b
 	}
 	return DefaultBuild
 }
+
+// swNow is the switch as it runs now: its build the one an ONIE install gave it (SetBuild).
+func (s *Server) swNow() nos.Switch {
+	sw := s.sw
+	if b := s.build_.Load(); b != nil {
+		sw.Build = *b
+	}
+	return sw
+}
+
+// SetBuild is the switch's NOS reinstalled at another release (an ONIE install of a different
+// image, 18 — Z7a): its NVUE speaks that release's grammar and reports its build from now on.
+func (s *Server) SetBuild(build string) { s.build_.Store(&build) }
 
 // Version is the Cumulus Linux release whose NVUE grammar the switch speaks: its build's
 // (nos.Switch.Build, which spec.adapters.network.nos.cumulusVersion sets), else DefaultVersion.

@@ -101,7 +101,7 @@ func (c *compiler) fabrics() {
 				fs = x
 			}
 		}
-		c.genOOB(f, c.placeIn(fs))
+		c.genOOB(f, c.placeIn(fs), fs.BringUp == "factory")
 	}
 	for _, fs := range c.est.Spec.Fabrics {
 		if f := c.m.Fabrics[fs.Name]; f != nil {
@@ -314,7 +314,7 @@ func naturalLess(a, b string) bool { return a < b }
 
 // genOOB cables every management-role port of a rack to the rack's management switches, and
 // each management switch's first uplink to the OOB aggregation switch.
-func (c *compiler) genOOB(f *model.Fabric, place *model.Rack) {
+func (c *compiler) genOOB(f *model.Fabric, place *model.Rack, factory bool) {
 	var aggs []*model.Device
 	aggProfile := strParam(f, "aggregation")
 	for _, r := range c.m.Racks {
@@ -368,6 +368,18 @@ func (c *compiler) genOOB(f *model.Fabric, place *model.Rack) {
 					continue
 				}
 				c.link(m.PortBy["up1"], agg.PortBy[port], "cable", f.Name)
+				// a factory OOB fabric's management switches have management ports of their own
+				// (D73): each is cabled to its aggregation switch, from the top of its panel down
+				// below the two ports the site's services attach at, so that a factory management
+				// switch's eth0 leases through a switch the twin configures (18 — Z7d)
+				if mp := m.PortBy["mgmt0"]; factory && mp != nil && mp.Link == nil {
+					down := fmt.Sprintf("eth%d", 126-n%128)
+					if q := agg.PortBy[down]; q == nil || q.Link != nil {
+						c.errf("rack %s: OOB aggregation %s has no free port %s for %s's management port", r.Name, agg.Name, down, m.Name)
+					} else {
+						c.link(mp, q, "cable", f.Name)
+					}
+				}
 			}
 		}
 		f.Racks = appendRack(f.Racks, r)

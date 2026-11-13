@@ -31,11 +31,13 @@ import (
 //
 // Retry, which the docs show only as "Retrying" lines (UNCONFIRMED 4), is the twin's choice: the
 // same source is tried again every 10 s (the discovery interval) until it succeeds, the DHCP
-// window of 5 minutes from the first attempt closes, or CUMULUS-PROV-COUNT reaches
-// CUMULUS-PROV-MAX; then ZTP logs "ZTP script failed. Exiting..." and the result is failed. The
-// two headers are read as an attempt counter and its ceiling (UNCONFIRMED 2): the count is of
-// fetches, persists across boots in ZTP's state and is cleared by `ztp -R`; the ceiling is the
-// documented example value, 32. A manual `ztp -r` makes one attempt and does not retry.
+// window of 5 minutes from the first attempt closes; then ZTP logs "ZTP script failed.
+// Exiting..." and the result is failed. The two headers are read as a provisioning-run counter
+// and its ceiling (UNCONFIRMED 2): the count is of runs (one window's attempts, or one ztp -r),
+// persists across boots in ZTP's state and is cleared by `ztp -R`; at the ceiling, the documented
+// example value 32, ZTP starts no run. Counting runs rather than fetches keeps a switch whose one
+// window failed able to provision when its option 239 changes (a fetch count would spend the 32
+// in one 5-minute window). A manual `ztp -r` makes one attempt and does not retry.
 //
 // After a failure, or a window with no option 239, the daemon goes on watching eth0's lease and
 // looks again when the option appears or changes, as Cumulus's DHCP-triggered ZTP runs again when
@@ -61,7 +63,8 @@ type clState struct {
 	Date   string `json:"date,omitempty"` // RFC 3339
 	Method string `json:"method,omitempty"`
 	URL    string `json:"url,omitempty"`
-	// Count is CUMULUS-PROV-COUNT: fetches made since the last reset.
+	// Count is CUMULUS-PROV-COUNT: provisioning runs made since the last reset (a run is one
+	// DHCP window's attempts, or one ztp -r).
 	Count int `json:"provCount"`
 }
 
@@ -193,15 +196,19 @@ func (z *cumulus) findLocal() string {
 
 var errNoMarker = errors.New("no " + clMarker + " marker")
 
-// attempt fetches and runs one script. It counts the fetch (CUMULUS-PROV-COUNT is the count
-// before it) and returns the script's exit code, or -1 and the reason it did not run.
-func (z *cumulus) attempt(ctx context.Context, src clSource) (int, error) {
+// counted records a provisioning run's end in CUMULUS-PROV-COUNT.
+func (z *cumulus) counted() {
 	st := z.load()
-	f := z.c.newFetcher(z.headers(st.Count), true)
 	st.Count++
 	z.store(st)
-	z.st.Attempts, z.st.Source, z.st.URL = st.Count, src.source, src.url
-	z.set(stateRunning, fmt.Sprintf("%s: fetching %s (attempt %d)", src.method, src.url, st.Count))
+}
+
+// attempt fetches and runs one script, the run's try'th (CUMULUS-PROV-COUNT is the runs before
+// this one), and returns the script's exit code, or -1 and the reason it did not run.
+func (z *cumulus) attempt(ctx context.Context, src clSource, try int) (int, error) {
+	f := z.c.newFetcher(z.headers(z.load().Count), true)
+	z.st.Attempts, z.st.Source, z.st.URL = try, src.source, src.url
+	z.set(stateRunning, fmt.Sprintf("%s: fetching %s (attempt %d)", src.method, src.url, try))
 	body, err := f.get(ctx, src.url)
 	if err != nil {
 		z.log.printf("%s: cannot fetch %s: %v", src.method, src.url, err)
@@ -217,7 +224,11 @@ func (z *cumulus) attempt(ctx context.Context, src clSource) (int, error) {
 	}
 	z.log.printf("%s: Executing %s", src.method, src.url)
 	out := z.log.writer()
-	code, err := z.c.runScript(ctx, body, out, nil)
+	// a script option 239 names runs in the VRF eth0's DHCP client runs in, mgmt: Cumulus starts
+	// ZTP from that client's DHCP hook, and its children inherit the VRF (UNCONFIRMED as
+	// Cumulus's mechanism; NVIDIA Config Manager's boot script reaches its server with a bare
+	// curl, which only works there). The twin's `ip vrf exec` binds its sockets (clsys)
+	code, err := z.c.runScriptIn(ctx, z.scriptVRF(src), body, out, nil)
 	out.Close()
 	z.st.ExitCode = code
 	if err != nil {
@@ -231,6 +242,18 @@ func (z *cumulus) attempt(ctx context.Context, src clSource) (int, error) {
 		z.log.printf("%s: Script returned success", src.method)
 	}
 	return code, nil
+}
+
+// scriptVRF is the VRF a script runs in: --script-vrf's, else for a script option 239 names the
+// VRF eth0's DHCP client runs in, mgmt, when the switch has it.
+func (z *cumulus) scriptVRF(src clSource) string {
+	if z.c.scriptVRF != "" {
+		return z.c.scriptVRF
+	}
+	if src.source == "dhcp-239" && z.c.vrf != "" && z.c.vrfExists != nil && z.c.vrfExists(z.c.vrf) {
+		return z.c.vrf
+	}
+	return ""
 }
 
 func (z *cumulus) succeed(src clSource) {
@@ -278,7 +301,7 @@ func (z *cumulus) manuallyConfigured() {
 // the source afresh for each attempt (a lease can change between them).
 func (z *cumulus) provision(ctx context.Context, resolve func() (clSource, bool)) outcome {
 	deadline := z.c.now().Add(z.c.window)
-	for {
+	for try := 1; ; try++ {
 		if z.halted(ctx) {
 			return outStopped
 		}
@@ -287,12 +310,13 @@ func (z *cumulus) provision(ctx context.Context, resolve func() (clSource, bool)
 			z.set(stateFailed, "ZTP DHCP: the lease no longer carries option 239")
 			return outFailed
 		}
-		if n := z.load().Count; n >= z.c.provMax {
+		if n := z.load().Count; try == 1 && n >= z.c.provMax {
 			z.fail(src, fmt.Sprintf("%s: CUMULUS-PROV-COUNT %d reached CUMULUS-PROV-MAX %d: not trying again (ztp -R re-arms)", src.method, n, z.c.provMax))
 			return outFailed
 		}
-		code, err := z.attempt(ctx, src)
+		code, err := z.attempt(ctx, src, try)
 		if err == nil && code == 0 {
+			z.counted()
 			z.succeed(src)
 			return outSuccess
 		}
@@ -303,9 +327,10 @@ func (z *cumulus) provision(ctx context.Context, resolve func() (clSource, bool)
 		if err != nil {
 			reason = err.Error()
 		}
-		if z.load().Count >= z.c.provMax || !z.c.now().Before(deadline) {
+		if !z.c.now().Before(deadline) {
 			z.log.printf("ZTP script failed. Exiting...")
-			z.fail(src, fmt.Sprintf("%s: %s failed (%s) after %d attempts", src.method, src.url, reason, z.load().Count))
+			z.counted()
+			z.fail(src, fmt.Sprintf("%s: %s failed (%s) after %d attempts", src.method, src.url, reason, try))
 			return outFailed
 		}
 		z.log.printf("%s: %s failed (%s). Retrying in %s", src.method, src.url, reason, z.c.interval)
@@ -507,7 +532,8 @@ func (z *cumulus) runNow(ctx context.Context, target string) int {
 			return 1
 		}
 	}
-	code, err := z.attempt(ctx, src)
+	code, err := z.attempt(ctx, src, 1)
+	z.counted()
 	if err == nil && code == 0 {
 		z.succeed(src)
 		fmt.Fprintln(z.c.stdout, "ZTP: provisioning succeeded")

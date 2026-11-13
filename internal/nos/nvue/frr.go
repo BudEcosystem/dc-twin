@@ -52,6 +52,9 @@ func renderFRR(t Tree, sw nos.Switch, l3 map[string]int) (string, error) {
 		w("exit-vrf")
 		w("!")
 	}
+	if err := renderMH(w, t); err != nil {
+		return "", err
+	}
 	if err := renderPolicy(w, sub(t, "router", "policy")); err != nil {
 		return "", err
 	}
@@ -82,11 +85,64 @@ func renderFRR(t Tree, sw nos.Switch, l3 map[string]int) (string, error) {
 		if name == "default" {
 			gr = sub(t, "router", "bgp", "graceful-restart")
 		}
-		if err := renderBGP(w, bgp, gr, name, asn, rid, evpn, l3[name] != 0); err != nil {
+		if err := renderBGP(w, bgp, gr, sub(t, "evpn", "route-advertise"), name, asn, rid, evpn, l3[name] != 0); err != nil {
 			return "", err
 		}
 	}
 	return b.String() + snippet(t), nil
+}
+
+// renderMH is EVPN multihoming as FRR's zebra has it (evpn mh), when evpn multihoming is on: its
+// timers, each uplink (a port whose loss takes the switch's Ethernet segments down) and each
+// bond's Ethernet segment (its local id, system MAC and DF preference). A segment needs EVPN
+// multihoming on, and a port or bond the configuration has.
+func renderMH(w func(string, ...any), t Tree) error {
+	mh := sub(t, "evpn", "multihoming")
+	if !switchOn(mh) {
+		for _, i := range keys(sub(t, "interface")) {
+			if seg := sub(t, "interface", i, "evpn", "multihoming", "segment"); seg != nil && switchOn(seg) {
+				return fmt.Errorf("interface %s evpn multihoming segment: evpn multihoming is not on", i)
+			}
+		}
+		return nil
+	}
+	for _, k := range []struct{ nvue, frr string }{{"startup-delay", "startup-delay"}, {"mac-holdtime", "mac-holdtime"}, {"neighbor-holdtime", "neigh-holdtime"}} {
+		if v := str(mh, k.nvue); v != "" {
+			w("evpn mh %s %s", k.frr, v)
+		}
+	}
+	for _, i := range keys(sub(t, "interface")) {
+		m := sub(t, "interface", i, "evpn", "multihoming")
+		if m == nil {
+			continue
+		}
+		var lines []string
+		if on(m, "uplink") {
+			lines = append(lines, " evpn mh uplink")
+		}
+		if seg := sub(m, "segment"); seg != nil && switchOn(seg) {
+			if sub(t, "interface", i, "bond") == nil {
+				return fmt.Errorf("interface %s evpn multihoming segment: a segment is a bond's", i)
+			}
+			id, mac := str(seg, "local-id"), str(seg, "mac-address")
+			if id == "" || mac == "" {
+				return fmt.Errorf("interface %s evpn multihoming segment: local-id and mac-address make its identifier", i)
+			}
+			lines = append(lines, " evpn mh es-id "+id, " evpn mh es-sys-mac "+strings.ToLower(mac))
+			if p := str(seg, "df-preference"); p != "" {
+				lines = append(lines, " evpn mh es-df-pref "+p)
+			}
+		}
+		if len(lines) > 0 {
+			w("interface %s", i)
+			for _, l := range lines {
+				w("%s", l)
+			}
+			w("exit")
+		}
+	}
+	w("!")
+	return nil
 }
 
 // snippet is the configuration's frr.conf snippet (system config snippet frr.conf), appended as
@@ -383,7 +439,7 @@ var families = []struct{ nvue, frr string }{
 }
 
 // renderBGP renders one VRF's router bgp.
-func renderBGP(w func(string, ...any), bgp, gr map[string]any, vrf, asn, rid string, evpn, l3vni bool) error {
+func renderBGP(w func(string, ...any), bgp, gr, adv map[string]any, vrf, asn, rid string, evpn, l3vni bool) error {
 	if a := str(bgp, "autonomous-system"); a != "" {
 		asn = a
 	}
@@ -514,7 +570,7 @@ func renderBGP(w func(string, ...any), bgp, gr map[string]any, vrf, asn, rid str
 	w(" !")
 	for _, f := range families {
 		af := sub(bgp, "address-family", f.nvue)
-		lines := familyLines(f.nvue, af, bgp, groups, neighbors, vrf, evpn, l3vni)
+		lines := familyLines(f.nvue, af, bgp, groups, neighbors, adv, vrf, evpn, l3vni)
 		// the IPv4 family is always rendered, as Cumulus renders it; the others when they have
 		// something in them
 		if len(lines) == 0 && f.nvue != "ipv4-unicast" {
@@ -535,7 +591,8 @@ func renderBGP(w func(string, ...any), bgp, gr map[string]any, vrf, asn, rid str
 }
 
 // familyLines is the body of one address family of one VRF's BGP.
-func familyLines(fam string, af, bgp, groups, neighbors map[string]any, vrf string, evpn, l3vni bool) []string {
+// adv is evpn route-advertise, which the default VRF's l2vpn evpn family renders
+func familyLines(fam string, af, bgp, groups, neighbors, adv map[string]any, vrf string, evpn, l3vni bool) []string {
 	var out []string
 	add := func(format string, a ...any) { out = append(out, fmt.Sprintf(format, a...)) }
 	switch fam {
@@ -626,6 +683,12 @@ func familyLines(fam string, af, bgp, groups, neighbors map[string]any, vrf stri
 		switch {
 		case vrf == "default" && evpn:
 			add("advertise-all-vni")
+			if on(adv, "svi-ip") {
+				add("advertise-svi-ip")
+			}
+			if on(adv, "default-gateway") {
+				add("advertise-default-gw")
+			}
 			if rd := str(bgp, "rd"); rd != "" {
 				add("rd %s", rd)
 			}

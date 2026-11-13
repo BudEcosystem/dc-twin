@@ -19,13 +19,22 @@
 # switch the twin configures itself (bringUp: twin) runs none of the daemons and is reached with
 # the twin's own NVUE password, as before.
 #
+# For NVIDIA Config Manager's boot script (18, Z7a) it also has curl, built with SFTP as Debian's
+# is, and `ip vrf exec` that works in a container: vrfbind.so, a preload binding a command's sockets
+# to a VRF's device, run by dctwin-vrf-exec (the relay in a VRF, and the day-0 programs' ip).
+#
 # The twin creates one container per switch with no network, moves the switch's ports into it as
 # swp<n> (n the port's place on the front panel) and runs the start script it renders.
+FROM debian:bookworm-slim AS vrfbind
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends gcc libc6-dev
+COPY vrfbind.c /src/vrfbind.c
+RUN gcc -shared -fPIC -O2 -Wall -o /vrfbind.so /src/vrfbind.c -ldl
+
 FROM debian:bookworm-slim
 RUN apt-get update \
  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       frr frr-pythontools ifupdown2 bridge-utils isc-dhcp-relay iproute2 procps tcpdump python3 nftables \
-      openssh-server isc-dhcp-client lldpd chrony rsyslog snmpd sudo tzdata iputils-arping \
+      openssh-server isc-dhcp-client lldpd chrony rsyslog snmpd sudo tzdata iputils-arping curl ca-certificates \
  && rm -rf /var/lib/apt/lists/* \
  && printf 'PasswordAuthentication yes\nKbdInteractiveAuthentication yes\nPermitRootLogin no\nUsePAM yes\nBanner /etc/issue.net\n' > /etc/ssh/sshd_config.d/dctwin.conf \
  && : > /etc/issue.net \
@@ -42,3 +51,5 @@ RUN apt-get update \
  && ln -sf /opt/dctwin/bin/dctwin-day0 /usr/sbin/onie-discover
 COPY dhclient.conf /etc/dhcp/dhclient.conf
 COPY dhclient-exit-hook /etc/dhcp/dhclient-exit-hooks.d/dctwin
+COPY --from=vrfbind /vrfbind.so /usr/lib/dctwin/vrfbind.so
+COPY dctwin-vrf-exec /usr/local/sbin/dctwin-vrf-exec

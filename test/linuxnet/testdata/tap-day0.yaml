@@ -53,5 +53,5 @@ spec:
         day0Binaries: DAY0_BINARIES
         images: ONIE_IMAGES
       attach:
-        - { container: KEA_CONTAINER, port: "oob-agg-1:eth128", address: 10.90.0.10/24, gateway: 10.90.0.1 }
+        - { container: KEA_CONTAINER, port: "oob-agg-1:eth128", address: 10.90.0.10/24, gateway: 10.90.0.1, interface: KEA_IFACE }
         - { netns: PROBE_NETNS, port: "oob-agg-1:eth127", address: 10.90.1.10/24, gateway: 10.90.1.1, interface: probe0 }

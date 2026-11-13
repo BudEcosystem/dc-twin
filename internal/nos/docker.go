@@ -162,8 +162,8 @@ type Spec struct {
 	Platform string
 	// Privileged runs it privileged (SONiC-VS); otherwise it gets the capabilities a switch needs.
 	Privileged bool
-	// NetworkMode is "none" (the default: the twin wires it) or "container:<id>", sharing a
-	// switch's network namespace and its hostname.
+	// NetworkMode is "none" (the default: the twin wires it), "container:<id>", sharing a
+	// switch's network namespace and its hostname, or a network CreateNetwork made.
 	NetworkMode string
 	// Binds mounts volumes ("<volume>:<path>[:ro]").
 	Binds []string
@@ -270,6 +270,24 @@ func (d *Docker) exited(ctx context.Context, id string) error {
 		return fmt.Errorf("exit %d: %s", res.StatusCode, strings.TrimSpace(logs))
 	}
 	return nil
+}
+
+// CreateNetwork creates a bridge network whose containers find each other by name (Podman's and
+// Docker's embedded DNS), labelled; one left over by that name is removed first. A container joins
+// it by naming it as its Spec.NetworkMode.
+func (d *Docker) CreateNetwork(ctx context.Context, name string, labels map[string]string) error {
+	_ = d.RemoveNetwork(ctx, name)
+	_, err := d.call(ctx, "POST", "/networks/create", map[string]any{"Name": name, "Driver": "bridge", "Labels": labels}, nil)
+	return err
+}
+
+// RemoveNetwork removes a network; a missing one is not an error.
+func (d *Docker) RemoveNetwork(ctx context.Context, name string) error {
+	_, err := d.call(ctx, "DELETE", "/networks/"+url.PathEscape(name), nil, nil)
+	if ae, ok := err.(*APIError); ok && ae.Status == http.StatusNotFound {
+		return nil
+	}
+	return err
 }
 
 // CreateVolume creates a named volume, labelled (so a crashed run's are found by label); one left

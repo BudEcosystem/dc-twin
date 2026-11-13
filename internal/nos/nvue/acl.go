@@ -35,7 +35,13 @@ func renderACL(t Tree, ports, bridged map[string]bool) (string, error) {
 	w("table inet %s", aclTable)
 	w("delete table inet %s", aclTable)
 
-	type bind struct{ iface, acl, dir string }
+	// cp: the binding is the control plane's (the switch's own traffic: nftables' input and output
+	// hooks), the switch's whole (system control-plane acl) or one interface's (interface <i> acl
+	// <a> inbound|outbound control-plane)
+	type bind struct {
+		iface, acl, dir string
+		cp              bool
+	}
 	var binds []bind
 	ifaces := sub(t, "interface")
 	for _, i := range keys(ifaces) {
@@ -47,9 +53,26 @@ func renderACL(t Tree, ports, bridged map[string]bool) (string, error) {
 				return "", fmt.Errorf("interface %s acl %s: an ACL is bound to a port or an SVI", i, a)
 			}
 			for _, dir := range []string{"inbound", "outbound"} {
-				if _, ok := sub(ifaces, i, "acl", a)[dir]; ok {
-					binds = append(binds, bind{i, a, dir})
+				if d, ok := sub(ifaces, i, "acl", a)[dir]; ok {
+					_, cp := sub(d)["control-plane"]
+					binds = append(binds, bind{i, a, dir, cp})
 				}
+			}
+		}
+	}
+	for _, a := range keys(sub(t, "system", "control-plane", "acl")) {
+		// Cumulus's own control-plane ACLs, which it ships and binds by default: the CPU's
+		// protection against floods and its permitted services. Recorded: the twin's switch is a
+		// container with no CPU path to protect (18 — Fidelity)
+		if builtinCPACL[a] && acls[a] == nil {
+			continue
+		}
+		if acls[a] == nil {
+			return "", fmt.Errorf("system control-plane acl %s: no such ACL", a)
+		}
+		for _, dir := range []string{"inbound", "outbound"} {
+			if _, ok := sub(t, "system", "control-plane", "acl", a)[dir]; ok {
+				binds = append(binds, bind{"", a, dir, true})
 			}
 		}
 	}
@@ -73,6 +96,14 @@ func renderACL(t Tree, ports, bridged map[string]bool) (string, error) {
 		chains[a] = body
 		chainOrder = append(chainOrder, a)
 	}
+	var fwd []bind
+	for _, bd := range binds {
+		if !bd.cp {
+			fwd = append(fwd, bd)
+		}
+	}
+	cpBinds := binds
+	binds = fwd
 	// a mark per bridge port with an inbound ACL, so the routed half knows the port
 	marks := map[string]int{}
 	for _, bd := range binds {
@@ -94,6 +125,42 @@ func renderACL(t Tree, ports, bridged map[string]bool) (string, error) {
 				w("    %s", r)
 			}
 			w("  }")
+		}
+		if family == "inet" {
+			var in, out []string
+			for _, bd := range cpBinds {
+				if !bd.cp {
+					continue
+				}
+				m := ""
+				if bd.iface != "" {
+					m = fmt.Sprintf("iifname %q ", bd.iface)
+					if bd.dir == "outbound" {
+						m = fmt.Sprintf("oifname %q ", bd.iface)
+					}
+				}
+				if bd.dir == "inbound" {
+					in = append(in, m+"jump "+chainName(bd.acl))
+				} else {
+					out = append(out, m+"jump "+chainName(bd.acl))
+				}
+			}
+			if len(in) > 0 {
+				w("  chain input {")
+				w("    type filter hook input priority 0; policy accept;")
+				for _, r := range in {
+					w("    %s", r)
+				}
+				w("  }")
+			}
+			if len(out) > 0 {
+				w("  chain output {")
+				w("    type filter hook output priority 0; policy accept;")
+				for _, r := range out {
+					w("    %s", r)
+				}
+				w("  }")
+			}
 		}
 		if family == "bridge" {
 			if len(marks) > 0 {
@@ -145,6 +212,10 @@ func renderACL(t Tree, ports, bridged map[string]bool) (string, error) {
 	}
 	return b.String(), nil
 }
+
+// builtinCPACL is Cumulus Linux 5.x's default control-plane ACLs, which a configuration may bind
+// without defining (NVIDIA Config Manager's do: system control-plane acl acl-default-dos inbound)
+var builtinCPACL = map[string]bool{"acl-default-dos": true, "acl-default-whitelist": true}
 
 func sortedKeys(m map[string]int) []string {
 	out := make([]string, 0, len(m))

@@ -77,6 +77,9 @@ type Env struct {
 	Dir, State string
 	// Iface is the management port ONIE runs on (nos.MgmtIf).
 	Iface string
+	// StaticURL is an installer URL tried first on every pass: the one the NOS's onie-install -i
+	// left (Cumulus's onie_install_url, 18 — Z7a)
+	StaticURL string
 	// DHCP leases on Iface; Net applies a lease to Iface and removes it again.
 	DHCP DHCPClient
 	Net  NetConfig

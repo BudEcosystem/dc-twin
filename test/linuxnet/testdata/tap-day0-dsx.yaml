@@ -1,0 +1,52 @@
+# A DSX OS site's day 0 (18 — Z7d): the OOB fabric's server-rack management switches leave the
+# factory (bringUp: factory, select) and are NVIDIA Config Manager's OOB-Leafs; the OOB
+# aggregation switch is the one switch the twin configures, the "directly attached" switch the
+# site starts from. Each factory leaf's own management port is cabled to it, and leases from the
+# site's DHCP (NVCM's Kea at eth128) through it; the servers' BMCs are cabled to the leaves and
+# lease through the relay NVCM renders there, in VRF OOB over EVPN, from NICo's DHCP at the
+# aggregation switch. test/linuxnet substitutes the same names tap-day0.yaml's runs do.
+apiVersion: dc-twin/v1alpha1
+kind: Estate
+metadata:
+  name: ESTATE_NAME
+spec:
+  seed: 2027
+  clock: wall
+  timeScale: 0.05
+  packs: [generic@0.1.0]
+  fidelity: { default: model }
+  sites:
+    - name: site-1
+      halls:
+        - name: hall-a
+          rows:
+            - name: a
+              positions: 4
+              racks:
+                - { name: r01, position: 1, format: generic/cpu-rack, params: { servers: 1 }, feeds: [A, B] }
+                - { name: r02, position: 2, format: generic/cpu-rack, params: { servers: 1 }, feeds: [A, B] }
+                - { name: n01, position: 4, format: generic/network-rack, feeds: [A, B] }
+  networks:
+    oob: { role: management, dhcp: stack, cidr: 10.30.0.0/20, fabric: oob, server: 10.90.0.10 }
+  fabrics:
+    - name: oob
+      template: oob-flat
+      nos: FABRIC_NOS
+      bringUp: factory
+      factory: { install: INSTALL_MODE, ztp: ZTP_MODE, bootTime: BOOT_TIME, installTime: 2m, plan: PLAN_MODE, select: "r01/mgmt-switch r02/mgmt-switch" }
+  stacks: STACKS
+  facility:
+    power:
+      feeds: [{ name: A, capacityW: 200000 }, { name: B, capacityW: 200000 }]
+  adapters:
+    network:
+      substrate: tap
+      nos:
+        cumulusVersion: "CUMULUS_VERSION"
+        day0Binaries: DAY0_BINARIES
+        images: ONIE_IMAGES
+      attach:
+        - { container: KEA_CONTAINER, port: "oob-agg-1:eth128", address: 10.90.0.10/24, gateway: 10.90.0.1, interface: KEA_IFACE }
+        - { netns: PROBE_NETNS, port: "oob-agg-1:eth127", address: 10.90.1.10/24, gateway: 10.90.1.1, interface: probe0 }
+        # the BMCs' DHCP (NICo's), in VRF OOB once the test has configured it there
+        - { container: BMC_DHCP_CONTAINER, port: "oob-agg-1:eth125", address: 10.90.2.10/24, gateway: 10.90.2.1, interface: svc0 }

@@ -157,6 +157,11 @@ func lock(path string) (release func(), held bool, err error) {
 // Its stdout and stderr go to out. It returns the script's exit code, or -1 with the error when
 // it could not be started.
 func (c *config) runScript(ctx context.Context, body []byte, out io.Writer, env []string, args ...string) (int, error) {
+	return c.runScriptIn(ctx, c.scriptVRF, body, out, env, args...)
+}
+
+// runScriptIn is runScript in a VRF ("" as started).
+func (c *config) runScriptIn(ctx context.Context, vrf string, body []byte, out io.Writer, env []string, args ...string) (int, error) {
 	if err := os.MkdirAll(c.tmpDir, 0o755); err != nil {
 		return -1, err
 	}
@@ -177,7 +182,7 @@ func (c *config) runScript(ctx context.Context, body []byte, out io.Writer, env 
 	if strings.HasPrefix(string(body), "#!") {
 		argv = []string{f.Name()}
 	}
-	return c.command(ctx, append(argv, args...), out, env)
+	return c.commandIn(ctx, vrf, append(argv, args...), out, env)
 }
 
 // shell runs a command line given as a flag (--reload-cmd and the like) with /bin/sh -c, each
@@ -200,8 +205,13 @@ func (c *config) shell(ctx context.Context, line string, out io.Writer, args ...
 }
 
 func (c *config) command(ctx context.Context, argv []string, out io.Writer, env []string) (int, error) {
-	if c.scriptVRF != "" {
-		argv = append([]string{c.ipCmd, "vrf", "exec", c.scriptVRF}, argv...)
+	return c.commandIn(ctx, c.scriptVRF, argv, out, env)
+}
+
+// commandIn is command in a VRF ("" as started).
+func (c *config) commandIn(ctx context.Context, vrf string, argv []string, out io.Writer, env []string) (int, error) {
+	if vrf != "" {
+		argv = append([]string{c.ipCmd, "vrf", "exec", vrf}, argv...)
 	}
 	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
 	cmd.Stdout, cmd.Stderr = out, out

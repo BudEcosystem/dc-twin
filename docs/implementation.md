@@ -208,6 +208,41 @@ test plays the site's tooling with Kea and an HTTP server, and reads nothing but
 | `TestDay0SonicPush` | ZTP off on four factory `sonic-vs` switches. The tooling logs in over SSH as `admin` with SONiC's factory password and loads each switch's `config_db.json` with `sudo config load -y` and `config save -y`. gNMI Get and Set work at the management lease, with the estate CA's client certificate | **PASS**: converged 4 s after the SSH push; gNMI Get returned the pushed hostname and the Set's VRF reached CONFIG_DB |
 | `TestDay0PlanTool` | `plan: tool`: no `plan.json`. The tooling allocates its own loopbacks, /31s and AS numbers from `cabling.csv`, and the oracle judges the result by its structure | **PASS**: converged 20 s after `up` on the tool's plan; the critic passes |
 
+**DSX OS: NVIDIA Config Manager's ZTP, switch side (Z7a, D80, 2026-11-13).** NVCM 1.4.1's own
+golden boot script, run by factory `generic/nvue-frr` switches against a stand-in for NVCM's ZTP
+service that keeps its contract (`test/linuxnet/nvcm_linux_test.go`):
+- Kea reservations by MAC carrying option 239.
+- Device endpoints that answer the device's own address only.
+- `validate_serial`, the startup fetched over SFTP as `ztp`, and `provisioned`.
+
+| Suite | What it shows | Result (pnap, 2026-11-13) |
+|---|---|---|
+| `TestDay0NVCMContract` | At 5.14.0. The script checks `VERSION_ID`, makes and removes `breakglass`, validates the serial from `nv show platform`, fetches the startup with `curl sftp://` in `mgmt`, then `nv config replace`, apply, `dhclient -r`, `ifreload -fa`, `provisioned`. Edge cases: a serial NVCM refuses once (Cumulus's ZTP retries); another switch refused this one's script (401); a reprovision (`@reset` over NVUE) taking a switch through ZTP again; then over SSH `decode-syseeprom`, `timedatectl`, `/etc/lsb-release`, and a commit-confirm apply confirmed | **PASS**, 187 s; critic 1.00 |
+| `TestDay0NVCMFirmware` | The switches run 5.13.1 and NVCM wants 5.14.0. `onie-install -fa -i …/firmware` and `reboot`; the twin boots each into ONIE, which installs NVCM's firmware from the URL; the NOS comes back at 5.14.0 (`os-release`, NVUE's grammar and `product-release`) in factory state; ZTP runs NVCM's script again | **PASS**, 172 s; critic 1.00 |
+| `TestDay0NVCM516` | At 5.16.1: the startup fetched with `nv action fetch … vrf mgmt`, and NVCM's `enable: on` in a 5.16 file (Q30) | **PASS**, 158 s; critic 1.00 |
+| `TestDay0NVCMFaults` | One switch each: the boot script answered 500; the startup missing over SFTP; a startup NVUE refuses by name. Each fails that switch's first attempt, and Cumulus's ZTP brings it through | **PASS**, 247 s; critic 1.00 |
+
+Unit-level, `internal/nos/nvue`:
+- `TestNVCMGoldens`: NVCM's 24 goldens. 18 valid and rendered; 6 refused for NVCM's own 5.16.1 VRR placement.
+- `TestNVCMRenders`, `TestRelayRefusals`.
+- `TestNVCMDeployREST`: NVCM's deploy, commit-confirm and rollback, save, backup, `@reboot`, `@reset` and `system/ztp`.
+- `TestChangeSpelling`.
+
+The suites already in the table pass again on this change. `TestDay0NetBox` failed on `main` (its
+controller could not write its work directory) until the directory was made writable to it.
+**NVCM itself (Z7b, Z7c):** `TestDay0NVCM` runs NVCM 1.4.1, unmodified, from its own images
+(`compat/nvcm`).
+- NVCM is loaded from the twin's design as its own blueprint (`stack-inputs/day0/nvcm`).
+- Its Kea, ZTP and rendered NVUE configurations bring the four factory switches to converged 1m40s after the load.
+- Each switch is Provisioned in NVCM's Nautobot.
+- NVCM's reprovision (`@reset`) takes a leaf through ZTP again.
+
+Result: **PASS** (848 s, critic 1.00).
+
+`TestDay0NVCMUpgrade` covers NVCM's firmware path. The switches run 5.13.1 and NVCM intends 5.14.0; its boot script reinstalls each through ONIE from NVCM's own image store, and the fabric converges at 5.14.0. Result: **PASS** (830 s, critic 1.00).
+
+NICo on that fabric (Z7d) is not done.
+
 Every suite above also checks the critic's day-0 measures: each factory switch's
 `day0.toConverged`, logged with the others (time to lease, to ZTP, to ZTP done; applies, failed
 applies, ZTP failures; the fabric's median and maximum; refused changes). `TestDay0ONIE` also

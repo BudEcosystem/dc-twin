@@ -202,7 +202,7 @@ The committed event log ([D27](11-decisions.md#d27--committed-and-derived-state-
 | `kind` | R | `request` \| `state` \| `fault` \| `act` \| `observe` \| `twin` \| `stack` |
 | `source` | R | `{class: stack\|user\|scenario\|behaviour\|twin\|observer\|impersonator, principal, address?}` |
 | `path` | R | |
-| `request` | O | `{protocol, method, target, canonical}` — `canonical` from [14](14-expressions.md#canonical-request-names) |
+| `request` | O | `{protocol, method, target, canonical, detail?}` — `canonical` from [14](14-expressions.md#canonical-request-names); `detail`, string to string, what the request carried that its target does not say (an NVUE change's `spelling`, [18](18-day0.md#as-built-z7a-2026-11-13); a refused change's `issue`, the switch's reason) |
 | `state` | O | `{field, from, to}` |
 | `cause` | O | seq |
 | `severity` | O | |

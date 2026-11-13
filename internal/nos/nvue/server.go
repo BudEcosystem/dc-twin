@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/BudEcosystem/dc-twin/internal/nos"
@@ -46,6 +47,9 @@ type Event struct {
 	Via   string
 	State string // the revision's state after it
 	Issue string
+	// Spelling, for a change: how its switches were spelt as sent and as the switch holds them
+	// ("enable" or "state", "enable->state" when the release's own replaced the other, Q30)
+	Spelling string `json:",omitempty"`
 }
 
 // revision states, as NVUE names them
@@ -73,6 +77,8 @@ type revision struct {
 	state   string
 	issue   string
 	output  string
+	// confirm is a commit-confirm's window (actions.go), running while the state is ays
+	confirm *time.Timer
 	// user is who created it, created and applied when (applied zero: never), for `nv config
 	// history`
 	user             string
@@ -81,11 +87,15 @@ type revision struct {
 
 // Server is one switch's NVUE: its revisions and the applied configuration.
 type Server struct {
-	sw       nos.Switch
+	sw nos.Switch
+	// build, when set, is the release the switch runs since an ONIE install of another (SetBuild)
+	build_   atomic.Pointer[string]
 	password string
 	apply    Applier
 
 	run       Runner
+	actions   Actions
+	started   time.Time
 	notify    func(Event)
 	onApplied func()
 
@@ -114,14 +124,14 @@ type Server struct {
 
 // NewServer makes a switch's NVUE. Its applied configuration is empty until ApplyStartup.
 func NewServer(sw nos.Switch, password string, apply Applier) *Server {
-	return &Server{sw: sw, password: password, apply: apply, applied: Tree{}, revs: map[string]*revision{}, next: 1,
+	return &Server{sw: sw, password: password, apply: apply, applied: Tree{}, revs: map[string]*revision{}, next: 1, started: time.Now(),
 		pending: map[string]string{}, groupSeen: map[string]groupsAt{}}
 }
 
 // ApplyStartup applies the configuration the model gives the switch (Startup) as its first
 // revision, the startup configuration a switch boots with.
 func (s *Server) ApplyStartup(ctx context.Context) error {
-	t, err := Startup(s.sw)
+	t, err := Startup(s.swNow())
 	if err != nil {
 		return err
 	}
@@ -177,6 +187,12 @@ func (s *Server) emit(r *http.Request, e Event) {
 	if s.notify == nil {
 		return
 	}
+	if r == nil {
+		// the switch's own doing (a commit-confirm's rollback, an action's outcome)
+		e.Client, e.User, e.Via = "system", "system", "rest"
+		s.notify(e)
+		return
+	}
 	who := principalOf(r)
 	e.User, e.Via = who.user, who.via
 	if e.User != "" {
@@ -215,7 +231,7 @@ func (s *Server) applyRevision(ctx context.Context, r *revision) {
 	r.state = stateApplying
 	s.mu.Unlock()
 
-	files, rerr := Render(t, s.sw)
+	files, rerr := Render(t, s.swNow())
 	var out string
 	var aerr error
 	if rerr == nil {
@@ -310,8 +326,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.get(w, r, path)
 	case http.MethodPatch, http.MethodDelete:
 		s.change(w, r, path)
+	case http.MethodPost:
+		s.action(w, r, path)
 	default:
-		w.Header().Set("Allow", "GET, PATCH, DELETE")
+		w.Header().Set("Allow", "GET, PATCH, DELETE, POST")
 		problem(w, http.StatusMethodNotAllowed, "Method Not Allowed", r.Method)
 	}
 }
@@ -370,13 +388,14 @@ func (s *Server) change(w http.ResponseWriter, r *http.Request, path []string) {
 	// refused is the schema's refusal of the change, by name (a path the twin does not emulate,
 	// or not in this release): reported apart, as a gap on the twin's side, not the client's
 	var refused error
+	var spelling string
 	defer func() {
 		if rv := s.revs[id]; rv != nil {
 			op, issue := "revision.change", ""
 			if refused != nil {
 				op, issue = "revision.refuse", refused.Error()
 			}
-			s.emit(r, Event{Op: op, Revision: id, Path: "/" + strings.Join(path, "/"), State: rv.state, Issue: issue})
+			s.emit(r, Event{Op: op, Revision: id, Path: "/" + strings.Join(path, "/"), State: rv.state, Issue: issue, Spelling: spelling})
 		}
 	}()
 	rv := s.revs[id]
@@ -423,6 +442,9 @@ func (s *Server) change(w http.ResponseWriter, r *http.Request, path []string) {
 		problem(w, http.StatusBadRequest, "Bad Request", err.Error())
 		return
 	}
+	sent := v
+	v = spelled(s.Version(), path, v)
+	spelling = spellingOf(sent, v)
 	path, v = withChoices(path, v)
 	path, v = hashPasswords(path, v)
 	Patch(rv.tree, path, v)
@@ -464,6 +486,10 @@ func (s *Server) revision(w http.ResponseWriter, r *http.Request, rest []string)
 		return
 	}
 	id := strings.Join(rest, "/")
+	if id == "applied" {
+		s.appliedRevision(w, r)
+		return
+	}
 	rv := s.revs[id]
 	if rv == nil {
 		problem(w, http.StatusNotFound, "Not Found", "no revision "+id)
@@ -483,12 +509,27 @@ func (s *Server) revision(w http.ResponseWriter, r *http.Request, rest []string)
 	case http.MethodPatch:
 		// NICo's client also sends "auto-prompt" (ays_yes, ignore_fail_no): the twin's NVUE
 		// never prompts, and fails a revision whose apply fails, which is what it asks
-		var body struct {
-			State string `json:"state"`
-		}
+		var body revisionPatch
 		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&body); err != nil || body.State != "apply" {
 			problem(w, http.StatusBadRequest, "Bad Request", `apply a revision with {"state": "apply"}`)
 			return
+		}
+		if rv.state == stateAwaiting {
+			// commit-confirm's yes: the revision stays
+			rv.confirm.Stop()
+			rv.state = stateApplied
+			s.emit(r, Event{Op: "revision.confirm", Revision: id, State: rv.state})
+			writeJSON(w, http.StatusOK, status(rv))
+			return
+		}
+		var window time.Duration
+		if c := body.Controls.Confirm.String(); c != "" {
+			n, err := body.Controls.Confirm.Int64()
+			if err != nil || n < 1 {
+				problem(w, http.StatusBadRequest, "Bad Request", "state-controls confirm is a number of seconds")
+				return
+			}
+			window = time.Duration(n) * time.Second
 		}
 		if rv.state != statePending {
 			problem(w, http.StatusConflict, "Conflict", "revision "+id+" is "+rv.state)
@@ -496,11 +537,15 @@ func (s *Server) revision(w http.ResponseWriter, r *http.Request, rest []string)
 		}
 		// applying: no second apply of it, and the state lock is free while the switch works
 		rv.state = stateApplying
+		prev := Clone(s.applied)
 		s.mu.Unlock()
 		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Minute)
 		s.applyRevision(ctx, rv)
 		cancel()
 		s.mu.Lock()
+		if window > 0 && rv.state == stateApplied {
+			s.confirmWindow(rv, prev, window)
+		}
 		s.emit(r, Event{Op: "revision.apply", Revision: id, State: rv.state, Issue: rv.issue})
 		writeJSON(w, http.StatusOK, status(rv))
 	default:

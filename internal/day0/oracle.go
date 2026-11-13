@@ -2,6 +2,7 @@ package day0
 
 import (
 	"fmt"
+	"net/netip"
 	"sort"
 	"strings"
 )
@@ -143,6 +144,10 @@ func exact(s Switch, o Observed, loopbacks map[string]Switch) []string {
 	for _, v := range sortedVlans(s.Vlans) {
 		got, ok := o.Vlans[v.Name]
 		switch {
+		case !ok && servesSegment(o, v.Gateway):
+			// the segment served on a VLAN of the tool's own numbering and span (NVIDIA Config
+			// Manager's OOB-Leaf: VLAN 201, one subnet across its leaves holding every rack's
+			// segment, its gateway the VRR, 18 — Z7d)
 		case !ok:
 			diffs = append(diffs, fmt.Sprintf("%s is missing, the design says %s", v.Name, v.Gateway))
 		case got != v.Gateway:
@@ -255,4 +260,22 @@ func sortedVlans(v []Vlan) []Vlan {
 	out := append([]Vlan(nil), v...)
 	sort.SliceStable(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out
+}
+
+// servesSegment reports whether a VLAN interface of the switch has an address in a subnet that
+// holds the design's segment (the gateway's, with its prefix length): the segment's hosts are
+// on a subnet the switch routes for, whatever its VLAN and span.
+func servesSegment(o Observed, gateway string) bool {
+	gw, err := netip.ParsePrefix(gateway)
+	if err != nil {
+		return false
+	}
+	for _, as := range o.VlanAddrs {
+		for _, a := range as {
+			if p, err := netip.ParsePrefix(a); err == nil && p.Bits() <= gw.Bits() && p.Masked().Contains(gw.Addr()) {
+				return true
+			}
+		}
+	}
+	return false
 }

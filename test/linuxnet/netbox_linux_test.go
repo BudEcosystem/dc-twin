@@ -94,6 +94,11 @@ func TestDay0NetBox(t *testing.T) {
 	if err := copyTree(compat, filepath.Join(work, "harness")); err != nil {
 		t.Fatal(err)
 	}
+	// the controller writes what it reads back here (host.json) as its own user, which owns
+	// nothing on the host
+	if err := os.Chmod(work, 0o777); err != nil {
+		t.Fatal(err)
+	}
 	fac := r.factory()
 	waitFor(t, 5*time.Minute, "every factory switch's management lease in Kea", func() bool {
 		l := r.leases()

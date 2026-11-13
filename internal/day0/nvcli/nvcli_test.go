@@ -6,12 +6,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/BudEcosystem/dc-twin/internal/nos"
 	"github.com/BudEcosystem/dc-twin/internal/nos/nvue"
@@ -198,7 +200,7 @@ func TestRefusals(t *testing.T) {
 	}{
 		{[]string{"set", "router", "ospf", "enable", "on"}, "not part of the NVUE schema"},
 		{[]string{"set", "interface", "swp1", "link", "breakout", "3y"}, "not a breakout"},
-		{[]string{"action", "reboot", "system"}, "nv action: not emulated"},
+		{[]string{"action", "generate", "system", "tech-support"}, "not emulated by the twin's nv"},
 		{[]string{"config", "frobnicate"}, "not emulated"},
 		{[]string{"show", "interface", "swp1", "link", "frobnicate"}, "not part of the NVUE schema"},
 	} {
@@ -269,7 +271,21 @@ func TestReplaceAndPatch(t *testing.T) {
 	// patch: nv set lines merge into the pending revision
 	cmds := filepath.Join(dir, "day0.txt")
 	os.WriteFile(cmds, []byte("# day 0\nnv set system hostname 'spine01x'\nnv unset service lldp\nnv set interface swp2-3 link state up\n"), 0o644)
+	f.mu.Lock()
+	before := len(f.events)
+	f.mu.Unlock()
 	f.must(t, "root", "config", "patch", cmds)
+	f.mu.Lock()
+	changes := 0
+	for _, e := range f.events[before:] {
+		if e.Op == "revision.change" {
+			changes++
+		}
+	}
+	f.mu.Unlock()
+	if changes != 1 {
+		t.Errorf("a patch file made %d changes to the revision, not one", changes)
+	}
 	f.must(t, "root", "config", "apply", "-y")
 	m = showJSON(t, f, "root")
 	if fmt.Sprint(m["system"]) != "map[date-time:map[timezone:US/Eastern] hostname:spine01x]" {
@@ -281,6 +297,14 @@ func TestReplaceAndPatch(t *testing.T) {
 	ifs, _ := m["interface"].(map[string]any)
 	if ifs["swp2"] == nil || ifs["swp3"] == nil {
 		t.Errorf("patch ranges: %v", ifs)
+	}
+	// an unset followed by a set under it: the set's branch holds only what the set gives
+	again := filepath.Join(dir, "again.yaml")
+	os.WriteFile(again, []byte("- unset:\n    system:\n      date-time: {}\n- set:\n    system:\n      date-time:\n        timezone: UTC\n"), 0o644)
+	f.must(t, "root", "config", "patch", again)
+	f.must(t, "root", "config", "apply", "-y")
+	if m := showJSON(t, f, "root", "system"); fmt.Sprint(m["date-time"]) != "map[timezone:UTC]" {
+		t.Errorf("unset then set: %v", m["date-time"])
 	}
 	// JSON replace
 	js := filepath.Join(dir, "c.json")
@@ -347,5 +371,114 @@ func TestShowTable(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("nv show system has no hostname row with leaf09:\n%s", out)
+	}
+}
+
+// What NVIDIA Config Manager's boot script reads and runs with nv (18, Z7a): the serial from `nv
+// show platform | grep serial-number | awk '{print $2}'`, and its startup.yaml fetched with `nv
+// action fetch system` into place, in the management VRF, with its permissions.
+func TestPlatformAndFetch(t *testing.T) {
+	f := newFixture(t)
+	sw := factoryLeaf()
+	sw.Factory.Identity = nos.Identity{Serial: "MT2245X03839", BaseMAC: "44:38:39:00:01:01", Model: "SN5600"}
+	srv := nvue.NewServer(sw, nvue.FactoryPassword, func(context.Context, nvue.Files) (string, error) { return "ok", nil })
+	srv.SetLocalToken("tok")
+	srv.SetRunner(func(ctx context.Context, args ...string) (string, error) { return "root\n", nil })
+	if err := srv.ApplyFactory(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	ts := httptest.NewTLSServer(srv)
+	defer ts.Close()
+	var out, errw bytes.Buffer
+	c := &client{base: ts.URL + "/nvue_v1", user: "root", token: "tok", http: ts.Client(), out: &out, errw: &errw}
+	if rc := c.run([]string{"show", "platform"}); rc != 0 {
+		t.Fatalf("nv show platform: %d %s", rc, errw.String())
+	}
+	var serial string
+	for _, l := range strings.Split(out.String(), "\n") {
+		if strings.Contains(l, "serial-number") {
+			if fs := strings.Fields(l); len(fs) > 1 {
+				serial = fs[1]
+			}
+		}
+	}
+	if serial != "MT2245X03839" {
+		t.Errorf("the serial as the script reads it: %q from\n%s", serial, out.String())
+	}
+
+	d := t.TempDir()
+	web := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/startup.yaml" {
+			http.NotFound(w, r)
+			return
+		}
+		fmt.Fprint(w, "- set:\n    system:\n      hostname: leaf01\n")
+	}))
+	defer web.Close()
+	ipLog := filepath.Join(d, "ip.log")
+	ip := filepath.Join(d, "ip")
+	if err := os.WriteFile(ip, []byte("#!/bin/sh\necho \"$*\" >> "+ipLog+"\nshift 3\nexec \"$@\"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dst := filepath.Join(d, "startup.yaml")
+	fc := &client{base: f.ts.URL + "/nvue_v1", user: "root", token: "tok", http: f.ts.Client(), out: &out, errw: &errw, ipCmd: ip}
+	if rc := fc.run([]string{"action", "fetch", "system", "file-path", dst, "uri", web.URL + "/startup.yaml", "file-permissions", "600", "vrf", "mgmt"}); rc != 0 {
+		t.Fatalf("nv action fetch: %d %s", rc, errw.String())
+	}
+	if st, err := os.Stat(dst); err != nil || st.Mode().Perm() != 0o600 {
+		t.Fatalf("the fetched file: %v %v", st, err)
+	}
+	if b, _ := os.ReadFile(ipLog); !strings.HasPrefix(string(b), "vrf exec mgmt curl ") {
+		t.Errorf("the fetch's VRF: %q", b)
+	}
+	errw.Reset()
+	if rc := fc.run([]string{"action", "fetch", "system", "file-path", dst + "2", "uri", web.URL + "/missing"}); rc == 0 {
+		t.Error("a 404 fetched")
+	}
+	if _, err := os.Stat(dst + "2"); err == nil {
+		t.Error("a failed fetch left its file")
+	}
+	for _, args := range [][]string{
+		{"action", "reboot", "system", "now"},
+		{"action", "fetch", "system", "file-path", "rel", "uri", web.URL},
+		{"action", "fetch", "system", "file-path", dst, "uri", "ftp://x/y"},
+		{"action", "fetch", "system", "file-path", dst, "uri", web.URL, "file-permissions", "999"},
+	} {
+		if rc := fc.run(args); rc == 0 {
+			t.Errorf("nv %s succeeded", strings.Join(args, " "))
+		}
+	}
+}
+
+// nv config apply --confirm: the apply waits for its confirmation (nv config confirm) and is rolled
+// back when none comes in time; nv config apply --confirm-yes confirms as nv config confirm does.
+func TestConfirm(t *testing.T) {
+	f := newFixture(t)
+	f.must(t, "root", "set", "system", "hostname", "leaf01")
+	if out := f.must(t, "root", "config", "apply", "--confirm", "60", "-y"); !strings.Contains(out, "confirm within 60 s") {
+		t.Fatalf("apply --confirm: %q", out)
+	}
+	if out := f.must(t, "root", "config", "confirm"); !strings.Contains(out, "confirmed") {
+		t.Fatalf("confirm: %q", out)
+	}
+	if code, _, errw := f.nv("root", "config", "confirm"); code == 0 || !strings.Contains(errw, "no apply is waiting") {
+		t.Errorf("a second confirm: %d %q", code, errw)
+	}
+	f.must(t, "root", "set", "system", "hostname", "leaf02")
+	f.must(t, "root", "config", "apply", "--confirm", "1s", "-y")
+	deadline := time.Now().Add(10 * time.Second)
+	for showJSON(t, f, "root", "system")["hostname"] != "leaf01" {
+		if time.Now().After(deadline) {
+			t.Fatalf("not rolled back: %v", showJSON(t, f, "root", "system")["hostname"])
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	f.must(t, "root", "set", "system", "hostname", "leaf03")
+	f.must(t, "root", "config", "apply", "--confirm", "-y")
+	if out := f.must(t, "root", "config", "apply", "--confirm-yes"); !strings.Contains(out, "confirmed") {
+		t.Errorf("--confirm-yes: %q", out)
+	}
+	if h := showJSON(t, f, "root", "system")["hostname"]; h != "leaf03" {
+		t.Errorf("after --confirm-yes: %v", h)
 	}
 }
