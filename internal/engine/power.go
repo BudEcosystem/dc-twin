@@ -25,10 +25,12 @@ type Request struct {
 	Path      string
 	Canonical string
 	Params    map[string]any
-	Source    schema.EventSource
-	Protocol  string
-	Method    string
-	Target    string
+	// Detail goes into the event's request (schema.EventRequest.Detail)
+	Detail   map[string]string
+	Source   schema.EventSource
+	Protocol string
+	Method   string
+	Target   string
 }
 
 func (e *Engine) logRequest(r Request, status int) uint64 {
@@ -37,7 +39,7 @@ func (e *Engine) logRequest(r Request, status int) uint64 {
 		kind = "act"
 	}
 	return e.commit(schema.Event{Kind: kind, Source: r.Source, Path: r.Path,
-		Request: &schema.EventRequest{Protocol: r.Protocol, Method: r.Method, Target: r.Target, Canonical: r.Canonical, Status: status}})
+		Request: &schema.EventRequest{Protocol: r.Protocol, Method: r.Method, Target: r.Target, Canonical: r.Canonical, Status: status, Detail: r.Detail}})
 }
 
 // LogRead records a read request (inventory.read, health.read …) by its canonical name.

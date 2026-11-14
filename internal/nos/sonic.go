@@ -444,10 +444,14 @@ func sonicStartScript(sw Switch) (string, error) {
 		w("chmod 0600 %s", sonicGNMIKey)
 	}
 	if sw.Factory != nil {
-		factoryPreamble(w, sw.Factory)
+		factoryPreamble(w, sw.Factory, false)
 		w("# SONiC's factory login, admin/YourPaSsWoRd (sonic-buildimage rules/config); the VS image")
 		w("# has no sudo, so admin is root-equivalent and sudo runs what it is given")
 		w("getent passwd admin >/dev/null || useradd -o -u 0 -g 0 -M -d /root -s /bin/bash admin")
+		w("# the groups SONiC's image gives its admin (sonic-buildimage build_debian.sh: sudo, docker,")
+		w("# redis), which a day-0 tool adds its own accounts to; the VS container lacks docker and redis")
+		w("for g in sudo docker redis; do getent group $g >/dev/null || groupadd $g; done")
+		w("usermod -a -G sudo,docker,redis admin")
 		w("echo 'admin:%s' | chpasswd", SonicFactoryPassword)
 		w("%s", sonicFactoryShims)
 	}
@@ -555,13 +559,10 @@ func (sw Switch) Relaying() bool {
 }
 
 // sonicFactoryShims make a factory sonic-vs switch's CLI behave as a switch's for a day-0 tool:
-// sudo (the VS image has none; admin is root-equivalent there), `config reload` without the
+// sudo (the VS image has none: the twin's, clsys.Sudo, copied in setuid root, which runs a command
+// as root for any account, as sudo does for the sudo group), `config reload` without the
 // systemd restarts a VS container cannot do (SonicReloadCommand), and sshd with password logins.
-const sonicFactoryShims = `command -v sudo >/dev/null 2>&1 || { cat > /usr/local/bin/sudo <<'SUDO'
-#!/bin/sh
-exec "$@"
-SUDO
-chmod 755 /usr/local/bin/sudo; }
+const sonicFactoryShims = `command -v sudo >/dev/null 2>&1 || { cp ` + Day0Mount + `/dctwin-day0 /usr/local/bin/sudo && chmod 4755 /usr/local/bin/sudo; }
 if [ ! -e /usr/local/bin/config.sonic ]; then
   mv /usr/local/bin/config /usr/local/bin/config.sonic
   cat > /usr/local/bin/config <<'CONFIG'
@@ -578,4 +579,8 @@ sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/ssh
 # uid-0 account unless root logins with a password are allowed; on a switch admin is uid 1000
 sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
 grep -q '^PermitRootLogin' /etc/ssh/sshd_config || echo 'PermitRootLogin yes' >> /etc/ssh/sshd_config
+# every command a client runs over SSH, run as asked and told to the twin (clsys.SSHCommand), as
+# the switch's own record of a day-0 tool's CLI reads and writes
+ln -sf ` + Day0Mount + `/dctwin-day0 /usr/local/sbin/dctwin-ssh-command
+grep -q '^ForceCommand' /etc/ssh/sshd_config || echo 'ForceCommand /usr/local/sbin/dctwin-ssh-command' >> /etc/ssh/sshd_config
 /usr/sbin/sshd || log 'sshd did not start'`

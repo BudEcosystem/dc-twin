@@ -39,6 +39,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/BudEcosystem/dc-twin/internal/nos"
 	"github.com/BudEcosystem/dc-twin/internal/nos/nvue"
 )
 
@@ -56,7 +57,7 @@ func Main(args []string) int {
 	if tokenFile == "" {
 		tokenFile = nvue.TokenFile
 	}
-	c := &client{base: strings.TrimRight(base, "/"), user: invokingUser(), out: os.Stdout, errw: os.Stderr,
+	c := &client{base: strings.TrimRight(base, "/"), user: invokingUser(), out: os.Stdout, errw: os.Stderr, ipCmd: nos.ScriptBin + "/ip",
 		http: &http.Client{Timeout: 6 * time.Minute, Transport: &http.Transport{
 			// NVUE's certificate is the estate CA's, issued for the switch's name; this is the
 			// switch talking to itself
@@ -113,6 +114,8 @@ type client struct {
 	base, user, token string
 	http              *http.Client
 	out, errw         io.Writer
+	// ipCmd runs `nv action fetch`'s curl in a VRF (ip vrf exec, clsys's)
+	ipCmd string
 }
 
 const usage = `usage: nv <command> [<args>]
@@ -125,6 +128,7 @@ const usage = `usage: nv <command> [<args>]
   config replace <file>       make the pending revision the file (YAML, JSON, or nv set/unset lines)
   config patch <file>         merge the file into the pending revision
   config save                 make the applied configuration the startup one
+  action fetch system file-path <path> uri <uri> [file-permissions <octal>] [vrf <vrf>]
   config show [-o yaml|json|commands] [-r <rev>]
   config history [<rev>]
   config detach

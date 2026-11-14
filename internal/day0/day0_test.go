@@ -102,6 +102,30 @@ func TestEvaluate(t *testing.T) {
 				o["site-1/a10/leaf-1"] = s
 			},
 			diffs: []string{"Vlan1000 has 10.30.0.2/24, the design says 10.30.0.1/24", "eth0 holds no management lease"}},
+		{name: "the segment in the tool's wider subnet", plan: "given", path: "site-1/a10/leaf-1", phase: PhaseConverged,
+			edit: func(o map[string]Observed) {
+				// a leaf whose segment (10.30.0.0/24) lies inside VLAN 201's one subnet, gateway elsewhere in it
+				s := o["site-1/a10/leaf-1"]
+				s.Vlans = map[string]string{"vlan201": "10.30.2.3/22"}
+				s.VlanAddrs = map[string][]string{"vlan201": {"10.30.2.3/22", "10.30.2.1/22"}}
+				o["site-1/a10/leaf-1"] = s
+			}},
+		{name: "the gateway on the tool's own VLAN", plan: "given", path: "site-1/a10/leaf-1", phase: PhaseConverged,
+			edit: func(o map[string]Observed) {
+				// NVCM's OOB-Leaf: VLAN 201, one subnet across its leaves, the design's gateway its VRR
+				s := o["site-1/a10/leaf-1"]
+				s.Vlans = map[string]string{"vlan201": "10.30.0.2/23"}
+				s.VlanAddrs = map[string][]string{"vlan201": {"10.30.0.2/23", "10.30.0.1/23"}}
+				o["site-1/a10/leaf-1"] = s
+			}},
+		{name: "another rack's segment served, not this one's", plan: "given", path: "site-1/a10/leaf-1", phase: PhaseConfigured,
+			edit: func(o map[string]Observed) {
+				s := o["site-1/a10/leaf-1"]
+				s.Vlans = map[string]string{"vlan201": "10.30.2.2/23"}
+				s.VlanAddrs = map[string][]string{"vlan201": {"10.30.2.2/23", "10.30.2.1/23"}}
+				o["site-1/a10/leaf-1"] = s
+			},
+			diffs: []string{"Vlan1000 is missing, the design says 10.30.0.1/24"}},
 		{name: "not observed", plan: "given", path: "site-1/a10/leaf-2", phase: PhaseFactory,
 			edit: func(o map[string]Observed) { delete(o, "site-1/a10/leaf-2") }, diffs: []string{"not observed yet"}},
 

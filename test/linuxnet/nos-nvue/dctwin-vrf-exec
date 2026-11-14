@@ -1,0 +1,9 @@
+#!/bin/sh
+# dctwin-vrf-exec <vrf> <command> [args]: the command with every IPv4 and IPv6 socket it opens
+# bound to the VRF's device (vrfbind.so), as `ip vrf exec` does on a host (18 — Z7a). The relay
+# NVUE configures in a VRF runs through it.
+vrf=$1
+[ -n "$vrf" ] && [ $# -ge 2 ] || { echo "usage: dctwin-vrf-exec <vrf> <command> [args]" >&2; exit 2; }
+shift
+[ -e "/sys/class/net/$vrf" ] || { echo "dctwin-vrf-exec: no VRF $vrf" >&2; exit 1; }
+DCTWIN_VRF=$vrf LD_PRELOAD=/usr/lib/dctwin/vrfbind.so${LD_PRELOAD:+:$LD_PRELOAD} exec "$@"

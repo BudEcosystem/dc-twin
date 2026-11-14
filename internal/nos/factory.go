@@ -58,6 +58,9 @@ const (
 	// Day0State is where the day-0 programs keep their state in the switch: ZTP's status and
 	// log, ONIE's result.
 	Day0State = "/var/lib/dctwin"
+	// ExecSocket, in Day0Dir, is where the twin takes a factory SONiC switch's `docker exec` into
+	// its service containers (clsys.Docker).
+	ExecSocket = "exec.sock"
 )
 
 // MgmtIf is a switch's management port inside its container, on every NOS the twin runs
@@ -99,10 +102,34 @@ var SonicFactoryMgmt = []string{"sh", "-c", "mkdir -p /run/dctwin && exec " + Da
 // factoryPreamble is what every factory switch's start script runs before its NOS: the day-0
 // programs on the PATH as the switch has them, its management port present, and, when it has no
 // NOS yet, ONIE's discovery until an installer the twin recognises has "installed" it (D75).
-func factoryPreamble(w func(string, ...any), f *Factory) {
+func factoryPreamble(w func(string, ...any), f *Factory, cumulus bool) {
 	w("# a factory switch (D72): the twin's day-0 programs as the NOS has them")
 	w("for p in ztp nv onie-discover; do [ -e /usr/sbin/$p ] || [ -e /usr/bin/$p ] || ln -sf %s/dctwin-day0 /usr/sbin/$p; done", Day0Mount)
 	w("mkdir -p %s/ztp %s/onie /run/dctwin", Day0State, Day0State)
+	if cumulus {
+		// what Cumulus has beyond NVUE that a day-0 tool's script calls (internal/day0/clsys):
+		// onie-install and reboot, which the twin carries out; `ip vrf exec` through the image's
+		// socket-binding preload, first on a ZTP script's PATH (ScriptBin); dctwin-vrf-exec for
+		// the relay's VRFs
+		w("mkdir -p /usr/cumulus/bin %s", ScriptBin)
+		w("ln -sf %s/dctwin-day0 /usr/cumulus/bin/onie-install", Day0Mount)
+		w("ln -sf %s/dctwin-day0 /usr/sbin/reboot", Day0Mount)
+		w("ln -sf %s/dctwin-day0 %s/ip", Day0Mount, ScriptBin)
+		w("[ -e /usr/local/sbin/dctwin-vrf-exec ] || ln -sf %s/dctwin-day0 /usr/local/sbin/dctwin-vrf-exec", Day0Mount)
+		w("ln -sf %[1]s/dctwin-day0 /usr/cumulus/bin/decode-syseeprom; ln -sf %[1]s/dctwin-day0 /usr/sbin/decode-syseeprom", Day0Mount)
+		w("[ -e /usr/bin/timedatectl ] || ln -sf %s/dctwin-day0 /usr/bin/timedatectl", Day0Mount)
+	} else {
+		// SONiC's decode-syseeprom reads the unit's ONIE EEPROM; sonic-vs has none ("Platform
+		// x86_64-kvm_x86_64-r0 does not support EEPROM"), so the twin's answers from the
+		// switch's identity, as a SONiC switch's own EEPROM would
+		w("ln -sf %s/dctwin-day0 /usr/local/bin/decode-syseeprom", Day0Mount)
+		// SONiC's host CLI reaches its services with `docker exec <lldp|bgp|…>` (show lldp
+		// neighbors, vtysh); the twin runs them in the switch's service containers
+		w("command -v docker >/dev/null 2>&1 || ln -sf %s/dctwin-day0 /usr/local/bin/docker", Day0Mount)
+		// timedatectl, which SONiC's image has from systemd and a VS container (no systemd) cannot
+		// answer: the twin's, ahead of it on the PATH
+		w("ln -sf %s/dctwin-day0 /usr/local/bin/timedatectl", Day0Mount)
+	}
 	w("n=0; while [ ! -e /sys/class/net/%s ]; do n=$((n+1)); [ $n -gt 3000 ] && { log \"%s never arrived\"; exit 1; }; sleep 0.1; done", MgmtIf, MgmtIf)
 	w("ip link set %s up", MgmtIf)
 	if f.Install == "onie" {
@@ -110,7 +137,14 @@ func factoryPreamble(w func(string, ...any), f *Factory) {
 		w("until %s/dctwin-day0 onie-discover install; do log 'ONIE: discovery ended without an install; again'; sleep 5; done", Day0Mount)
 		w("log 'ONIE: installed; booting the NOS'")
 	}
+	if cumulus {
+		w("%s/dctwin-day0 os-release || log 'no /etc/os-release'", Day0Mount)
+	}
 }
+
+// ScriptBin is where a factory Cumulus switch keeps the day-0 programs a ZTP script must find
+// before the system's (its `ip`, whose `vrf exec` works in a container): first on ZTP's PATH.
+const ScriptBin = "/usr/lib/dctwin/bin"
 
 // SONiC's factory hostname and its admin user's factory password (sonic-buildimage rules/config,
 // docs/reviews/2026-11-11-day0-vendor-facts.md E).

@@ -420,9 +420,14 @@ func TestRESTWorkflow518(t *testing.T) {
 			t.Fatalf("%s: %d %v", l, st, out)
 		}
 	}
+	// 5.14's switch in a tree is taken on 5.18.3 and held as 5.15's (Q30: NVCM's 5.16.1
+	// configurations and Cumulus 5.16's own startup.yaml write enable: on); the CLI refuses it
 	st, out = c.do("PATCH", "/nvue_v1/router/bgp?rev="+rev, map[string]any{"enable": "on"}, auth)
-	if st != 400 || !strings.Contains(fmt.Sprint(out["detail"]), "use state enabled|disabled") {
+	if st != 200 || out["state"] != "enabled" || out["enable"] != nil {
 		t.Errorf("an old form in a 5.18.3 revision: %d %v", st, out)
+	}
+	if _, _, err := CLIPathAt(v5183, []string{"router", "bgp", "enable", "on"}, true); err == nil || !strings.Contains(err.Error(), "use state enabled|disabled") {
+		t.Errorf("nv set router bgp enable on at 5.18.3: %v", err)
 	}
 	if st, out := c.do("GET", "/nvue_v1/service/ntp", nil, auth); st != 404 || !strings.Contains(fmt.Sprint(out["detail"]), "use system ntp server") {
 		t.Errorf("GET an old path at 5.18.3: %d %v", st, out)

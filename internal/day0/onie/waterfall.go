@@ -35,6 +35,11 @@ const wgetTimeout = 3 * time.Second
 // command line or kernel, firmware updates, local and UBI partitions) have nothing to find in a
 // factory switch's container and are not modelled. It reports whether a NOS installed.
 func (e *Env) waterfall(ctx context.Context) bool {
+	// 5. the static URL: what the NOS's onie-install -i left for this boot (Cumulus's
+	// onie_install_url), tried before what DHCP found
+	if e.StaticURL != "" && e.tryURL(ctx, e.StaticURL) {
+		return true
+	}
 	l := e.lease
 	// 6. Exact URLs: option 125's installer URL (onie_disco_onie_url), then option 114
 	// (onie_disco_url).

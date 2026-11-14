@@ -273,8 +273,9 @@ if [ "$mode" = native ]; then
   mkdir -p "$work/test/linuxnet"
   cp -R "$root/test/linuxnet/testdata" "$work/test/linuxnet/"
   cp -R "$root/internal/nos/nvue/testdata/nico" "$work/test/linuxnet/testdata/"
+  cp -R "$root/internal/nos/nvue/testdata/nvcm-1.4.1" "$work/test/linuxnet/testdata/"
   # its own network namespace, loopback up: the twin's loopback endpoints are not the host's
-  sudo env DCTWIN_LINUXNET=1 DCTWIN_HOLD="${HOLD:-}" DCTWIN_HBN_BINARIES="${HBN_BINARIES:-}" DCTWIN_DAY0_BINARIES="$work/day0" DCTWIN_REFERENCE_DAY0="$root/stacks/reference-day0" DCTWIN_COMPAT_NETBOX="$root/compat/netbox-ansible" DCTWIN_RUN="${DCTWIN_RUN:-}" DCTWIN_NOS_MEMORY="${NOS_MEMORY:-}" DCTWIN_ASSETS="${DCTWIN_ASSETS:-$HOME/.cache/dc-twin/assets}" DOCKER_HOST="$engine_host" PATH="$testpath" unshare --net sh -c \
+  sudo env DCTWIN_LINUXNET=1 DCTWIN_HOLD="${HOLD:-}" DCTWIN_HBN_BINARIES="${HBN_BINARIES:-}" DCTWIN_DAY0_BINARIES="$work/day0" DCTWIN_REFERENCE_DAY0="$root/stacks/reference-day0" DCTWIN_COMPAT_NETBOX="$root/compat/netbox-ansible" DCTWIN_COMPAT_NVCM="$root/compat/nvcm" DCTWIN_NVCM_SRC="${NVCM_SRC:-}" DCTWIN_FOUNDRY="${FOUNDRY:-}" DCTWIN_RUN="${DCTWIN_RUN:-}" DCTWIN_NOS_MEMORY="${NOS_MEMORY:-}" DCTWIN_ASSETS="${DCTWIN_ASSETS:-$HOME/.cache/dc-twin/assets}" DOCKER_HOST="$engine_host" PATH="$testpath" unshare --net sh -c \
     'ip link set lo up && cd "$1" && exec "$2" -test.v -test.count=1 -test.timeout=45m -test.run "$3"' \
     sh "$work/test/linuxnet" "$work/linuxnet.test" "$run" 2>&1 | tee "$log"
   rc=${PIPESTATUS[0]}
@@ -290,6 +291,7 @@ else
   docker cp "$work/day0" "$name:/work/day0"
   docker cp "$root/test/linuxnet/testdata" "$name:/work/test/linuxnet/testdata"
   docker cp "$root/internal/nos/nvue/testdata/nico" "$name:/work/test/linuxnet/testdata/nico"
+  docker cp "$root/internal/nos/nvue/testdata/nvcm-1.4.1" "$name:/work/test/linuxnet/testdata/nvcm-1.4.1"
   docker start -a "$name" 2>&1 | tee "$log"
   rc=${PIPESTATUS[0]}
 fi

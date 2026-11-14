@@ -8,6 +8,7 @@ import (
 	"github.com/BudEcosystem/dc-twin/internal/day0"
 	"github.com/BudEcosystem/dc-twin/internal/model"
 	"github.com/BudEcosystem/dc-twin/internal/nos"
+	"github.com/BudEcosystem/dc-twin/internal/nos/nvue"
 )
 
 // Factory reports whether any switch of the plan starts in factory state (D72).
@@ -26,6 +27,12 @@ func (p *Plan) Factory() bool {
 // oracle compares the switches with.
 func (p *Plan) Day0Design(m *model.Model) day0.Design {
 	d := day0.Design{Estate: p.Estate, Plan: "given"}
+	for _, sp := range p.Switches {
+		if b := sp.Config.Build; b != "" {
+			d.Release = nvue.BuildVersion(b).String()
+			break
+		}
+	}
 	for _, f := range m.Fabrics {
 		if f.Factory != nil && f.Factory.Plan == "tool" {
 			d.Plan = "tool"

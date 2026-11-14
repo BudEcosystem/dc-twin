@@ -1,6 +1,8 @@
 package compile
 
 import (
+	"sort"
+	"strings"
 	"testing"
 
 	"github.com/BudEcosystem/dc-twin/internal/model"
@@ -75,6 +77,33 @@ func TestIdentityStableAndAllocationIsolated(t *testing.T) {
 	for _, d := range a.Devices {
 		if b.DeviceBy[d.Path].Identity.Serial != d.Identity.Serial || b.DeviceBy[d.Path].Identity.BMCMAC != d.Identity.BMCMAC {
 			t.Fatalf("identity of %s not stable", d.Path)
+		}
+	}
+}
+
+// A factory OOB fabric (18 — Z7d): its selected management switches are factory, and each one's
+// own management port is cabled to the aggregation switch, which stays the twin's.
+func TestDSXDay0OOB(t *testing.T) {
+	m := compileFile(t, "../../examples/estates/dsx-day0.yaml").Model
+	f := m.Fabrics["oob"]
+	if f == nil || f.Factory == nil {
+		t.Fatal("no factory OOB fabric")
+	}
+	var factory []string
+	for d := range f.Factory.Devices {
+		factory = append(factory, d.Path)
+	}
+	sort.Strings(factory)
+	if strings.Join(factory, " ") != "site-1/hall-a/r01/mgmt-switch site-1/hall-a/r02/mgmt-switch" {
+		t.Errorf("factory switches: %v", factory)
+	}
+	for _, d := range m.Devices {
+		if d.Name != "mgmt-switch" {
+			continue
+		}
+		p := d.PortBy["mgmt0"]
+		if p == nil || p.Link == nil || p.Link.Peer(p).Device.Name != "oob-agg-1" {
+			t.Errorf("%s's management port is not cabled to the aggregation switch", d.Path)
 		}
 	}
 }

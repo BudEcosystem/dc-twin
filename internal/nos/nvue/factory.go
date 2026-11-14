@@ -39,7 +39,7 @@ func Factory(sw nos.Switch) Tree {
 // ApplyFactory applies the factory configuration as the switch's first revision, its startup
 // configuration, in place of ApplyStartup's design.
 func (s *Server) ApplyFactory(ctx context.Context) error {
-	t := Factory(s.sw)
+	t := Factory(s.swNow())
 	s.mu.Lock()
 	s.startup = Clone(t)
 	r := &revision{tree: Clone(t), changes: []change{{v: t}}, state: statePending, user: "system", created: time.Now()}

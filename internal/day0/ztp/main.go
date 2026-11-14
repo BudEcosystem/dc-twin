@@ -73,6 +73,8 @@ type config struct {
 	// vrf is the device fetches bind to when vrfExists says the switch has it (mgmt).
 	vrf       string
 	vrfExists func(string) bool
+	// onieStatus is ONIE's status file, whose installed version the NOS reports
+	onieStatus string
 	// scriptVRF, when set, runs scripts and pings through `ip vrf exec <scriptVRF>`.
 	scriptVRF string
 	ipCmd     string
@@ -121,8 +123,9 @@ func defaultConfig() *config {
 		tmpDir:       os.TempDir(),
 		vrf:          "mgmt",
 		vrfExists:    linkExists,
-		ipCmd:        "ip",
-		path:         nos.Day0Mount + ":/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+		onieStatus:   filepath.Join(nos.Day0State, "onie", "status.json"),
+		ipCmd:        vrfIP(),
+		path:         nos.ScriptBin + ":" + nos.Day0Mount + ":/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
 		interval:     10 * time.Second,
 		window:       5 * time.Minute,
 		provMax:      32,
@@ -306,7 +309,20 @@ func (c *config) identity() (nos.Identity, error) {
 	if err != nil {
 		return id, err
 	}
-	return id, json.Unmarshal(b, &id)
+	if err := json.Unmarshal(b, &id); err != nil {
+		return id, err
+	}
+	// a NOS ONIE installed reports the image's version (a reinstall at another release, 18 — Z7a)
+	var st struct {
+		Phase   string `json:"phase"`
+		Version string `json:"version"`
+	}
+	if c.onieStatus != "" {
+		if b, err := os.ReadFile(c.onieStatus); err == nil && json.Unmarshal(b, &st) == nil && st.Phase == "installed" && st.Version != "" {
+			id.Version = st.Version
+		}
+	}
+	return id, nil
 }
 
 // factoryZTP is factory.json's "ztp": whether the NOS's ZTP is armed at first boot (default
@@ -359,4 +375,14 @@ func (c *config) lease() lease {
 		}
 	}
 	return l
+}
+
+// vrfIP is the ip a script or ping runs in a VRF through: the day-0 programs' (clsys's, whose vrf
+// exec works in a container) where the switch has it, else the system's.
+func vrfIP() string {
+	p := filepath.Join(nos.ScriptBin, "ip")
+	if _, err := os.Stat(p); err == nil {
+		return p
+	}
+	return "ip"
 }

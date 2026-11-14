@@ -93,8 +93,12 @@ func (v Version) Less(o Version) bool {
 // gate refuses a node a release does not have: one introduced after it (since), or removed in it
 // or before (removed). instead is what to use: the replacement for a removed node, the earlier
 // form for a new one.
-func (n *node) gate(v Version, name string) error {
-	if v.IsZero() || n == nil {
+func (n *node) gate(v Version, name string) error { return n.gateIn(v, name, true) }
+
+// gateIn is gate for the CLI (cli) or for a tree: a tree may carry the other release's switch
+// (alias, Q30).
+func (n *node) gateIn(v Version, name string, cli bool) error {
+	if v.IsZero() || n == nil || (n.alias && !cli) {
 		return nil
 	}
 	if !n.since.IsZero() && v.Less(n.since) {
@@ -135,10 +139,16 @@ func until(v Version, instead string, n *node) *node {
 // bfd), with the node's other children. Where the 5.15 list does not name a switch (router ptm,
 // reflexive-acl, default-route-origination, allow-my-asn), the schema keeps `enable` in every
 // release: whether 5.15 renamed those is UNCONFIRMED.
+//
+// The rename is the CLI's. In a tree (a startup.yaml for `nv config replace`, a REST PATCH) a
+// release takes either spelling: NVIDIA Config Manager 1.4.1's 5.16.1 configurations and the
+// startup.yaml on Cumulus 5.16's EVPN multihoming page write `enable: on` where 5.15's CLI says
+// `state enabled`, and its 5.13.1 ones `auto-save state` (Q30, UNCONFIRMED until a switch is read).
+// normalize renders either.
 func toggle(more map[string]*node) map[string]*node {
 	return with(more, map[string]*node{
-		"enable": until(v515, "state enabled|disabled", lf(kOnOff)),
-		"state":  since(v515, "enable on|off", &node{leaf: kToggle, rename: "enable"}),
+		"enable": until(v515, "state enabled|disabled", &node{leaf: kOnOff, alias: true}),
+		"state":  since(v515, "enable on|off", &node{leaf: kToggle, rename: "enable", alias: true}),
 	})
 }
 
@@ -195,6 +205,14 @@ func normalize(t Tree) Tree {
 		if v, ok := it["vrf"]; ok {
 			delete(it, "vrf")
 			get()["vrf"] = v
+		}
+	}
+	// a VRF's loopback, ipv4 (5.15's spelling, NVCM's) as ip
+	for _, v := range keys(sub(t, "vrf")) {
+		lb := sub(t, "vrf", v, "loopback")
+		if f := sub(lb, "ipv4"); f != nil {
+			delete(lb, "ipv4")
+			Patch(lb, []string{"ip"}, Clone(f))
 		}
 	}
 	sys := sub(t, "system")
@@ -329,4 +347,70 @@ func toggles(n *node, m map[string]any, up bool) {
 			}
 		}
 	}
+}
+
+// spelled is a PATCH's value at path in the release's own spelling of its switches (state
+// enabled|disabled from 5.15, enable on|off before), as NVUE keeps one: a tree may carry either
+// (toggle, Q30), and what the switch holds and serves is its release's.
+func spelled(ver Version, path []string, v any) any {
+	m, ok := v.(map[string]any)
+	if !ok || ver.IsZero() {
+		return v
+	}
+	n := schema
+	for _, p := range path {
+		c, err := n.child(p)
+		if err != nil {
+			return v
+		}
+		n = c
+	}
+	m = Clone(m)
+	toggles(n, m, !ver.Less(v515))
+	return m
+}
+
+// spellingOf is how a change spelt its switches and how they are held: "enable" or "state" when
+// held as sent, "enable->state" or "state->enable" when the release's own spelling replaced them,
+// "" for a change with none.
+func spellingOf(sent, held any) string {
+	count := func(v any) (en, st int) {
+		var walk func(any)
+		walk = func(v any) {
+			m, ok := v.(map[string]any)
+			if !ok {
+				return
+			}
+			for k, c := range m {
+				switch k {
+				case "enable":
+					if _, leaf := c.(string); leaf {
+						en++
+					}
+				case "state":
+					if s, leaf := c.(string); leaf && (s == "enabled" || s == "disabled") {
+						st++
+					}
+				}
+				walk(c)
+			}
+		}
+		walk(v)
+		return
+	}
+	se, ss := count(sent)
+	he, hs := count(held)
+	switch {
+	case se > he:
+		return "enable->state"
+	case ss > hs:
+		return "state->enable"
+	case se > 0 && ss > 0:
+		return "enable,state"
+	case se > 0:
+		return "enable"
+	case ss > 0:
+		return "state"
+	}
+	return ""
 }

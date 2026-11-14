@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/BudEcosystem/dc-twin/internal/nos"
 )
 
 // DefaultBuild is what GET /system reports as a switch's build: the Cumulus Linux release the
@@ -33,6 +35,13 @@ func (s *Server) operational(r *http.Request, p []string) (any, bool, error) {
 	switch {
 	case len(p) == 1 && p[0] == "system":
 		v = s.system()
+	case len(p) == 2 && p[0] == "system" && p[1] == "ztp":
+		v, err = s.ztp(ctx)
+	case len(p) >= 1 && p[0] == "platform":
+		var found bool
+		if v, found = Get(s.platform(), p[1:]); !found {
+			return nil, false, nil
+		}
 	case len(p) == 4 && p[0] == "bridge" && p[1] == "domain" && p[3] == "mac-table":
 		v, err = s.macTable(ctx, p[2])
 	case len(p) >= 3 && len(p) <= 5 && p[0] == "interface" && p[2] == "lldp":
@@ -91,6 +100,40 @@ func (s *Server) system() map[string]any {
 		tz = "Etc/UTC"
 	}
 	m["timezone"] = tz
+	// the release, where NVIDIA Config Manager reads it (top level to 5.13, version from 5.14), and
+	// how long the switch's NVUE has run
+	rel := s.Version().String()
+	m["product-release"] = rel
+	m["version"] = map[string]any{"product-release": rel, "image": rel}
+	m["uptime"] = int(time.Since(s.started).Seconds())
+	return m
+}
+
+// platform is GET /platform (`nv show platform`): the switch's hardware as its EEPROM has it, its
+// serial number among it (what NVIDIA Config Manager's boot script reads and validates). A switch
+// the twin configures has its path as its serial.
+func (s *Server) platform() map[string]any {
+	sw := s.swNow()
+	id := nos.Identity{Serial: sw.Path}
+	if sw.Factory != nil {
+		id = sw.Factory.Identity
+	}
+	m := map[string]any{
+		"serial-number": id.Serial,
+		"base-mac":      strings.ToLower(id.BaseMAC),
+		"system-mac":    strings.ToLower(id.BaseMAC),
+		"product-name":  id.Model,
+		"manufacturer":  id.Manufacturer,
+		"part-number":   id.PartNumber,
+		"onie-platform": id.Platform,
+		"cpu-arch":      id.Arch,
+		"version":       s.build(),
+	}
+	for k, v := range m {
+		if v == "" {
+			delete(m, k)
+		}
+	}
 	return m
 }
 

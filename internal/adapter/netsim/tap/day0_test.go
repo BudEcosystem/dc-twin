@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 
@@ -225,5 +226,81 @@ func TestCableSwapAsBuilt(t *testing.T) {
 	t.Logf("%s reached %s, now %s; fault %+v", pa.Ref, before.Ref, after.Ref, views)
 	if after == before || after != pb.Link.Peer(pb) {
 		t.Fatalf("the swap is not applied: %s reaches %s", pa.Ref, after.Ref)
+	}
+}
+
+// A DSX day 0 (18 — Z7d): the factory OOB leaves' management ports lease through the aggregation
+// switch the twin configures, and NVCM's blueprint has each leaf's BMC segment as VLAN 201 in
+// VRF OOB, the aggregation switch as the device NVCM does not provision, and an EVPN peering
+// between their loopbacks.
+func TestPlanDSXDay0(t *testing.T) {
+	b, err := os.ReadFile("../../../../examples/estates/dsx-day0.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bin := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bin, "dctwin-day0"), nil, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	b = []byte(strings.ReplaceAll(string(b), "day0Binaries: ./bin", "day0Binaries: "+bin))
+	var est schema.Estate
+	if err := schema.Decode(b, &est); err != nil {
+		t.Fatal(err)
+	}
+	m := compileModel(t, &est)
+	p, err := BuildPlan(m, &est, nil, "x86_64")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var factory []string
+	for _, sp := range p.Switches {
+		if sp.Config.Factory != nil {
+			factory = append(factory, sp.Device.Path)
+			if !sp.Config.Mgmt {
+				t.Errorf("%s: its management port is not planned", sp.Device.Path)
+			}
+		}
+	}
+	sort.Strings(factory)
+	if strings.Join(factory, " ") != "site-1/hall-a/r01/mgmt-switch site-1/hall-a/r02/mgmt-switch" {
+		t.Errorf("factory: %v", factory)
+	}
+	for _, mp := range p.Mgmt {
+		if mp.OOB == nil || mp.OOB.Device.Name != "oob-agg-1" {
+			t.Errorf("%s's management port is not on the aggregation switch", mp.Ref)
+		}
+	}
+	// the aggregation switch, cabled to factory leaves, runs LLDP; a twin switch no factory
+	// switch's front panel reaches does not
+	for _, sp := range p.Switches {
+		if want := sp.Device.Name == "oob-agg-1"; sp.Config.Factory == nil && sp.Config.LLDP != want {
+			t.Errorf("%s: LLDP %v", sp.Device.Path, sp.Config.LLDP)
+		}
+	}
+	dir := t.TempDir()
+	if out := os.Getenv("DCTWIN_DESIGN_OUT"); out != "" {
+		dir = out // to look at, or to load into NVCM by hand
+	}
+	if err := day0.WriteInputs(dir, p.Day0Design(m)); err != nil {
+		t.Fatal(err)
+	}
+	bp := filepath.Join(dir, "nvcm", "context", day0.NVCMBlueprint)
+	for _, f := range []string{"devices/r01-mgmt-switch.json", "devices/r02-mgmt-switch.json", "devices/n01-oob-agg-1.json", "helpers.json"} {
+		if _, err := os.Stat(filepath.Join(bp, f)); err != nil {
+			t.Errorf("blueprint: %v", err)
+		}
+	}
+	leaf, _ := os.ReadFile(filepath.Join(bp, "devices/r01-mgmt-switch.json"))
+	for _, want := range []string{`"name": "vlan201"`, `"rd": "*:2000"`, `"name": "lo-oob"`, `"l3_vlan_id": 4002`, `"vid": 201`} {
+		if !strings.Contains(string(leaf), want) {
+			t.Errorf("r01-mgmt-switch lacks %s", want)
+		}
+	}
+	peer, _ := os.ReadFile(filepath.Join(bp, "bgp_routing_instances.yaml"))
+	if !strings.Contains(string(peer), "source_interface: lo") {
+		t.Errorf("no EVPN peering:\n%s", peer)
+	}
+	if t.Failed() {
+		t.Logf("leaf:\n%s", leaf)
 	}
 }

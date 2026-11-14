@@ -118,6 +118,10 @@ func (s *Substrate) factoryBringUp(sw *nosSwitch) {
 			fail(fmt.Errorf("its management port's DHCP client: %w", err))
 			return
 		}
+		if err := s.serveExec(sw); err != nil {
+			fail(err)
+			return
+		}
 	}
 	if f.ZTP {
 		if err := s.docker.ExecDetached(s.ctx, sw.c.ID, nos.Day0Mount+"/dctwin-day0", "ztp", "daemon", "--nos", sw.plan.NOS.ZTPFlavour()); err != nil {
@@ -245,6 +249,8 @@ type day0Observer struct {
 	// lldpAt is when each switch's LLDP neighbours were last read, lldpLast what they were
 	lldpAt   map[string]time.Time
 	lldpLast map[string]map[string]string
+	// offered is the boot URL each switch's last lease carried (its DHCP server's ZTP options)
+	offered map[string]string
 }
 
 // lldpInterval is how often the day-0 observer asks a switch's lldpd for its neighbours: the one
@@ -271,6 +277,12 @@ func (o *day0Observer) observe(ctx context.Context, sw *nosSwitch) day0.Observed
 				ob.Mgmt = a
 			} else {
 				ob.Vlans[name] = a
+				if ob.VlanAddrs == nil {
+					ob.VlanAddrs = map[string][]string{}
+				}
+				for _, x := range addrs {
+					ob.VlanAddrs[name] = append(ob.VlanAddrs[name], x.IPNet.String())
+				}
 			}
 		}
 	}
@@ -463,6 +475,7 @@ func (o *day0Observer) poll(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
+		o.rebootPoll(sw)
 		obs[sw.plan.Device.Path] = o.observe(ctx, sw)
 	}
 	verdicts := day0.Evaluate(s.design, obs)
@@ -480,6 +493,7 @@ func (o *day0Observer) poll(ctx context.Context) {
 		v := o.verd[path]
 		o.commit(host, path, "hostname", ob.Hostname, "")
 		o.commit(host, path, "mgmt.lease", ob.Mgmt, "")
+		o.provision(sw)
 		for port, n := range ob.LLDP {
 			o.commit(host, path, "lldp "+port, n, "")
 		}
@@ -667,4 +681,52 @@ func (s *Substrate) factoryReset(ctx context.Context, path string, uninstall boo
 	s.eng.LogRead(engine.Request{Path: sw.plan.Device.Path, Canonical: canonical, Protocol: "control", Method: "POST",
 		Target: "/v1/switch/factory-reset", Source: schema.EventSource{Class: "operator", Principal: "dctwin"}}, 200)
 	return nil
+}
+
+// provision reads the boot URL a factory switch's lease carries (option 239, 67, or sonic-ztp's
+// document URL), as its DHCP server sent it and before a day-0 fault strips it (the twin's DHCP
+// client writes the lease as received). When the server hands the switch a different one than its
+// last lease's, the site's DHCP has re-armed the switch's day 0, a new boot URL to the switch: a
+// request of the stack's on the device (network.ztp.provision, protocol dhcp), which is how a
+// day-0 tool acts on a switch it cannot reach yet (a fault before ZTP, 18 — Judging). The first
+// URL a switch is offered is its day 0's start, not a response, and is not one.
+func (o *day0Observer) provision(sw *nosSwitch) {
+	if sw.c == nil {
+		return
+	}
+	b, err := containerFile(sw.c.Pid, "/run/dctwin/dhcp-"+nos.MgmtIf+".env")
+	if err != nil {
+		return
+	}
+	lease := map[string]string{}
+	for _, l := range strings.Split(string(b), "\n") {
+		k, v, ok := strings.Cut(strings.TrimSpace(l), "=")
+		if ok {
+			lease[k] = strings.Trim(v, `'"`)
+		}
+	}
+	url := ""
+	for _, k := range []string{"new_cumulus_provision_url", "new_ztp_json_url", "new_bootfile_name", "new_filename"} {
+		if lease[k] != "" {
+			url = lease[k]
+			break
+		}
+	}
+	if url == "" {
+		return
+	}
+	path := sw.plan.Device.Path
+	o.mu.Lock()
+	if o.offered == nil {
+		o.offered = map[string]string{}
+	}
+	prev := o.offered[path]
+	o.offered[path] = url
+	o.mu.Unlock()
+	if prev == "" || prev == url || o.s.eng == nil {
+		return
+	}
+	o.s.eng.LogRead(engine.Request{Path: path, Canonical: "network.ztp.provision", Protocol: "dhcp", Method: "offer", Target: url,
+		Source: schema.EventSource{Class: "stack", Principal: "dhcp", Address: lease["new_dhcp_server_identifier"]},
+		Detail: map[string]string{"previous": prev}}, 200)
 }

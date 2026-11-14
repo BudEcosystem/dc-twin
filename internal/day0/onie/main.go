@@ -44,6 +44,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	fs.BoolVar(&e.RejectAll, "reject-all", envTrue("DCTWIN_ONIE_REJECT_ALL"), "every installer fails its checks (the onie-image-mismatch fault; also DCTWIN_ONIE_REJECT_ALL=1 or <dir>/"+RejectFile+")")
 	fs.DurationVar(&e.Retry, "retry", RetryDelay, "the delay between waterfall passes")
 	fs.StringVar(&e.Version, "onie-version", DefaultVersion, "the ONIE version reported in ONIE-VERSION and the User-Agent")
+	fs.StringVar(&e.StaticURL, "url", "", "an installer URL tried before the waterfall (onie-install -i's, from the NOS)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}

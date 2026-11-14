@@ -17,6 +17,9 @@ type Design struct {
 	Cables   []Cable  `json:"cables"`
 	// Mgmt is the management network the switches' eth0 lease on.
 	Mgmt []MgmtNet `json:"managementNetworks,omitempty"`
+	// Release is the Cumulus release the estate's switches run (spec.adapters.network.nos.
+	// cumulusVersion): NVCM's intended firmware for them
+	Release string `json:"release,omitempty"`
 }
 
 // Switch is one switch of the design.
@@ -110,6 +113,8 @@ type Observed struct {
 	Mgmt string `json:"mgmt,omitempty"`
 	// Vlans are its VLAN interfaces with their addresses (Vlan1000 -> 10.30.0.1/24).
 	Vlans map[string]string `json:"vlans,omitempty"`
+	// VlanAddrs are every address of each VLAN interface (an SVI's own and its VRR's).
+	VlanAddrs map[string][]string `json:"vlanAddrs,omitempty"`
 	// LLDP are its LLDP neighbours by local port: "<system name>:<port id>".
 	LLDP map[string]string `json:"lldp,omitempty"`
 	// Phase is the day-0 phase its ZTP and ONIE report (Phase*); "" when not known.

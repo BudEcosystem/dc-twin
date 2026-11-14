@@ -98,7 +98,7 @@ func TestStartupRenders(t *testing.T) {
 	if strings.Contains(f.FRR, "l2vpn evpn") {
 		t.Errorf("EVPN without evpn enable")
 	}
-	if got := strings.Join(f.Relay, " "); got != "-4 -d -a -m discard -id vlan1000 -iu swp49 10.90.0.10" {
+	if got := strings.Join(f.Relay, "\n"); got != "default -4 -d -a -m discard -id vlan1000 -iu swp49 10.90.0.10" {
 		t.Errorf("relay %q", got)
 	}
 }
@@ -158,10 +158,22 @@ func TestTenantRenders(t *testing.T) {
 	if _, err := Render(bad, sw); err == nil || !strings.Contains(err.Error(), "vrf tenant-b does not exist") {
 		t.Errorf("an SVI in a missing VRF: %v", err)
 	}
+	// an uncabled port on the panel is the switch's, as a real switch has all of them: kept, with
+	// no link to render; a port off the panel is refused
+	ok := Clone(tree)
+	Patch(ok, []string{"interface", "swp30", "type"}, "swp")
+	Patch(ok, []string{"interface", "swp30", "ip", "address", "10.9.9.1/24"}, map[string]any{})
+	if g, err := Render(ok, sw); err != nil || strings.Contains(g.Interfaces, "swp30") {
+		t.Errorf("an uncabled panel port: %v\n%s", err, g.Interfaces)
+	}
 	bad = Clone(tree)
-	Patch(bad, []string{"interface", "swp30", "ip", "address", "10.9.9.1/24"}, map[string]any{})
+	Patch(bad, []string{"interface", "swp60", "ip", "address", "10.9.9.1/24"}, map[string]any{})
 	if _, err := Render(bad, sw); err == nil || !strings.Contains(err.Error(), "no such port") {
-		t.Errorf("an uncabled port: %v", err)
+		t.Errorf("a port off the panel: %v", err)
+	}
+	Patch(bad, []string{"interface", "swp60", "type"}, "swp")
+	if _, err := Render(bad, sw); err == nil || !strings.Contains(err.Error(), "no such swp") {
+		t.Errorf("a port off the panel, typed: %v", err)
 	}
 }
 

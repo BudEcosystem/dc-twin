@@ -30,7 +30,7 @@ func CLIPathAt(ver Version, words []string, set bool) (path []string, value any,
 	var walked []string
 	i := 0
 	for ; i < len(words) && n.leaf == 0; i++ {
-		c, err := n.childAt(ver, words[i])
+		c, err := n.childCLI(ver, words[i])
 		if err != nil {
 			return nil, nil, fmt.Errorf("%s: %w", strings.Join(append(walked, words[i]), " "), err)
 		}

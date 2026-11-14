@@ -367,3 +367,28 @@ func TestSonicPinsMatchTheE2EScript(t *testing.T) {
 		}
 	}
 }
+
+// A factory SONiC switch's decode-syseeprom answers from its identity (sonic-vs has no EEPROM),
+// it has SONiC's admin groups, and Cumulus's programs are not on it.
+func TestSonicFactoryDecodeSyseeprom(t *testing.T) {
+	sonic, _ := Lookup(SonicVS)
+	sw := mgmtSwitch()
+	sw.Factory = &Factory{Install: "preinstalled"}
+	script, err := sonic.StartScript(sw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(script, "ln -sf "+Day0Mount+"/dctwin-day0 /usr/local/bin/decode-syseeprom") {
+		t.Errorf("no decode-syseeprom:\n%s", script)
+	}
+	if strings.Contains(script, "/usr/cumulus/bin") {
+		t.Errorf("Cumulus's programs on a SONiC switch")
+	}
+	if !strings.Contains(script, "for g in sudo docker redis; do getent group $g >/dev/null || groupadd $g; done") {
+		t.Errorf("no SONiC groups:\n%s", script)
+	}
+	// sudo is the twin's, setuid root (clsys.Sudo)
+	if !strings.Contains(script, "cp "+Day0Mount+"/dctwin-day0 /usr/local/bin/sudo && chmod 4755 /usr/local/bin/sudo") {
+		t.Errorf("no setuid sudo:\n%s", script)
+	}
+}

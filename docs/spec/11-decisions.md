@@ -1349,3 +1349,19 @@ emulation. **Why:** the customers run NVIDIA switches, and NetBox with Ansible i
 open day-0 stack; NVIDIA's templates make it NVIDIA's configuration without a licensed tool. The
 emulation work is the same whichever tool generates the configuration. **Reversed if:** a
 customer's day-0 tool is neither, or a customer needs NetQ itself.
+
+### D80 — DSX OS's switch day 0 is NVIDIA Config Manager's contract, run unmodified
+*Decided and built (2026-11-13, Z7a to Z7c, and Z7d's relay path with a stand-in for NICo's DHCP; NICo itself and the DPU half not), [18](18-day0.md#dsx-os-nvidia-config-managers-ztp).* On a DSX OS site NICo
+configures no switch, and the tool DSX's organisation publishes for switch day 0 is NVIDIA Config
+Manager (`dsx-ai-factory/nv-config-manager`, Apache-2.0, a Developer Preview). The twin serves
+its contract as it stands at a pinned release (1.4.1): relayed DHCP to its Kea with per-switch
+reservations and option 239; its ZTP endpoints reached from the switch's reserved address; its
+Cumulus boot script and NVUE `startup.yaml` run on the emulated Cumulus with nothing refused, its
+24 goldens the conformance test; its NVUE REST workflows answered. The design is also handed to
+the SUT in NVCM's own loader's form (`stack-inputs/day0/nvcm/`, a Design Builder blueprint), and
+the DSX day-0 estate relays BMC DHCP on the OOB switches as NICo's reference does. `compat/nvcm`
+runs NVCM's services unmodified, from its own Dockerfiles, outside Kubernetes, as `compat/nico`
+runs NICo. **Why:** a day-0 tool for DSX, Foundry's or another, is tested against what DSX
+itself does; NVCM's templates are NVIDIA's own validated configurations for those switches, and
+its goldens make the emulation's coverage measurable. **Reversed if:** DSX names another switch
+tool, or NVCM leaves DSX OS.

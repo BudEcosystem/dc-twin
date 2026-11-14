@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -28,7 +29,7 @@ func testConfig(t *testing.T) (*config, string) {
 	c.dhcpEnv, c.userApplied = p("run/dctwin/dhcp-eth0.env"), p("run/dctwin/nvue-user-applied")
 	c.statusFile, c.daemonFile = p("var/lib/dctwin/ztp/status.json"), p("var/lib/dctwin/ztp/daemon.json")
 	c.lockFile, c.tmpDir = p("run/ztp.lock"), p("tmp")
-	c.faultsDir = p("etc/dctwin/faults")
+	c.faultsDir, c.onieStatus = p("etc/dctwin/faults"), p("var/lib/dctwin/onie/status.json")
 	c.vrfExists = func(string) bool { return false }
 	c.clDir, c.autoprovLog = p("var/lib/cumulus/ztp"), p("var/log/autoprovision")
 	c.ztpDir, c.ztpLog, c.sectionsDir, c.sonicDir = p("host/ztp"), p("var/log/ztp.log"), p("var/lib/ztp/sections"), p("etc/sonic")
@@ -144,7 +145,7 @@ func TestCumulusRunHeadersAndScript(t *testing.T) {
 	if rc := run(context.Background(), c, []string{"-r", srv.URL + "/ztp.sh"}); rc != 0 {
 		t.Fatalf("ztp -r = %d: %s", rc, c.stderr)
 	}
-	if got := readFile(t, done); !strings.HasPrefix(got, nos.Day0Mount+":") || !strings.Contains(got, "/usr/sbin") {
+	if got := readFile(t, done); !strings.HasPrefix(got, nos.ScriptBin+":"+nos.Day0Mount+":") || !strings.Contains(got, "/usr/sbin") {
 		t.Errorf("script PATH = %q", got)
 	}
 	h := srv.headers[0]
@@ -223,10 +224,14 @@ func TestCumulusDaemonDHCPRetry(t *testing.T) {
 	if st.State != stateSuccess || st.Attempts != 3 || st.Source != "dhcp-239" {
 		t.Errorf("status = %+v", st)
 	}
+	// the retries are one run: PROV-COUNT is the runs before it
 	for i, h := range srv.headers {
-		if got := h.Get("CUMULUS-PROV-COUNT"); got != fmt.Sprint(i) {
+		if got := h.Get("CUMULUS-PROV-COUNT"); got != "0" {
 			t.Errorf("attempt %d: PROV-COUNT %s", i, got)
 		}
+	}
+	if n := newCumulus(c, false).load().Count; n != 1 {
+		t.Errorf("PROV-COUNT after the run: %d", n)
 	}
 	if !strings.Contains(readFile(t, filepath.Join(c.clDir, "ztp_state.log")), "Retrying") {
 		t.Error("no Retrying in the log")
@@ -256,8 +261,12 @@ func TestCumulusFailureGivesUp(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 400*time.Millisecond)
 	defer cancel()
 	newCumulus(c, false).daemon(ctx)
-	if len(srv.headers) != 3 {
-		t.Errorf("%d attempts, want 3 (CUMULUS-PROV-MAX)", len(srv.headers))
+	// one run: retried until its window closed, counted once
+	if len(srv.headers) < 2 {
+		t.Errorf("%d attempts in the window", len(srv.headers))
+	}
+	if n := newCumulus(c, false).load().Count; n != 1 {
+		t.Errorf("PROV-COUNT %d after one failed run", n)
 	}
 	st := status(t, c)
 	if st.State != stateFailed || st.ExitCode != 3 {
@@ -271,6 +280,18 @@ func TestCumulusFailureGivesUp(t *testing.T) {
 	}
 	if r := newCumulus(c, false).load(); r.Result != "failed" || r.State != "enabled" {
 		t.Errorf("state %+v", r)
+	}
+	// at CUMULUS-PROV-MAX runs, ZTP fetches nothing more until ztp -R
+	z := newCumulus(c, false)
+	st2 := z.load()
+	st2.Count = c.provMax
+	z.store(st2)
+	n := len(srv.headers)
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel2()
+	newCumulus(c, false).daemon(ctx2)
+	if len(srv.headers) != n || !strings.Contains(status(t, c).Message, "reached CUMULUS-PROV-MAX 3") {
+		t.Errorf("at PROV-MAX: %d more fetches, status %+v", len(srv.headers)-n, status(t, c))
 	}
 }
 
@@ -734,5 +755,40 @@ func TestDaemonFlags(t *testing.T) {
 	c2.loadDaemonOptions()
 	if c2.reloadCmd != "my-reload" || c2.cfgdbSet != "redis-cli -n 4 hset" {
 		t.Errorf("daemon options not kept: %q %q", c2.reloadCmd, c2.cfgdbSet)
+	}
+}
+
+// A script option 239 names runs in eth0's VRF, mgmt, through `ip vrf exec` (clsys), as Cumulus's
+// DHCP hook runs it there; one ztp -r names, or on a switch with no mgmt, runs as ztp was started.
+func TestCumulusDHCPScriptInMgmtVRF(t *testing.T) {
+	c, d := testConfig(t)
+	z := newCumulus(c, false)
+	dhcp, manual := clSource{"ZTP DHCP", "dhcp-239", "http://x/ztp.sh"}, clSource{"ZTP Manual", "manual", "http://x/ztp.sh"}
+	if v := z.scriptVRF(dhcp); v != "" {
+		t.Errorf("no mgmt VRF: %q", v)
+	}
+	c.vrfExists = func(v string) bool { return v == "mgmt" }
+	if v := z.scriptVRF(dhcp); v != "mgmt" {
+		t.Errorf("a DHCP script's VRF: %q", v)
+	}
+	if v := z.scriptVRF(manual); v != "" {
+		t.Errorf("ztp -r's VRF: %q", v)
+	}
+	ipLog := filepath.Join(d, "ip.log")
+	ip := filepath.Join(d, "ip")
+	if err := os.WriteFile(ip, []byte("#!/bin/sh\necho \"$*\" >> "+ipLog+"\nshift 3\nexec \"$@\"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	c.ipCmd = ip
+	done := filepath.Join(d, "ran")
+	code, err := c.runScriptIn(context.Background(), "mgmt", []byte("#!/bin/sh\ntouch "+done+"\n"), io.Discard, nil)
+	if err != nil || code != 0 {
+		t.Fatalf("run: %d %v", code, err)
+	}
+	if got := readFile(t, ipLog); !strings.HasPrefix(got, "vrf exec mgmt ") {
+		t.Errorf("the script's ip: %q", got)
+	}
+	if _, err := os.Stat(done); err != nil {
+		t.Errorf("the script did not run: %v", err)
 	}
 }
