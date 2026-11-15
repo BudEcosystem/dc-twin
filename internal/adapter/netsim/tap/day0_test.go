@@ -257,6 +257,38 @@ func TestPlanDay0BinariesFromEnvironment(t *testing.T) {
 	}
 }
 
+// dsx-day0 on GB300 NVL72 racks: both management switches of each rack leave the factory, their
+// management ports on the aggregation switch, and the site's servers attach at ports nothing else
+// is cabled to.
+func TestPlanDSXDay0GB300(t *testing.T) {
+	b, err := os.ReadFile("../../../../examples/estates/dsx-day0-gb300.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	est := &schema.Estate{}
+	if err := schema.Decode(b, est); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("DCTWIN_DAY0_BINARIES", "/opt/dctwin-day0")
+	p, err := BuildPlan(compileModel(t, est), est, nil, "x86_64")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var factory []string
+	for _, sp := range p.Switches {
+		if sp.Config.Factory != nil {
+			factory = append(factory, sp.Device.Path)
+		}
+	}
+	sort.Strings(factory)
+	if want := "site-1/hall-a/r01/mgmt-switch-1 site-1/hall-a/r01/mgmt-switch-2 site-1/hall-a/r02/mgmt-switch-1 site-1/hall-a/r02/mgmt-switch-2"; strings.Join(factory, " ") != want {
+		t.Errorf("factory: %v", factory)
+	}
+	if len(p.Mgmt) != 4 || len(p.Attach) != 3 {
+		t.Errorf("%d management ports, %d attached", len(p.Mgmt), len(p.Attach))
+	}
+}
+
 // A DSX day 0 (18 — Z7d): the factory OOB leaves' management ports lease through the aggregation
 // switch the twin configures, and NVCM's blueprint has each leaf's BMC segment as VLAN 201 in
 // VRF OOB, the aggregation switch as the device NVCM does not provision, and an EVPN peering
