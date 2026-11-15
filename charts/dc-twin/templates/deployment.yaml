@@ -193,12 +193,13 @@ spec:
             {{- toYaml .Values.resources | nindent 12 }}
           securityContext:
             {{- if $tap }}
-            # the substrate makes namespaces, TAPs, bridges and VRFs, and opens the switches'
+            # the substrate makes namespaces, TAPs, bridges and VRFs, and opens the switches'; it
+            # names its namespaces in /run/netns, as ip netns does
             privileged: true
             runAsUser: 0
             runAsGroup: 0
             runAsNonRoot: false
-            readOnlyRootFilesystem: true
+            readOnlyRootFilesystem: false
             {{- else }}
             {{- toYaml .Values.securityContext | nindent 12 }}
             {{- end }}
