@@ -15,6 +15,7 @@ COPY cmd cmd
 COPY internal internal
 COPY packs packs
 COPY stacks stacks
+COPY policies policies
 RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags="-s -w" -o /out/dctwin ./cmd/dctwin
 # the state and assets directories, owned by the nonroot user the image runs as
 RUN mkdir -p /out/var/lib/dctwin/state /out/var/lib/dctwin/assets

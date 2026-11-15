@@ -29,6 +29,7 @@ on:
       - internal/**
       - packs/**
       - stacks/**
+      - policies/**
       - console/**
       - examples/**
       - charts/dc-twin/Chart.yaml

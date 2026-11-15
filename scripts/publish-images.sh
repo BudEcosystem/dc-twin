@@ -176,7 +176,7 @@ publish_sonic() { # <tag> <url> <sha256> <repository>
 
 publish_twin() {
   local commit version tags=()
-  clean Dockerfile go.mod go.sum cmd internal packs stacks console examples LICENSE charts/dc-twin/Chart.yaml || return 1
+  clean Dockerfile go.mod go.sum cmd internal packs stacks policies console examples LICENSE charts/dc-twin/Chart.yaml || return 1
   commit=$(git -C "$root" rev-parse --short=12 HEAD)
   version=$(sed -n 's/^appVersion: *"\{0,1\}\([^"]*\)"\{0,1\} *$/\1/p' "$root/charts/dc-twin/Chart.yaml")
   if [ -z "$version" ]; then
