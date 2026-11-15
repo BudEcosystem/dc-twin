@@ -214,8 +214,10 @@ image pulls it: one of the twin's own (`dctwin-nos-*`, `dctwin-sonic-*`) from
 the twin names it; one named with its own registry, SONiC's switch image by digest, from there.
 `scripts/linux-substrate-e2e.sh` pulls from `REGISTRY` before building or fetching anything.
 `scripts/publish-images.sh` publishes them (run by `.github/workflows/images.yml`): the six images
-the e2e script builds and its runner, for amd64 and arm64, and SONiC's four sidecars and switch
-image. A changed image under a published tag is refused.
+the e2e script builds and its runner, for amd64 and arm64, SONiC's four sidecars and switch
+image, and the twin itself as `charts/dc-twin` runs it (`dc-twin:sha-<commit>`, and the chart's
+`appVersion` once). A changed image under a published tag is refused, and so is a context with
+uncommitted changes.
 - Unit: `TestEnsure` (a fake Engine: pulled and tagged, already present, no registry, a pull the
   registry refuses inside a 200 stream, SONiC's image from its own registry), `TestPlanRegistry`,
   `TestPublishedImagesMatchTheE2EScript` (the e2e script, the publish script and the workflow's

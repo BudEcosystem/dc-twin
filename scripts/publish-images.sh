@@ -5,7 +5,7 @@
 # names it. .github/workflows/images.yml runs it; by hand it needs docker with buildx (and QEMU's
 # binfmt for the other architecture), skopeo, and a login to the registry.
 #
-#   REGISTRY=ghcr.io/budecosystem scripts/publish-images.sh [built|sonic|all]   (all: the default)
+#   REGISTRY=ghcr.io/budecosystem scripts/publish-images.sh [built|sonic|twin|all]   (all: the default)
 #   DRY_RUN=1 …     prints what it would build and push, and reads nothing from the registry
 #
 # What it publishes:
@@ -16,12 +16,17 @@
 #          artifacts that expire: fetched at the pinned build, checked against their sha256 and
 #          pushed under the twin's tags (linux/amd64, all SONiC builds); and its switch image,
 #          copied by digest (the copy keeps its digest) under its build's version, for safekeeping
+#   twin   the twin itself, as charts/dc-twin runs it (the repository's Dockerfile, which
+#          cross-compiles, so neither architecture builds under emulation): every commit's as
+#          dc-twin:sha-<commit>, and the chart's appVersion (charts/dc-twin/Chart.yaml) once, from
+#          the first commit that publishes it; bump appVersion to publish another
 #
 # A tag is published once. A host that has a tag never pulls it again, so a published tag whose
 # content changed would leave hosts running different images under one name: a built image whose
 # context differs from its published tag's fails here, saying to give it a new tag where it is
 # named (internal/nos, scripts/linux-substrate-e2e.sh and this list). One already published with
-# the same context is left as it is, so a run publishes only what changed.
+# the same context is left as it is, so a run publishes only what changed. What is built is the
+# checkout's committed content: a context with uncommitted changes is refused.
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 reg=${REGISTRY:?REGISTRY=<host>/<path>, e.g. ghcr.io/budecosystem}
@@ -82,9 +87,21 @@ published_identity() {
   skopeo inspect --override-os linux --override-arch amd64 --format '{{index .Labels "dc-twin.context"}}' "docker://$1" 2>/dev/null | sed 's/<no value>//'
 }
 
+# clean <path>…: the paths hold only committed content, which is what an image's label says it was
+# built from (a dry run only warns)
+clean() {
+  local dirty
+  dirty=$(git -C "$root" status --porcelain -- "$@")
+  [ -z "$dirty" ] && return 0
+  echo "${dry:+warning: }$* has uncommitted changes; publish from a clean checkout:" >&2
+  echo "$dirty" | sed 's/^/  /' >&2
+  [ -n "$dry" ]
+}
+
 publish_built() { # <tag> <context> [<base tag> <base context>]
   local tag=$1 ctx=$2 base=${3:-} basectx=${4:-}
   local id
+  clean "$ctx" ${basectx:+"$basectx"} || return 1
   id=$(identity "$ctx" ${basectx:+"$basectx"})
   if published "$reg/$tag"; then
     local have
@@ -129,6 +146,31 @@ publish_sonic() { # <tag> <url> <sha256> <repository>
   rm -f "$work/$repo.gz"
 }
 
+publish_twin() {
+  local commit version tags=()
+  clean Dockerfile go.mod go.sum cmd internal packs stacks console examples LICENSE charts/dc-twin/Chart.yaml || return 1
+  commit=$(git -C "$root" rev-parse --short=12 HEAD)
+  version=$(sed -n 's/^appVersion: *"\{0,1\}\([^"]*\)"\{0,1\} *$/\1/p' "$root/charts/dc-twin/Chart.yaml")
+  if [ -z "$version" ]; then
+    echo "FAIL: no appVersion in charts/dc-twin/Chart.yaml" >&2
+    return 1
+  fi
+  if published "$reg/dc-twin:sha-$commit"; then
+    echo "dc-twin:sha-$commit: published"
+  else
+    tags+=(-t "$reg/dc-twin:sha-$commit")
+  fi
+  if published "$reg/dc-twin:$version"; then
+    echo "dc-twin:$version: published (bump appVersion in charts/dc-twin/Chart.yaml to publish another)"
+  else
+    tags+=(-t "$reg/dc-twin:$version")
+  fi
+  [ ${#tags[@]} -gt 0 ] || return 0
+  echo "dc-twin: building at $commit for $platforms"
+  run docker buildx build --platform "$platforms" --label "dc-twin.context=$(git -C "$root" rev-parse HEAD)" \
+    "${tags[@]}" -f "$root/Dockerfile" --push "$root"
+}
+
 publish_sonic_vs() {
   local to="$reg/docker-sonic-vs:$sonic_vs_version"
   if published "$to"; then
@@ -139,7 +181,7 @@ publish_sonic_vs() {
   run skopeo copy --all "docker://$sonic_vs" "docker://$to"
 }
 
-case $what in built|sonic|all) ;; *) echo "usage: publish-images.sh [built|sonic|all]" >&2; exit 2 ;; esac
+case $what in built|sonic|twin|all) ;; *) echo "usage: publish-images.sh [built|sonic|twin|all]" >&2; exit 2 ;; esac
 failed=0
 case $what in built|all)
   for b in "${built[@]}"; do
@@ -154,4 +196,5 @@ case $what in sonic|all)
   done
   publish_sonic_vs || failed=1 ;;
 esac
+case $what in twin|all) publish_twin || failed=1 ;; esac
 exit $failed

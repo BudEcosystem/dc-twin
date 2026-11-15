@@ -8,8 +8,14 @@ pod runs unprivileged, as a non-root user with a read-only root filesystem.
 
 ## Install
 
-The chart runs the image the repository's `Dockerfile` builds. No image is published yet, so
-build it where your cluster can pull it:
+The chart runs the image the repository's `Dockerfile` builds, which `.github/workflows/images.yml`
+publishes to `ghcr.io/budecosystem/dc-twin` for amd64 and arm64: the chart's `appVersion` (its
+default tag) once, and every commit on `main` as `sha-<commit>` (set `image.tag` to pin one).
+GitHub's registry keeps a new package private: make it public, or give the cluster a pull secret
+(`imagePullSecrets`) for a token that can read packages.
+
+Before the workflow has published it, or to run your own change, build it where your cluster can
+pull it:
 
 ```bash
 make image                                   # ghcr.io/budecosystem/dc-twin:<appVersion>

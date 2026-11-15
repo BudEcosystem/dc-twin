@@ -1376,7 +1376,10 @@ artifacts, which expire) are published to a registry (`scripts/publish-images.sh
 that runs it changes, and a host with no registry builds as before. An image named with a registry
 of its own, SONiC's switch image by digest, is pulled from there. A tag is published once:
 publishing labels each image with the git tree it is built from and refuses to push a changed one
-under a published tag, since a host that has the tag never pulls it again. **Why:** a fresh host
+under a published tag, since a host that has the tag never pulls it again. The twin itself, as
+`charts/dc-twin` runs it, is published by the same workflow: each commit's image as
+`dc-twin:sha-<commit>`, and the chart's `appVersion` once, from the first commit that publishes
+it (its content changes with every commit, so its version is what names a release). **Why:** a fresh host
 (after a reinstall, a new lab) spends most of its first run building images and fetching SONiC's,
 and SONiC's pinned build can expire. **Reversed if:** the images move to content-addressed tags
 (then any changed content is a new tag by construction), or the twin is only ever run where it is

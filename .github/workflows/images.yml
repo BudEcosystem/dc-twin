@@ -1,8 +1,10 @@
 # The twin's own images, published to GitHub's container registry so a host pulls them rather
 # than building or fetching them (spec.adapters.network.nos.registry, DCTWIN_REGISTRY;
-# scripts/linux-substrate-e2e.sh's REGISTRY). scripts/publish-images.sh does the work: the images
-# this repository builds, for amd64 and arm64, and SONiC's, whose build artifacts expire. A tag is
-# published once; a changed image under a published tag fails the job, saying to give it a new tag.
+# scripts/linux-substrate-e2e.sh's REGISTRY), and the twin itself as charts/dc-twin runs it.
+# scripts/publish-images.sh does the work: the images this repository builds, for amd64 and arm64;
+# SONiC's, whose build artifacts expire; and the twin, as dc-twin:sha-<commit> and the chart's
+# appVersion. A tag is published once; a changed image under a published tag fails the job, saying
+# to give it a new tag.
 name: images
 on:
   push:
@@ -15,6 +17,17 @@ on:
       - test/linuxnet/nos-hbn/**
       - test/linuxnet/ansible/**
       - compat/netbox-ansible/**
+      # the twin itself (the Dockerfile's inputs, and the chart's appVersion)
+      - Dockerfile
+      - go.mod
+      - go.sum
+      - cmd/**
+      - internal/**
+      - packs/**
+      - stacks/**
+      - console/**
+      - examples/**
+      - charts/dc-twin/Chart.yaml
       - scripts/publish-images.sh
       - .github/workflows/images.yml
   workflow_dispatch:
