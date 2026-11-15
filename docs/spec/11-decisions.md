@@ -1384,3 +1384,22 @@ it (its content changes with every commit, so its version is what names a releas
 and SONiC's pinned build can expire. **Reversed if:** the images move to content-addressed tags
 (then any changed content is a new tag by construction), or the twin is only ever run where it is
 built.
+
+### D82 — The chart runs the tap substrate in a privileged pod, with its engine beside the twin
+*Built (2026-11-16).* `charts/dc-twin` with `substrate: tap` runs an estate with real NOSes and
+day 0 (18) in Kubernetes. The pod is privileged and shares its process namespace. Its engine is a
+sidecar serving Podman's Docker-compatible API on a socket in a shared volume (`DOCKER_HOST`), so
+the twin drives it as it drives a host's, and opens each switch's network namespace through
+`/proc/<pid>`, as `nos.Docker` requires. The twin's state directory is at one path in both,
+because the twin hands the engine paths in it to mount into switches; the day-0 programs, now built
+into the twin's image (`/opt/dctwin/day0`), are copied by the engine to a shared directory the twin
+is told of by `DCTWIN_DAY0_BINARIES` (after the estate's `nos.day0Binaries`, before the directory
+beside the twin's executable). The engine pulls the twin's switch images from a registry (D81),
+logged in with a pull secret, since Podman's API reads its own credentials where Docker's needs
+the client's. The site's day-0 servers are containers the engine starts before the twin, attached
+by name as on a host: DHCP and ZTP happen on a switch's management network, which no other pod is
+on. **Why:** GPU Foundry, the software under test, runs in a cluster and is integrated against a
+twin at a URL; day 0 was otherwise only on a Linux host with the e2e script. **Amends:** D34 (the
+loopback substrate is the chart's default, no longer its only one). **Reversed if:** a cluster
+network can put a pod on a switch's management segment (Multus or a CNI the twin drives), so the
+day-0 servers run as their own pods; or the engine is replaced by the node's containerd.

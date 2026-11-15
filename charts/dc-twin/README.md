@@ -1,10 +1,12 @@
 # dc-twin Helm chart
 
 Runs one dc-twin estate per release, in one pod: the engine, every adapter, the console and the
-site gateway. The twin runs on the loopback substrate ([D34](../../docs/spec/11-decisions.md)):
-each device endpoint is a port on the pod's loopback, and software under test reaches a device
-at its site address through the **site gateway**, an HTTP CONNECT proxy exposed as a Service. The
-pod runs unprivileged, as a non-root user with a read-only root filesystem.
+site gateway. By default the twin runs on the loopback substrate
+([D34](../../docs/spec/11-decisions.md)): each device endpoint is a port on the pod's loopback,
+and software under test reaches a device at its site address through the **site gateway**, an
+HTTP CONNECT proxy exposed as a Service. The pod runs unprivileged, as a non-root user with a
+read-only root filesystem. For real switch operating systems and day 0, see
+[The tap substrate](#the-tap-substrate-real-switches-and-day-0).
 
 ## Install
 
@@ -143,6 +145,38 @@ A new pod is a new twin, started from the chart's estate. An **Apply** from the 
 restarts the estate inside the pod and lasts until the pod restarts, so **Export** a design you
 want to keep and install it with `estate.file`.
 
+## The tap substrate: real switches and day 0
+
+An estate whose fabrics run a real `nos`, or are brought up by the software under test
+(`fabric.bringUp: factory`, [18](../../docs/spec/18-day0.md)), needs the tap substrate
+(`spec.adapters.network.substrate: tap`): namespaces, TAPs and bridges, and the switches as
+containers. `substrate: tap` runs it in the pod
+([D82](../../docs/spec/11-decisions.md#d82--the-chart-runs-the-tap-substrate-in-a-privileged-pod-with-its-engine-beside-the-twin)):
+
+- **The pod is privileged**, and the twin and its engine run as root. Their network is the pod's
+  own, but the kernel is the node's: give the twin a node you would give a container host.
+- **An engine sidecar** (Podman's Docker-compatible API) runs the switches. It shares the pod's
+  process namespace, so the twin opens each switch's network namespace itself, as on a host. Its
+  image store is a volume (`tap.engine.persistence`), so switch images are pulled once.
+- **The twin's switch images** are pulled from `tap.registry`, logging in with
+  `tap.registryAuthSecret` (a `kubernetes.io/dockerconfigjson` Secret; by default the first of
+  `imagePullSecrets`).
+- **The day-0 programs** (`dctwin-day0`) are copied out of the twin's image, so an estate leaves
+  `spec.adapters.network.nos.day0Binaries` unset.
+- **The site's day-0 servers** are containers the engine starts before the twin
+  (`tap.containers`); the estate's `spec.adapters.network.attach` cables each to a switch port by
+  its `container` name. A DHCP and ZTP server has to sit on the switches' management network, so it
+  runs here, not as a pod of its own; everything else reaches the switches at their leases through
+  the site gateway (SSH, NVUE, gNMI).
+
+```bash
+helm install day0 charts/dc-twin -n dc-twin-day0 \
+  --set substrate=tap \
+  --set imagePullSecrets[0].name=bud-registry \
+  --set-file estate.file=my-day0.yaml \
+  -f day0-containers.yaml   # tap.containers: the attach targets
+```
+
 ## Values
 
 | Value | Default | |
@@ -162,15 +196,22 @@ want to keep and install it with `estate.file`.
 | `allowTCG`, `extraArgs`, `extraEnv` | | More for `dctwin up` |
 | `resources` | requests 100m, 256Mi | `mixed-hall` (354 devices) idles at about 140 MiB |
 | `startupProbe`, `readinessProbe`, `livenessProbe` | | Each runs `dctwin status` in the container |
+| `substrate` | `loopback` | `tap` for real NOSes and day 0: a privileged pod ([above](#the-tap-substrate-real-switches-and-day-0)) |
+| `tap.engine.image`, `.resources` | `quay.io/podman/stable:v5.2.2` | The engine sidecar |
+| `tap.engine.persistence.enabled`, `.size`, `.storageClass`, `.existingClaim` | `true`, `20Gi`, default class | The engine's image store |
+| `tap.registry`, `tap.registryAuthSecret` | `registry.bud.studio/gpu-foundry`, the first pull secret | Where the twin's switch images come from (`DCTWIN_REGISTRY`) |
+| `tap.containers` | `[]` | `name`, `image`, `args`, `env`, `network` (default `none`): started before the twin, for `attach` |
 
 The pod and container security contexts, the service account (it mounts no token: the twin calls
 no Kubernetes API), node selector, tolerations and affinity are in [values.yaml](values.yaml).
 
 ## What it does not run
 
-- **`vm` devices, the TAP substrate and real NOSes.** They need `/dev/kvm` and QEMU, root, and a
-  container engine. `up` refuses an estate with `vm` devices and says why; run those on a Linux
-  host ([09](../../docs/spec/09-runtime.md)).
+- **`vm` devices.** They need `/dev/kvm` and QEMU. `up` refuses an estate with `vm` devices and
+  says why; run those on a Linux host ([09](../../docs/spec/09-runtime.md)).
+- **Real NOSes and day 0 without `substrate: tap`.** On the default loopback substrate every
+  switch is a model.
+- **An `attach` by `netns`** with `substrate: tap`: attach a container from `tap.containers`.
 - **IPMI, SNMP and DHCP from outside the pod.** They are UDP, and the gateway proxies TCP. Their
   endpoints answer inside the pod (`kubectl exec … -- dctwin endpoints`).
 - **Users and roles.** A console at a URL has one shared token until the control API has OIDC

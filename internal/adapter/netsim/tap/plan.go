@@ -64,8 +64,8 @@ type Plan struct {
 	// (spec.adapters.network.nos.registry, else DCTWIN_REGISTRY; "" for none).
 	Registry string
 	// Day0Binaries is the directory of the twin's day-0 programs on the Docker host, mounted in
-	// every factory switch (spec.adapters.network.nos.day0Binaries, else beside the twin's own
-	// executable); "" when there is none.
+	// every factory switch (spec.adapters.network.nos.day0Binaries, else DCTWIN_DAY0_BINARIES,
+	// else beside the twin's own executable); "" when there is none.
 	Day0Binaries string
 }
 
@@ -747,7 +747,13 @@ func planFactory(p *Plan, m *model.Model, est *schema.Estate, byDev map[*model.D
 	if scale <= 0 {
 		scale = 1
 	}
-	if dir := est.Spec.Adapters.Network.NOS.Day0Binaries; dir != "" {
+	// a twin in a pod beside its Docker host (the chart's tap substrate) is told where that host
+	// keeps the day-0 programs, as it is told the registry
+	dir := est.Spec.Adapters.Network.NOS.Day0Binaries
+	if dir == "" {
+		dir = os.Getenv("DCTWIN_DAY0_BINARIES")
+	}
+	if dir != "" {
 		if !filepath.IsAbs(dir) {
 			return fmt.Errorf("spec.adapters.network.nos.day0Binaries %q: an absolute path on the Docker host", dir)
 		}

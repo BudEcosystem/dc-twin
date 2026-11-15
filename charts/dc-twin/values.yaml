@@ -1,6 +1,7 @@
-# dc-twin: one release runs one estate, in one pod, on the loopback substrate (D34): every device
-# endpoint is a port on the pod's loopback, and software under test reaches the devices through
-# the site gateway.
+# dc-twin: one release runs one estate, in one pod. On the loopback substrate (D34, the default)
+# every device endpoint is a port on the pod's loopback, and software under test reaches the
+# devices through the site gateway. On the tap substrate (D82) the pod is privileged and runs real
+# switch operating systems in a container engine beside the twin, as day 0 (18) needs.
 
 image:
   repository: registry.bud.studio/gpu-foundry/dc-twin
@@ -75,6 +76,42 @@ networkPolicy:
   controlFrom: []
     # - namespaceSelector:
     #     matchLabels: { kubernetes.io/metadata.name: ingress-nginx }
+
+# The network substrate: loopback (D34), unprivileged; or tap (D82), for an estate whose fabrics
+# run a real nos or are brought up by the software under test (fabric.bringUp: factory), with
+# spec.adapters.network.substrate: tap. tap makes the pod privileged: its twin and its engine run
+# as root, with the node's kernel, so give it a node you would give a container host.
+substrate: loopback
+tap:
+  # The container engine the switches run in: Podman's Docker-compatible API, in a sidecar that
+  # shares the pod's process namespace, so the twin can open each switch's network namespace.
+  engine:
+    image:
+      repository: quay.io/podman/stable
+      tag: v5.2.2
+      pullPolicy: IfNotPresent
+    resources: {}
+    # The engine's image store: the switch images (about 1 GB for generic/nvue-frr) are pulled once.
+    persistence:
+      enabled: true
+      existingClaim: ""
+      storageClass: ""
+      accessModes: [ReadWriteOnce]
+      size: 20Gi
+  # Where the engine pulls the twin's own switch images from (DCTWIN_REGISTRY), and the
+  # kubernetes.io/dockerconfigjson Secret it logs in with; "" uses the first of imagePullSecrets.
+  registry: registry.bud.studio/gpu-foundry
+  registryAuthSecret: ""
+  # Containers the engine starts before the twin: what the estate's spec.adapters.network.attach
+  # names by `container`, cabled to a switch port when the twin comes up, such as the site's day-0
+  # DHCP and ZTP servers. They start with no network unless `network` names one of the engine's.
+  # (An attach by `netns` is not supported here.)
+  containers: []
+    # - name: nvcm-edge
+    #   image: registry.bud.studio/gpu-foundry/nvcm-kea:1.4.1
+    #   args: []
+    #   env: { KEA_CONFIG: /etc/kea/kea-dhcp4.conf }
+    #   network: none
 
 # Accept vm guests of another architecture under TCG (dctwin up --allow-tcg).
 allowTCG: false
