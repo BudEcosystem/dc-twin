@@ -66,6 +66,17 @@ func Evaluate(d Design, obs map[string]Observed) []Verdict {
 			names[o.Hostname] = append(names[o.Hostname], s.Path)
 		}
 	}
+	// every access segment of the design, as one cover: a tool's VLAN serving a segment in a wider
+	// subnet is no wider than this (NVCM's VLAN 201 is exactly it)
+	var segs []netip.Prefix
+	for _, s := range d.Switches {
+		for _, v := range s.Vlans {
+			if g, err := netip.ParsePrefix(v.Gateway); err == nil {
+				segs = append(segs, g.Masked())
+			}
+		}
+	}
+	segCover := nvcmCover(segs)
 	out := make([]Verdict, 0, len(d.Switches))
 	for _, s := range d.Switches {
 		if !s.Factory {
@@ -80,7 +91,7 @@ func Evaluate(d Design, obs map[string]Observed) []Verdict {
 		if d.Plan == "tool" {
 			diffs = structural(s, o, names)
 		} else {
-			diffs = exact(s, o, loopbacks[s.Fabric])
+			diffs = exact(s, o, loopbacks[s.Fabric], segCover)
 		}
 		v := Verdict{Path: s.Path, Converged: len(diffs) == 0, Diffs: diffs}
 		v.Phase = phase(o, v.Converged)
@@ -105,8 +116,9 @@ func phase(o Observed, converged bool) string {
 	return PhaseFactory
 }
 
-// exact compares a switch with its design value by value (plan: given).
-func exact(s Switch, o Observed, loopbacks map[string]Switch) []string {
+// exact compares a switch with its design value by value (plan: given). segCover is the cover of
+// every access segment of the design (servesSegment).
+func exact(s Switch, o Observed, loopbacks map[string]Switch, segCover netip.Prefix) []string {
 	var diffs []string
 	if o.Hostname != s.Hostname {
 		diffs = append(diffs, fmt.Sprintf("hostname is %s, the design says %s", orNone(o.Hostname), s.Hostname))
@@ -144,7 +156,7 @@ func exact(s Switch, o Observed, loopbacks map[string]Switch) []string {
 	for _, v := range sortedVlans(s.Vlans) {
 		got, ok := o.Vlans[v.Name]
 		switch {
-		case !ok && servesSegment(o, v.Gateway):
+		case !ok && servesSegment(o, v.Gateway, segCover):
 			// the segment served on a VLAN of the tool's own numbering and span (NVIDIA Config
 			// Manager's OOB-Leaf: VLAN 201, one subnet across its leaves holding every rack's
 			// segment, its gateway the VRR, 18 — Z7d)
@@ -263,16 +275,18 @@ func sortedVlans(v []Vlan) []Vlan {
 }
 
 // servesSegment reports whether a VLAN interface of the switch has an address in a subnet that
-// holds the design's segment (the gateway's, with its prefix length): the segment's hosts are
-// on a subnet the switch routes for, whatever its VLAN and span.
-func servesSegment(o Observed, gateway string) bool {
+// holds the design's segment (the gateway's, with its prefix length) and is no wider than the
+// cover of the design's segments: the segment's hosts are on a subnet the switch routes for,
+// whatever its VLAN and span, and that subnet is the design's access space, not a supernet of
+// everything (a /20, a /8).
+func servesSegment(o Observed, gateway string, cover netip.Prefix) bool {
 	gw, err := netip.ParsePrefix(gateway)
-	if err != nil {
+	if err != nil || !cover.IsValid() {
 		return false
 	}
 	for _, as := range o.VlanAddrs {
 		for _, a := range as {
-			if p, err := netip.ParsePrefix(a); err == nil && p.Bits() <= gw.Bits() && p.Masked().Contains(gw.Addr()) {
+			if p, err := netip.ParsePrefix(a); err == nil && p.Bits() <= gw.Bits() && p.Bits() >= cover.Bits() && p.Masked().Contains(gw.Addr()) {
 				return true
 			}
 		}

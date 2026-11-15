@@ -79,6 +79,19 @@ func startFoundry(t *testing.T, r *day0Run, keep bool, extra ...string) *foundry
 		args = append(args, "--keep-running")
 	}
 	for _, x := range extra {
+		if strings.HasPrefix(x, "--inputs=") {
+			// the case names where Foundry reads its design (NetBox, in place of the day-0 files:
+			// foundry-site refuses both at once)
+			for i, a := range args {
+				if strings.HasPrefix(a, "--inputs=") {
+					args = append(args[:i], args[i+1:]...)
+					break
+				}
+			}
+			if x == "--inputs=" {
+				continue
+			}
+		}
 		if strings.HasPrefix(x, "--observe=") {
 			// the case names what Foundry observes (none, where the OOB fabric is the factory one)
 			for i, a := range args {
@@ -376,15 +389,42 @@ func leafSpineCables(t *testing.T, r *day0Run) (string, string) {
 // its switch-management relay. Every server BMC then leases from the BMC DHCP (a Kea standing in
 // for NICo's forge-dhcp-server, one subnet per rack, answering the relay's giaddr) through the
 // relays Foundry rendered, with nothing configured by hand.
-func TestDay0FoundryDSX(t *testing.T) {
+// TestDay0FoundryDSX: Foundry reads the design from the day-0 files the twin hands a site.
+func TestDay0FoundryDSX(t *testing.T) { foundryDSX(t, false) }
+
+// TestDay0FoundryDSXNetBox is the same lane with Foundry reading the design from NetBox instead
+// (E6): NetBox 4.2.9 beside the site's Kea, loaded with stack-inputs/day0/netbox through NetBox's
+// own CSV import and each access port's untagged VLAN over REST, and foundry-site run with
+// --netbox-url, --netbox-token-file and --netbox-site in place of --inputs. What it proves is that
+// the design survives the round trip through a site's own source of truth: the same switches,
+// management networks, uplinks and BMC segments bring the same fabric up.
+func TestDay0FoundryDSXNetBox(t *testing.T) { foundryDSX(t, true) }
+
+func foundryDSX(t *testing.T, fromNetBox bool) {
 	d, err := nosRuntime(t)
 	if err != nil {
 		t.Skipf("no Docker Engine: %v", err)
 	}
 	bmcName := "dctwin-bmcdhcp-" + strconv.Itoa(os.Getpid())
 	bmc := startKeaContainer(t, d, bmcName)
-	c := foundryCase("dsx", nos.NVUEFRR, "5.14.0")
+	// its own estate name, so the two DSX lanes can run one beside the other, and short: the
+	// estate names the fabric, which a day-0 tool may hold to a DNS label of at most 32 characters
+	// (foundry-site does), and the lane runner adds its own suffix
+	name := "dsx"
+	if fromNetBox {
+		name = "dsx-nb"
+	}
+	c := foundryCase(name, nos.NVUEFRR, "5.14.0")
 	c.file, c.bmcDHCP = "tap-day0-dsx.yaml", bmcName
+	if fromNetBox {
+		// NetBox's first start migrates its database: about five minutes in which, at the estate's
+		// default boot time, the switches would boot, find no ZTP option and spend the five minutes
+		// Cumulus's ZTP waits for one. So they boot once the site's tooling is up: 160 m of the
+		// estate's time is eight minutes here (timeScale 0.05), NetBox loaded and Foundry running
+		// well inside it. And a short lease besides, so a switch that did lease before Foundry's
+		// options were in Kea asks again in under a minute rather than holding an hour-old answer
+		c.boot, c.lease = "160m", 90
+	}
 	r := startDay0(t, c)
 	var leaves []day0.Switch
 	var aggLo string
@@ -401,7 +441,14 @@ func TestDay0FoundryDSX(t *testing.T) {
 	aggregationOOB(t, r, leaves, aggLo, false)
 	// the OOB fabric is the factory one: Foundry observes none (its aggregation switch, the
 	// twin's, is factory: false in the design)
-	f := startFoundry(t, r, false, fmt.Sprintf("--relay-target=bmc=10.90.2.10@%s:%d:%d", day0.NVCMOOBVRF, day0.NVCMOOBL3VNI, day0.NVCMOOBL3VLAN), "--observe=")
+	extra := []string{fmt.Sprintf("--relay-target=bmc=10.90.2.10@%s:%d:%d", day0.NVCMOOBVRF, day0.NVCMOOBL3VNI, day0.NVCMOOBL3VLAN), "--observe="}
+	if fromNetBox {
+		// the site's own source of truth in place of the day-0 files, at the site's Kea's address
+		url, token, site := startNetBoxDesign(t, r, "10.90.0.10")
+		extra = append(extra, "--inputs=", "--netbox-url="+url, "--netbox-token-file="+token, "--netbox-site="+site)
+		t.Logf("Foundry reads its design from NetBox at %s, site %s", url, site)
+	}
+	f := startFoundry(t, r, false, extra...)
 	if err := f.wait(t, 26*time.Minute); err != nil {
 		t.Fatalf("foundry-site: %v", err)
 	}

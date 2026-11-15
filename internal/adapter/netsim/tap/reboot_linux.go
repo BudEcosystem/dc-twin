@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/BudEcosystem/dc-twin/internal/day0/clsys"
 	"github.com/BudEcosystem/dc-twin/internal/engine"
@@ -72,51 +73,78 @@ func (s *Substrate) reboot(ctx context.Context, sw *nosSwitch, via string) error
 	}
 	s.eng.LogRead(engine.Request{Path: sw.plan.Device.Path, Canonical: canonical, Protocol: "nos", Method: via,
 		Target: pending, Source: schema.EventSource{Class: "stack", Principal: "switch"}}, 200)
+	// up: the release's files, the management DHCP client (ifupdown's post-up starts it), ZTP
+	up := func() error {
+		if _, err := exec(nos.Day0Mount + "/dctwin-day0 os-release; ifreload -a; true"); err != nil {
+			return fmt.Errorf("booting: %w", err)
+		}
+		if f.ZTP {
+			if err := s.docker.ExecDetached(s.ctx, sw.c.ID, "sh", "-c", "exec "+nos.Day0Mount+"/dctwin-day0 ztp daemon --nos "+sw.plan.NOS.ZTPFlavour()); err != nil {
+				return fmt.Errorf("its ZTP: %w", err)
+			}
+		}
+		return nil
+	}
+	sw.factoryUp.Store(false)
+	err := s.rebootDown(ctx, sw, pending, exec)
+	if err == nil {
+		err = up()
+	} else {
+		// a reboot the twin could not carry out whole is not left half done: the switch boots the
+		// NOS it has (a later reboot, and the observer, find it up), and the twin says what failed
+		s.eng.Incident("tap", fmt.Sprintf("switch %s's reboot: %v; it boots the NOS it has", sw.plan.Device.Path, err))
+		if uerr := up(); uerr != nil {
+			err = fmt.Errorf("%w; then %v", err, uerr)
+		}
+	}
+	sw.factoryUp.Store(true)
+	return err
+}
+
+// rebootDown takes a switch down for its reboot and, with an install pending, has ONIE install
+// the image and gives the new NOS its factory configuration and login.
+func (s *Substrate) rebootDown(ctx context.Context, sw *nosSwitch, pending string, exec func(string) (string, error)) error {
 	// going down: ZTP and whatever it runs (the script that asked, its reboot waiting) end, the
 	// management port's lease with them (the patterns bracketed so this shell's own command line,
 	// which holds them, does not match)
-	sw.factoryUp.Store(false)
 	if _, err := exec("rm -f " + clsys.RebootFile + " " + clsys.PendingFile + "; pkill -f '[d]ctwin-day0 ztp daemon'; pkill -f '[z]tp-script-'; pkill -x reboot; " +
 		"kill $(cat /run/dhclient." + nos.MgmtIf + ".pid 2>/dev/null) 2>/dev/null; rm -f /run/dhclient." + nos.MgmtIf + ".pid; ip -4 addr flush dev " + nos.MgmtIf + "; true"); err != nil {
 		return fmt.Errorf("going down: %w", err)
 	}
-	if pending != "" {
-		// ONIE: the URL first, then its waterfall, until an image installs (installTime)
-		if out, err := exec("rm -f " + nos.Day0State + "/onie/status.json; until " + nos.Day0Mount + "/dctwin-day0 onie-discover install --url '" +
-			strings.ReplaceAll(pending, "'", "") + "'; do sleep 5; done"); err != nil {
-			return fmt.Errorf("ONIE's install from %s: %w: %s", pending, err, out)
-		}
-		var st struct {
-			Version string `json:"version"`
-		}
-		if b, err := containerFile(sw.c.Pid, nos.Day0State+"/onie/status.json"); err == nil && json.Unmarshal(b, &st) == nil && st.Version != "" {
-			v, err := nvue.ParseVersion(st.Version)
-			if err != nil {
-				return fmt.Errorf("the installed image's version %q: %w", st.Version, err)
-			}
-			sw.nvue.SetBuild(nvue.Build(v))
-		}
-		// a new NOS: its factory configuration and login, in its release's grammar
-		if err := sw.nvue.ResetFactory(ctx); err != nil {
-			return fmt.Errorf("the new NOS's factory configuration: %w", err)
-		}
-		if _, err := exec("echo '" + nvue.User + ":" + nvue.FactoryPassword + "' | chpasswd && chage -d 0 " + nvue.User +
-			" && rm -f /run/dctwin/nvue-user-applied && ztp -R >/dev/null 2>&1; true"); err != nil {
-			return fmt.Errorf("the new NOS's factory login: %w", err)
-		}
+	if pending == "" {
+		return nil
 	}
-	// up: the release's files, the management DHCP client (ifupdown's post-up starts it), ZTP
-	if _, err := exec(nos.Day0Mount + "/dctwin-day0 os-release; ifreload -a; true"); err != nil {
-		return fmt.Errorf("booting: %w", err)
+	// ONIE: the URL first, then its waterfall, until an image installs (installTime), for as long
+	// as the exec waits (rebootInstallWait): a URL that never installs ends the loop in the switch
+	// too, not only the twin's wait for it
+	if out, err := exec(fmt.Sprintf("rm -f %s/onie/status.json; end=$(($(date +%%s) + %d)); until %s/dctwin-day0 onie-discover install --url '%s'; do "+
+		"[ $(date +%%s) -lt $end ] || { echo 'ONIE: no install within %ds'; exit 1; }; sleep 5; done",
+		nos.Day0State, int(rebootInstallWait.Seconds()), nos.Day0Mount, strings.ReplaceAll(pending, "'", ""), int(rebootInstallWait.Seconds()))); err != nil {
+		return fmt.Errorf("ONIE's install from %s: %w: %s", pending, err, out)
 	}
-	if f.ZTP {
-		if err := s.docker.ExecDetached(s.ctx, sw.c.ID, "sh", "-c", "exec "+nos.Day0Mount+"/dctwin-day0 ztp daemon --nos "+sw.plan.NOS.ZTPFlavour()); err != nil {
-			return fmt.Errorf("its ZTP: %w", err)
+	var st struct {
+		Version string `json:"version"`
+	}
+	if b, err := containerFile(sw.c.Pid, nos.Day0State+"/onie/status.json"); err == nil && json.Unmarshal(b, &st) == nil && st.Version != "" {
+		v, err := nvue.ParseVersion(st.Version)
+		if err != nil {
+			return fmt.Errorf("the installed image's version %q: %w", st.Version, err)
 		}
+		sw.nvue.SetBuild(nvue.Build(v))
 	}
-	sw.factoryUp.Store(true)
+	// a new NOS: its factory configuration and login, in its release's grammar
+	if err := sw.nvue.ResetFactory(ctx); err != nil {
+		return fmt.Errorf("the new NOS's factory configuration: %w", err)
+	}
+	if _, err := exec("echo '" + nvue.User + ":" + nvue.FactoryPassword + "' | chpasswd && chage -d 0 " + nvue.User +
+		" && rm -f /run/dctwin/nvue-user-applied && ztp -R >/dev/null 2>&1; true"); err != nil {
+		return fmt.Errorf("the new NOS's factory login: %w", err)
+	}
 	return nil
 }
+
+// rebootInstallWait is how long a reboot's ONIE install may take: within execIn's two minutes.
+const rebootInstallWait = 110 * time.Second
 
 // nvueActions are a factory switch's NVUE actions: @reboot, @reset (system/factory-default) and
 // its ZTP's status (system/ztp).

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -480,5 +481,16 @@ func TestConfirm(t *testing.T) {
 	}
 	if h := showJSON(t, f, "root", "system")["hostname"]; h != "leaf03" {
 		t.Errorf("after --confirm-yes: %v", h)
+	}
+}
+
+// nv action reboot system succeeds when the twin's reboot ends the reboot command, and fails when
+// reboot itself fails.
+func TestRebooted(t *testing.T) {
+	if err := exec.Command("sh", "-c", "kill -TERM $$").Run(); !rebooted(err) {
+		t.Errorf("a reboot ended by a signal: %v not taken as rebooted", err)
+	}
+	if err := exec.Command("sh", "-c", "exit 1").Run(); rebooted(err) {
+		t.Errorf("a reboot that failed: %v taken as rebooted", err)
 	}
 }

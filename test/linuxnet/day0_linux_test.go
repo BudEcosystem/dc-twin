@@ -80,6 +80,11 @@ type day0Case struct {
 	file string
 	// bmcDHCP is the container a DSX estate's BMC DHCP runs in (tap-day0-dsx.yaml)
 	bmcDHCP string
+	// lease is how long the harness's Kea lends an address (0: an hour). A switch reads its ZTP
+	// options from its lease and asks again at half of it, so a case whose tooling takes minutes
+	// to come up (its own DHCP options with it) lends for a short while, as a site does on day 0:
+	// otherwise the switches hold the options of an hour ago and the tooling waits for T1
+	lease int
 }
 
 // day0Run is a running day-0 estate and the tooling around it.
@@ -159,7 +164,7 @@ func startDay0(t *testing.T, c day0Case) *day0Run {
 		keaName, keaIface = c.dhcp, orDefault(c.dhcpIface, "eth0")
 		r.kea = &nos.Container{ID: c.dhcp, Name: c.dhcp}
 	} else {
-		r.kea = startDay0Kea(t, d, keaName, c.reference)
+		r.kea = startDay0Kea(t, d, keaName, c)
 	}
 	onie := "[]"
 	if c.install == "onie" {
@@ -177,6 +182,15 @@ func startDay0(t *testing.T, c day0Case) *day0Run {
 	start := time.Now()
 	r.tw, r.sub, _ = up(t, est)
 	t.Logf("up returned after %s: the OOB fabric configured by the twin, the frontend's switches in factory state", time.Since(start).Round(time.Second))
+	// Kea runs once the twin has attached it (its start script waits for svc0). A configuration it
+	// refuses kills its container, and its veth with it, so the switch it attached to loses that
+	// port and every later failure reads as the switch's: said here instead, with Kea's own words
+	if r.kea != nil {
+		if _, _, err := d.Exec(context.Background(), r.kea.ID, "true"); err != nil {
+			out, _ := d.Logs(context.Background(), r.kea.ID)
+			t.Fatalf("the harness's Kea is not running after the attach: %v\n%s", err, indent(lastLines(out, 20)))
+		}
+	}
 	res, err := critic.Resolve("day0/fabric")
 	if err != nil {
 		t.Fatal(err)
@@ -323,6 +337,21 @@ func (r *day0Run) judge(allow ...string) *critic.Judgement {
 		if len(lines) > 0 {
 			t.Logf("the tool's failed requests:\n%s", indent(strings.Join(lines, "\n")))
 		}
+		// and what the twin recorded of the tool's doings, by protocol and canonical request: a
+		// path the twin stops recording (SONiC's CLI over SSH, a switch's NVUE) scores as a tool
+		// that never acted, and the scorecard alone does not say so
+		by := map[string]int{}
+		for _, e := range evs {
+			if q := e.Request; e.Kind == "request" && e.Source.Class == "stack" && q != nil {
+				by[q.Protocol+" "+q.Canonical]++
+			}
+		}
+		lines = nil
+		for k, n := range by {
+			lines = append(lines, fmt.Sprintf("%4d  %s", n, k))
+		}
+		sort.Sort(sort.Reverse(sort.StringSlice(lines)))
+		t.Logf("the tool's requests, by protocol and canonical name:\n%s", indent(strings.Join(lines, "\n")))
 	}
 	// the day-0 measures (18 — Measures): every factory switch has its time to converged
 	var ms []string
@@ -480,8 +509,12 @@ func (r *day0Run) planOf(serial string) (day0.PlanSwitch, bool) {
 // what each client sends: Cumulus's vendor class (option 60 "cumulus-linux …") gets its
 // provisioning URL in option 239, SONiC's user class SONiC-ZTP its ZTP document's URL in option
 // 67, ONIE's vendor class (onie_vendor:…) its installer's URL in option 114.
-func startDay0Kea(t *testing.T, d *nos.Docker, name string, reference bool) *nos.Container {
+func startDay0Kea(t *testing.T, d *nos.Docker, name string, c day0Case) *nos.Container {
 	t.Helper()
+	lease := c.lease
+	if lease == 0 {
+		lease = 3600
+	}
 	var subnets []any
 	for i := 0; i < 4; i++ {
 		subnets = append(subnets, map[string]any{"id": i + 1, "subnet": fmt.Sprintf("10.30.%d.0/24", i),
@@ -489,33 +522,41 @@ func startDay0Kea(t *testing.T, d *nos.Docker, name string, reference bool) *nos
 			"option-data": []any{map[string]any{"name": "routers", "data": fmt.Sprintf("10.30.%d.1", i)}}})
 	}
 	url := func(p string) string { return fmt.Sprintf("http://%s:%d%s", day0Server, day0Port, p) }
+	// the ZTP options are the harness's own tooling's URLs. A case whose day-0 tool serves day 0
+	// itself (noTooling) gets none: its tool's DHCP options replace this configuration, and a
+	// switch handed the harness's URL meanwhile spends its ZTP attempts on a 404 and gives up
+	ztpClasses := []any{
+		map[string]any{"name": "onie", "test": "substring(option[60].text,0,12) == 'onie_vendor:'",
+			"option-data": []any{map[string]any{"name": "v4-captive-portal", "data": url("/onie/onie-installer"), "always-send": true}}},
+		map[string]any{"name": "cumulus", "test": "substring(option[60].text,0,13) == 'cumulus-linux'",
+			"option-data": []any{map[string]any{"name": "cumulus-provision-url", "data": url("/ztp/cumulus.sh"), "always-send": true}}},
+		// option 77 by its raw bytes: Kea 2.6 reads it as RFC 3004's length-prefixed classes, and
+		// SONiC's dhclient sends the bare string (send user-class "SONiC-ZTP")
+		map[string]any{"name": "sonic", "test": "substring(option[77].hex,0,9) == 'SONiC-ZTP'",
+			"option-data": []any{map[string]any{"name": "boot-file-name", "data": url("/ztp/sonic.json"), "always-send": true}}},
+	}
 	cfg := map[string]any{"Dhcp4": map[string]any{
 		"interfaces-config": map[string]any{"interfaces": []any{"svc0"}, "dhcp-socket-type": "udp"},
 		"lease-database":    map[string]any{"type": "memfile", "persist": true, "name": "/var/lib/kea/kea-leases4.csv", "lfc-interval": 0},
-		"valid-lifetime":    3600,
+		"valid-lifetime":    lease,
 		// Cumulus's 239 is no standard option; ONIE's default-url is code 114, which RFC 8910 gave
 		// the captive portal's URL and Kea 2.6 names v4-captive-portal (a string, as ONIE reads it)
 		"option-def": []any{map[string]any{"name": "cumulus-provision-url", "code": 239, "type": "string", "space": "dhcp4"}},
-		"client-classes": []any{
-			map[string]any{"name": "onie", "test": "substring(option[60].text,0,12) == 'onie_vendor:'",
-				"option-data": []any{map[string]any{"name": "v4-captive-portal", "data": url("/onie/onie-installer"), "always-send": true}}},
-			map[string]any{"name": "cumulus", "test": "substring(option[60].text,0,13) == 'cumulus-linux'",
-				"option-data": []any{map[string]any{"name": "cumulus-provision-url", "data": url("/ztp/cumulus.sh"), "always-send": true}}},
-			// option 77 by its raw bytes: Kea 2.6 reads it as RFC 3004's length-prefixed classes, and
-			// SONiC's dhclient sends the bare string (send user-class "SONiC-ZTP")
-			map[string]any{"name": "sonic", "test": "substring(option[77].hex,0,9) == 'SONiC-ZTP'",
-				"option-data": []any{map[string]any{"name": "boot-file-name", "data": url("/ztp/sonic.json"), "always-send": true}}},
-		},
-		"subnet4": subnets,
-		"loggers": []any{map[string]any{"name": "kea-dhcp4", "severity": "INFO", "output-options": []any{map[string]any{"output": "/var/log/kea-dhcp4.log"}}}},
+		"subnet4":    subnets,
+		"loggers":    []any{map[string]any{"name": "kea-dhcp4", "severity": "INFO", "output-options": []any{map[string]any{"output": "/var/log/kea-dhcp4.log"}}}},
 	}}
+	// Kea refuses a null client-classes, so the key is there only when the harness has options to
+	// hand out
+	if !c.noTooling {
+		cfg["Dhcp4"].(map[string]any)["client-classes"] = ztpClasses
+	}
 	b, _ := json.Marshal(cfg)
 	script := `mkdir -p /var/lib/kea /run/kea /var/log
 printf '%s' "$KEA_CONFIG" > /etc/kea/kea-dhcp4.json
 until ip -4 addr show svc0 2>/dev/null | grep -q inet; do sleep 0.2; done
 until [ "$(cat /sys/class/net/svc0/carrier 2>/dev/null)" = 1 ]; do sleep 0.2; done
 exec kea-dhcp4 -c /etc/kea/kea-dhcp4.json`
-	if reference {
+	if c.reference {
 		// the reference tooling's configuration, rendered once stack-inputs exist (renderReference)
 		script = `mkdir -p /var/lib/kea /run/kea /var/log
 until ip -4 addr show svc0 2>/dev/null | grep -q inet; do sleep 0.2; done
@@ -523,7 +564,7 @@ until [ -s /etc/kea/reference.json ]; do sleep 0.5; done
 exec kea-dhcp4 -c /etc/kea/reference.json`
 	}
 	ctx := context.Background()
-	c, err := d.Run(ctx, nos.Spec{Name: name, Image: keaImage, Hostname: "kea", Cmd: []string{"/bin/sh", "-c", script},
+	kea, err := d.Run(ctx, nos.Spec{Name: name, Image: keaImage, Hostname: "kea", Cmd: []string{"/bin/sh", "-c", script},
 		Env:    []string{"KEA_CONFIG=" + string(b), "KEA_PIDFILE_DIR=/run/kea", "KEA_LOCKFILE_DIR=/run/kea"},
 		Labels: map[string]string{"dc-twin.test": "linuxnet"}})
 	if err != nil {
@@ -531,12 +572,12 @@ exec kea-dhcp4 -c /etc/kea/reference.json`
 	}
 	t.Cleanup(func() {
 		if t.Failed() {
-			out, _, _ := d.Exec(context.Background(), c.ID, "tail", "-n", "60", "/var/log/kea-dhcp4.log")
+			out, _, _ := d.Exec(context.Background(), kea.ID, "tail", "-n", "60", "/var/log/kea-dhcp4.log")
 			t.Logf("Kea's log:\n%s", indent(out))
 		}
-		_ = d.Remove(context.Background(), c.ID)
+		_ = d.Remove(context.Background(), kea.ID)
 	})
-	return c
+	return kea
 }
 
 // leases reads the tooling's DHCP leases (Kea's lease file): MAC -> address.

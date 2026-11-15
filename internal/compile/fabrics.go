@@ -350,11 +350,18 @@ func (c *compiler) genOOB(f *model.Fabric, place *model.Rack, factory bool) {
 			k++
 		}
 		if aggProfile != "" {
-			// aggregation switch k takes uplinks [k*128, (k+1)*128): a pure function of the
-			// rack's place, so a new rack never moves another rack's uplink
+			// aggregation switch k takes uplinks [k*per, (k+1)*per): a pure function of the
+			// rack's place, so a new rack never moves another rack's uplink. A factory fabric's
+			// management switches also cable their management ports to it, from eth126 down, so
+			// an aggregation switch takes 63 of them: uplinks on eth1-eth63, management ports on
+			// eth126-eth64, the two ranges never meeting
+			per := 128
+			if factory {
+				per = 63
+			}
 			for i, m := range mgmt {
 				n := rackOrdinal(r)*2 + i
-				k := n / 128
+				k := n / per
 				for len(aggs) <= k {
 					aggs = append(aggs, c.generated(f, place, fmt.Sprintf("oob-agg-%d", len(aggs)+1), aggProfile))
 				}
@@ -362,7 +369,7 @@ func (c *compiler) genOOB(f *model.Fabric, place *model.Rack, factory bool) {
 				if agg == nil {
 					break
 				}
-				port := fmt.Sprintf("eth%d", n%128+1)
+				port := fmt.Sprintf("eth%d", n%per+1)
 				if agg.PortBy[port] == nil {
 					c.errf("rack %s: OOB aggregation %s has no port %s", r.Name, agg.Name, port)
 					continue
@@ -373,7 +380,7 @@ func (c *compiler) genOOB(f *model.Fabric, place *model.Rack, factory bool) {
 				// below the two ports the site's services attach at, so that a factory management
 				// switch's eth0 leases through a switch the twin configures (18 — Z7d)
 				if mp := m.PortBy["mgmt0"]; factory && mp != nil && mp.Link == nil {
-					down := fmt.Sprintf("eth%d", 126-n%128)
+					down := fmt.Sprintf("eth%d", 126-n%per)
 					if q := agg.PortBy[down]; q == nil || q.Link != nil {
 						c.errf("rack %s: OOB aggregation %s has no free port %s for %s's management port", r.Name, agg.Name, down, m.Name)
 					} else {

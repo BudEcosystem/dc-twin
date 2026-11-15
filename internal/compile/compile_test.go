@@ -1,11 +1,13 @@
 package compile
 
 import (
+	"fmt"
 	"sort"
 	"strings"
 	"testing"
 
 	"github.com/BudEcosystem/dc-twin/internal/model"
+	"github.com/BudEcosystem/dc-twin/internal/schema"
 )
 
 func compileFile(t *testing.T, path string) *Result {
@@ -105,5 +107,53 @@ func TestDSXDay0OOB(t *testing.T) {
 		if p == nil || p.Link == nil || p.Link.Peer(p).Device.Name != "oob-agg-1" {
 			t.Errorf("%s's management port is not cabled to the aggregation switch", d.Path)
 		}
+	}
+}
+
+// A factory OOB fabric of three rows of racks: each aggregation switch takes 63 management
+// switches, uplinks counting up from eth1 and management ports down from eth126, so the two never
+// take one port (a fourth of the racks' switches go to a second aggregation switch).
+func TestDSXDay0OOBRows(t *testing.T) {
+	reg, err := Registry()
+	if err != nil {
+		t.Fatal(err)
+	}
+	est, _, err := LoadEstate("../../examples/estates/dsx-day0.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	hall := &est.Spec.Sites[0].Halls[0]
+	cpu := hall.Rows[0].Racks[0]
+	hall.Rows = nil
+	for i, row := range []string{"a", "b", "c"} {
+		r := schema.Row{Name: row, Positions: 16}
+		for p := 1; p <= 12; p++ {
+			x := cpu
+			x.Name, x.Position = fmt.Sprintf("r%02d", i*12+p), p
+			r.Racks = append(r.Racks, x)
+		}
+		if row == "a" {
+			r.Racks = append(r.Racks, schema.Rack{Name: "n01", Position: 16, Format: "generic/network-rack", Feeds: []string{"A", "B"}})
+		}
+		hall.Rows = append(hall.Rows, r)
+	}
+	res, err := Compile(est, reg, Options{HostArch: "aarch64"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	aggs := map[string]bool{}
+	for _, d := range res.Model.Devices {
+		if d.Name != "mgmt-switch" {
+			continue
+		}
+		p := d.PortBy["mgmt0"]
+		if p == nil || p.Link == nil || !strings.HasPrefix(p.Link.Peer(p).Device.Name, "oob-agg-") {
+			t.Errorf("%s's management port is not cabled to an aggregation switch", d.Path)
+			continue
+		}
+		aggs[p.Link.Peer(p).Device.Name] = true
+	}
+	if len(aggs) != 2 {
+		t.Errorf("aggregation switches with management ports: %v, want 2", aggs)
 	}
 }

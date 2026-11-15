@@ -8,6 +8,7 @@ NVIDIA's own configuration:
 |---|---|---|
 | Source of truth | NetBox 4.2.9 (`quay.io/netboxcommunity/netbox:v4.2.9-3.2.1`), PostgreSQL 17 and Valkey 8 (ECR Public) | no |
 | Load | `import-csv.py`: `stack-inputs/day0/netbox/*.csv` through NetBox's own CSV import (the UI's Import form, in the README's order) | glue |
+| Access ports | `access-vlans.py`: each access port's untagged VLAN, which NetBox's interface import form has no column for | glue |
 | Leases | `record-leases.py`: each switch's management lease (the site's Kea) recorded on its `eth0` and made its out-of-band address | glue |
 | First login | NVIDIA's `net-configurator` nc-v8.0.0 `push-switch-configs.yml --tags bootstrap-password`: the factory password changed through PAM's prompt | no |
 | Inventory | Ansible's `netbox.netbox` 3.23.1 `nb_inventory` (`netbox.yml`) | no |

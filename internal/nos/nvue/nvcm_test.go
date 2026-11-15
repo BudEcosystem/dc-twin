@@ -288,6 +288,14 @@ func TestNVCMDeployREST(t *testing.T) {
 	if st, out := c.do("PATCH", "/nvue_v1/revision/"+rev, short, auth); st != 200 || out["state"] != "ays" {
 		t.Fatalf("apply with a 1 s window: %d %v", st, out)
 	}
+	// no other apply while it awaits its confirmation: the rollback would undo it
+	other := revision()
+	if st, out := c.do("PATCH", "/nvue_v1/?rev="+other, Tree{"system": Tree{"hostname": "spine-8"}}, auth); st != 200 {
+		t.Fatalf("PATCH: %d %v", st, out)
+	}
+	if st, out := c.do("PATCH", "/nvue_v1/revision/"+other, map[string]any{"state": "apply"}, auth); st != 409 {
+		t.Fatalf("an apply while another awaits its confirmation: %d %v", st, out)
+	}
 	deadline := time.Now().Add(10 * time.Second)
 	for {
 		st, out := c.do("GET", "/nvue_v1/revision/"+rev, nil, auth)
