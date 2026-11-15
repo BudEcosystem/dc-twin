@@ -1,10 +1,11 @@
-# the image needs the Go sources, the packs, the console and the examples; nothing else
+# the image needs the Go sources, the packs, the policies, the console and the examples; nothing else
 *
 !go.mod
 !go.sum
 !cmd
 !internal
 !packs
+!policies
 !stacks
 !console
 !examples
