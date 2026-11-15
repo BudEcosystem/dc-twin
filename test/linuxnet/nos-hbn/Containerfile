@@ -7,7 +7,12 @@
 # FRR is FRR's own 10 release (deb.frrouting.org), not bookworm's 8.4.4: on 8.4.4 a DPU that loses
 # one of two equal EVPN paths to a remote VTEP (an uplink pulled) has zebra drop that VTEP's router
 # MAC while bgpd keeps the other path best, and its VPC routes into a black hole (D71).
-FROM dctwin-nos-nvue-frr:bookworm
+#
+# BASE is generic/nvue-frr's image: the local tag scripts/linux-substrate-e2e.sh builds, or its
+# published copy, which scripts/publish-images.sh passes (a builder that pushes cannot see a tag
+# that is only local).
+ARG BASE=dctwin-nos-nvue-frr:bookworm
+FROM ${BASE}
 RUN apt-get update \
  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends curl gnupg ca-certificates \
  && curl -fsSL https://deb.frrouting.org/frr/keys.gpg -o /usr/share/keyrings/frrouting.gpg \

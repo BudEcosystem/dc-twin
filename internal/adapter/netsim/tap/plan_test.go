@@ -283,6 +283,29 @@ func TestPlanNOSMemory(t *testing.T) {
 	}
 }
 
+// spec.adapters.network.nos.registry is where a missing switch image is pulled from; unset, the
+// DCTWIN_REGISTRY environment variable; the estate's wins over the environment's.
+func TestPlanRegistry(t *testing.T) {
+	est := loadEstate(t, "tap-nos.yaml")
+	m := compileModel(t, est)
+	t.Setenv("DCTWIN_REGISTRY", "")
+	if p, err := BuildPlan(m, est, nil, "aarch64"); err != nil || p.Registry != "" {
+		t.Fatalf("none: %q, %v", p.Registry, err)
+	}
+	t.Setenv("DCTWIN_REGISTRY", "registry.lab:5000/dc-twin")
+	if p, err := BuildPlan(m, est, nil, "aarch64"); err != nil || p.Registry != "registry.lab:5000/dc-twin" {
+		t.Fatalf("from the environment: %q, %v", p.Registry, err)
+	}
+	est.Spec.Adapters.Network.NOS.Registry = "ghcr.io/budecosystem"
+	if p, err := BuildPlan(m, est, nil, "aarch64"); err != nil || p.Registry != "ghcr.io/budecosystem" {
+		t.Fatalf("the estate's over the environment's: %q, %v", p.Registry, err)
+	}
+	est.Spec.Adapters.Network.NOS.Registry = "https://ghcr.io/budecosystem"
+	if _, err := BuildPlan(m, est, nil, "aarch64"); err == nil || !strings.Contains(err.Error(), "spec.adapters.network.nos.registry") {
+		t.Fatalf("a URL: %v", err)
+	}
+}
+
 // spec.adapters.network.nos.cumulusVersion is every generic/nvue-frr switch's build, which its
 // NVUE's grammar and ZTP's version follow; unset, the build is NVUE's default.
 func TestPlanCumulusVersion(t *testing.T) {

@@ -208,6 +208,24 @@ test plays the site's tooling with Kea and an HTTP server, and reads nothing but
 | `TestDay0SonicPush` | ZTP off on four factory `sonic-vs` switches. The tooling logs in over SSH as `admin` with SONiC's factory password and loads each switch's `config_db.json` with `sudo config load -y` and `config save -y`. gNMI Get and Set work at the management lease, with the estate CA's client certificate | **PASS**: converged 4 s after the SSH push; gNMI Get returned the pushed hostname and the Set's VRF reached CONFIG_DB |
 | `TestDay0PlanTool` | `plan: tool`: no `plan.json`. The tooling allocates its own loopbacks, /31s and AS numbers from `cabling.csv`, and the oracle judges the result by its structure | **PASS**: converged 20 s after `up` on the tool's plan; the critic passes |
 
+**The twin's own images from a registry (D81, 2026-11-15).** A Docker host that lacks a switch
+image pulls it: one of the twin's own (`dctwin-nos-*`, `dctwin-sonic-*`) from
+`spec.adapters.network.nos.registry` (or `DCTWIN_REGISTRY`) as `<registry>/<name>:<tag>`, tagged as
+the twin names it; one named with its own registry, SONiC's switch image by digest, from there.
+`scripts/linux-substrate-e2e.sh` pulls from `REGISTRY` before building or fetching anything.
+`scripts/publish-images.sh` publishes them (run by `.github/workflows/images.yml`): the six images
+the e2e script builds and its runner, for amd64 and arm64, and SONiC's four sidecars and switch
+image. A changed image under a published tag is refused.
+- Unit: `TestEnsure` (a fake Engine: pulled and tagged, already present, no registry, a pull the
+  registry refuses inside a 200 stream, SONiC's image from its own registry), `TestPlanRegistry`,
+  `TestPublishedImagesMatchTheE2EScript` (the e2e script, the publish script and the workflow's
+  triggers name the same images, contexts and SONiC pins).
+- On pnap's rootless Podman, against a real registry: an own image pulled and tagged, not pulled
+  again, a missing tag refused with the registry's reason, a registry-named image pulled; the e2e
+  script's pull pulls, and falls back to building with no registry or no such image.
+- Not yet run: the workflow and `scripts/publish-images.sh` itself (they need Docker with buildx
+  and a registry login; checked by a dry run, which prints what it would build and push).
+
 **DSX OS: NVIDIA Config Manager's ZTP, switch side (Z7a, D80, 2026-11-13).** NVCM 1.4.1's own
 golden boot script, run by factory `generic/nvue-frr` switches against a stand-in for NVCM's ZTP
 service that keeps its contract (`test/linuxnet/nvcm_linux_test.go`):

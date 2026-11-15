@@ -64,6 +64,10 @@
 #       (RUN=TestDPUAgent MODE=native HBN_BINARIES=...).
 #   NOS_MEMORY=512m: every container the twin and the tests create gets that memory limit, with no
 #     swap beyond it (spec.adapters.network.nos.memory), for a host with a memory budget.
+#   REGISTRY=ghcr.io/budecosystem: the images this script builds or fetches (the NOSes', SONiC's
+#     sidecars, the tests' Kea and controllers) are pulled from <REGISTRY>/<name>:<tag> first, and
+#     built or fetched only when the registry has none (.github/workflows/images.yml publishes
+#     them); the twin is given it as DCTWIN_REGISTRY, so it pulls any switch image still missing.
 #
 # Everything a run creates is named dctwin-* (containers, volumes, network namespaces) and removed
 # at the end; nothing else is touched: no firewall rule, route or bridge outside its namespaces.
@@ -176,8 +180,20 @@ else
 fi
 
 sha256() { (sha256sum "$1" 2>/dev/null || shasum -a 256 "$1") | cut -d' ' -f1; }
-image() { # tag, Containerfile, context: build only what is missing
-  if ! "${eng[@]}" image inspect "$1" >/dev/null 2>&1; then
+# pull_own <tag> [platform]: one of the twin's own images from $REGISTRY/<tag>, tagged <tag>; fails
+# (quietly) when no registry is set or it has no such image, and the caller builds or fetches it
+pull_own() {
+  [ -n "${REGISTRY:-}" ] || return 1
+  if "${eng[@]}" pull -q ${2:+--platform "$2"} "$REGISTRY/$1" >/dev/null 2>&1; then
+    "${eng[@]}" tag "$REGISTRY/$1" "$1"
+    echo "pulled $1 from $REGISTRY"
+    return 0
+  fi
+  echo "$1 is not in $REGISTRY"
+  return 1
+}
+image() { # tag, Containerfile, context: only what is missing, from $REGISTRY when it has it
+  if ! "${eng[@]}" image inspect "$1" >/dev/null 2>&1 && ! pull_own "$1"; then
     echo "building $1"
     if [ -n "$rootless" ]; then
       podman build -q -t "$1" -f "$2" "$3" >/dev/null
@@ -209,6 +225,8 @@ sonic_lldp_sha256=728214e5726229075248a3227e59c4f9b5639502c2b543e479281dd8ada4a0
 # sonic_artifact <local tag> <url> <sha256> <the tarball's own repository>
 sonic_artifact() {
   "${eng[@]}" image inspect "$1" >/dev/null 2>&1 && return
+  # published to the registry, it outlives the pipeline's artifacts, which expire
+  pull_own "$1" linux/amd64 && return
   echo "fetching SONiC's $4 image ($2)"
   curl -fsSL -o "$work/$4.gz" "$2"
   got=$(sha256 "$work/$4.gz")
@@ -275,7 +293,7 @@ if [ "$mode" = native ]; then
   cp -R "$root/internal/nos/nvue/testdata/nico" "$work/test/linuxnet/testdata/"
   cp -R "$root/internal/nos/nvue/testdata/nvcm-1.4.1" "$work/test/linuxnet/testdata/"
   # its own network namespace, loopback up: the twin's loopback endpoints are not the host's
-  sudo env DCTWIN_LINUXNET=1 DCTWIN_HOLD="${HOLD:-}" DCTWIN_HBN_BINARIES="${HBN_BINARIES:-}" DCTWIN_DAY0_BINARIES="$work/day0" DCTWIN_REFERENCE_DAY0="$root/stacks/reference-day0" DCTWIN_COMPAT_NETBOX="$root/compat/netbox-ansible" DCTWIN_COMPAT_NVCM="$root/compat/nvcm" DCTWIN_NVCM_SRC="${NVCM_SRC:-}" DCTWIN_FOUNDRY="${FOUNDRY:-}" DCTWIN_RUN="${DCTWIN_RUN:-}" DCTWIN_NOS_MEMORY="${NOS_MEMORY:-}" DCTWIN_ASSETS="${DCTWIN_ASSETS:-$HOME/.cache/dc-twin/assets}" DOCKER_HOST="$engine_host" PATH="$testpath" unshare --net sh -c \
+  sudo env DCTWIN_LINUXNET=1 DCTWIN_HOLD="${HOLD:-}" DCTWIN_HBN_BINARIES="${HBN_BINARIES:-}" DCTWIN_DAY0_BINARIES="$work/day0" DCTWIN_REFERENCE_DAY0="$root/stacks/reference-day0" DCTWIN_COMPAT_NETBOX="$root/compat/netbox-ansible" DCTWIN_COMPAT_NVCM="$root/compat/nvcm" DCTWIN_NVCM_SRC="${NVCM_SRC:-}" DCTWIN_FOUNDRY="${FOUNDRY:-}" DCTWIN_RUN="${DCTWIN_RUN:-}" DCTWIN_NOS_MEMORY="${NOS_MEMORY:-}" DCTWIN_REGISTRY="${REGISTRY:-}" DCTWIN_ASSETS="${DCTWIN_ASSETS:-$HOME/.cache/dc-twin/assets}" DOCKER_HOST="$engine_host" PATH="$testpath" unshare --net sh -c \
     'ip link set lo up && cd "$1" && exec "$2" -test.v -test.count=1 -test.timeout=45m -test.run "$3"' \
     sh "$work/test/linuxnet" "$work/linuxnet.test" "$run" 2>&1 | tee "$log"
   rc=${PIPESTATUS[0]}
@@ -285,7 +303,7 @@ else
   runner=dctwin-linuxnet-e2e:cf-$(sha256 "$root/test/linuxnet/Containerfile" | cut -c1-12)
   image "$runner" "$root/test/linuxnet/Containerfile" "$root/test/linuxnet"
   docker create --name "$name" --privileged --pid=host -v /var/run/docker.sock:/var/run/docker.sock \
-    -e DCTWIN_LINUXNET=1 -e DCTWIN_NOS_MEMORY="${NOS_MEMORY:-}" -e DCTWIN_DAY0_BINARIES=/work/day0 "$runner" \
+    -e DCTWIN_LINUXNET=1 -e DCTWIN_NOS_MEMORY="${NOS_MEMORY:-}" -e DCTWIN_REGISTRY="${REGISTRY:-}" -e DCTWIN_DAY0_BINARIES=/work/day0 "$runner" \
     /work/linuxnet.test -test.v -test.count=1 -test.timeout=45m -test.run "$run" >/dev/null
   docker cp "$work/linuxnet.test" "$name:/work/linuxnet.test"
   docker cp "$work/day0" "$name:/work/day0"

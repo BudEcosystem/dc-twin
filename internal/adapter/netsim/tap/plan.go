@@ -60,6 +60,9 @@ type Plan struct {
 	HostSkipped map[string]int
 	// NOSMemory is every NOS container's memory limit in bytes (0: none).
 	NOSMemory int64
+	// Registry is where a switch image the Docker host lacks is pulled from
+	// (spec.adapters.network.nos.registry, else DCTWIN_REGISTRY; "" for none).
+	Registry string
 	// Day0Binaries is the directory of the twin's day-0 programs on the Docker host, mounted in
 	// every factory switch (spec.adapters.network.nos.day0Binaries, else beside the twin's own
 	// executable); "" when there is none.
@@ -207,6 +210,13 @@ func BuildPlan(m *model.Model, est *schema.Estate, outputs map[string]string, ho
 		return nil, fmt.Errorf("spec.adapters.network.nos.memory: %w", err)
 	}
 	p.NOSMemory = mem
+	p.Registry = opts.NOS.Registry
+	if p.Registry == "" {
+		p.Registry = os.Getenv("DCTWIN_REGISTRY")
+	}
+	if err := nos.ValidRegistry(p.Registry); err != nil {
+		return nil, fmt.Errorf("spec.adapters.network.nos.registry: %w", err)
+	}
 	// the Cumulus release generic/nvue-frr's switches run: their NVUE's grammar and build
 	cumulusBuild := ""
 	if v := opts.NOS.CumulusVersion; v != "" {

@@ -1365,3 +1365,19 @@ runs NICo. **Why:** a day-0 tool for DSX, Foundry's or another, is tested agains
 itself does; NVCM's templates are NVIDIA's own validated configurations for those switches, and
 its goldens make the emulation's coverage measurable. **Reversed if:** DSX names another switch
 tool, or NVCM leaves DSX OS.
+
+### D81 — The twin's own images are published, pulled by the names it runs them by, and never re-tagged
+*Built (2026-11-15).* The images the twin runs and the e2e script builds (its NOSes', HBN's, the
+tests' Kea, runner and controllers) and SONiC's sidecars (which SONiC publishes only as build
+artifacts, which expire) are published to a registry (`scripts/publish-images.sh`, run by
+`.github/workflows/images.yml`; GitHub's container registry). A Docker host that lacks one pulls
+`<registry>/<name>:<tag>` and tags it with the name the twin runs it by
+(`spec.adapters.network.nos.registry`, `DCTWIN_REGISTRY`; the e2e script's `REGISTRY`), so nothing
+that runs it changes, and a host with no registry builds as before. An image named with a registry
+of its own, SONiC's switch image by digest, is pulled from there. A tag is published once:
+publishing labels each image with the git tree it is built from and refuses to push a changed one
+under a published tag, since a host that has the tag never pulls it again. **Why:** a fresh host
+(after a reinstall, a new lab) spends most of its first run building images and fetching SONiC's,
+and SONiC's pinned build can expire. **Reversed if:** the images move to content-addressed tags
+(then any changed content is a new tag by construction), or the twin is only ever run where it is
+built.

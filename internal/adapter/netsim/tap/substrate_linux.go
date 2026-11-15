@@ -914,6 +914,7 @@ func (s *Substrate) startSwitches() error {
 	ctx, cancel := context.WithTimeout(s.ctx, 10*time.Minute)
 	defer cancel()
 	canRun := map[string]error{}
+	ensured := map[string]bool{}
 	for _, sp := range s.plan.Switches {
 		e := sp.NOS
 		images := []string{sp.Image}
@@ -924,9 +925,20 @@ func (s *Substrate) startSwitches() error {
 			images = append(images, sc.Image)
 		}
 		for _, img := range images {
-			if !d.HasImage(ctx, img) {
-				return fmt.Errorf("switch %s: the image %s for nos %s is not present on the Docker host: %s", sp.Device.Path, img, e.Name, e.Obtain)
+			if ensured[img] {
+				continue
 			}
+			// present, or pulled from the registry the twin's own images are published to
+			from, err := d.Ensure(ctx, img, s.plan.Registry, e.Platform)
+			switch {
+			case errors.Is(err, nos.ErrNotPresent) && nos.Own(img) && s.plan.Registry == "":
+				return fmt.Errorf("switch %s: the image %s for nos %s is not present on the Docker host: %s, or set spec.adapters.network.nos.registry (DCTWIN_REGISTRY) to pull it", sp.Device.Path, img, e.Name, e.Obtain)
+			case err != nil:
+				return fmt.Errorf("switch %s: the image %s for nos %s: %w (%s)", sp.Device.Path, img, e.Name, err, e.Obtain)
+			case from != "":
+				s.log.Info("pulled a switch image", "image", img, "from", from)
+			}
+			ensured[img] = true
 		}
 		if sp.Emulated {
 			err, done := canRun[sp.Image]
