@@ -13,7 +13,9 @@
 #     `hostname`, `credentials` (factory or changed), `lldp <port>` (<system>:<port>);
 #   - the SUT's requests to a switch (source class `stack`): NVUE's network.config.*, SONiC's
 #     gNMI and CLI writes as network.config.write, LLDP reads as network.lldp.read; a SONiC
-#     switch's CLI over SSH, each command as the twin's sshd ForceCommand reports it
+#     switch's CLI over SSH, each command as the twin's sshd ForceCommand reports it (and only it:
+#     a record from anything else on the switch is refused), named by its words rather than its
+#     substrings, so `show reboot-cause` is a read
 #     (network.config.apply, .save, .change, .stage, .reset, network.account.write; reads as
 #     network.lldp.read, network.bgp.read, network.config.read); a new boot URL in a switch's lease
 #     (network.ztp.provision, protocol dhcp), the site's DHCP re-arming a switch's day 0, which is

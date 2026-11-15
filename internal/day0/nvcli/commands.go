@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	yaml "go.yaml.in/yaml/v3"
@@ -488,8 +489,6 @@ func (c *client) apply(args []string) error {
 	return errShown
 }
 
-// replace makes the user's pending revision a tree, whole: everything removed, then the tree
-// merged.
 // confirm keeps the revision a commit-confirm applied (`nv config confirm`, `nv config apply
 // --confirm-yes`).
 func (c *client) confirm() error {
@@ -510,6 +509,8 @@ func (c *client) confirm() error {
 	return fmt.Errorf("no apply is waiting for its confirmation")
 }
 
+// replace makes the user's pending revision a tree, whole: everything removed, then the tree
+// merged.
 func (c *client) replace(t any) (string, error) {
 	id, err := c.pending(true)
 	if err != nil {
@@ -1101,11 +1102,29 @@ func (c *client) action(args []string) error {
 		}
 		cmd := exec.Command("reboot")
 		cmd.Stdout, cmd.Stderr = c.out, c.errw
-		if err := cmd.Run(); err != nil {
+		if err := cmd.Run(); err != nil && !rebooted(err) {
 			return fmt.Errorf("reboot: %v", err)
 		}
+		fmt.Fprintf(c.out, "Action succeeded\n")
 		return nil
 	}
+	return c.fetch(args)
+}
+
+// rebooted reports whether the switch's reboot ended the reboot command: the twin carries a
+// reboot out by ending the switch's processes, the command waiting on it among them (clsys), so
+// a reboot killed by a signal is one that happened.
+func rebooted(err error) bool {
+	x, ok := err.(*exec.ExitError)
+	if !ok {
+		return false
+	}
+	ws, ok := x.Sys().(syscall.WaitStatus)
+	return ok && ws.Signaled()
+}
+
+// fetch is `nv action fetch system …`.
+func (c *client) fetch(args []string) error {
 	if len(args) < 2 || args[0] != "fetch" || args[1] != "system" {
 		return fmt.Errorf("nv action %s: not emulated by the twin's nv (fetch system, reboot system)", strings.Join(args, " "))
 	}

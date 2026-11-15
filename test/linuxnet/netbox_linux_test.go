@@ -210,3 +210,92 @@ func copyTree(src, dst string) error {
 		return os.WriteFile(to, b, 0o644)
 	})
 }
+
+// startNetBoxDesign stands NetBox 4.2.9 up beside the site's Kea (its network namespace: the OOB
+// network) and loads the estate's day-0 design into it the way a site does, with no Ansible in
+// sight: the CSVs through NetBox's own CSV import (import-csv.py), then each access port's
+// untagged VLAN over the REST API (access-vlans.py), which the import form has no column for.
+// It returns the URL a tool in the site's network reaches NetBox at, a file holding its API token,
+// and the site's name in NetBox, for a day-0 tool that reads its design from there (E6).
+func startNetBoxDesign(t *testing.T, r *day0Run, at string) (url, tokenFile, site string) {
+	t.Helper()
+	compat := os.Getenv("DCTWIN_COMPAT_NETBOX")
+	if compat == "" {
+		t.Skip("DCTWIN_COMPAT_NETBOX is not set (scripts/linux-substrate-e2e.sh points it at compat/netbox-ansible)")
+	}
+	ctx := context.Background()
+	for _, img := range []string{netboxImage, postgresImage, valkeyImage} {
+		if !r.d.HasImage(ctx, img) {
+			t.Skipf("image %s is not present (scripts/linux-substrate-e2e.sh pulls it)", img)
+		}
+	}
+	suffix := r.c.estate + "-" + strconv.Itoa(os.Getpid())
+	beside := "container:" + r.kea.ID
+	// the design and the glue, where the NetBox container reads them
+	work := filepath.Join(filepath.Dir(day0Binaries(t)), "netbox-"+suffix)
+	t.Cleanup(func() { _ = os.RemoveAll(work) })
+	if err := copyTree(filepath.Join(r.tw.Runtime.StateDir, "stack-inputs", "day0"), filepath.Join(work, "day0")); err != nil {
+		t.Fatal(err)
+	}
+	if err := copyTree(compat, filepath.Join(work, "harness")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(work, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	run := func(name string, s nos.Spec) *nos.Container {
+		s.Name, s.NetworkMode = name+"-"+suffix, beside
+		s.Labels = map[string]string{"dc-twin.test": "linuxnet"}
+		c, err := r.d.Run(ctx, s)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		t.Cleanup(func() {
+			if t.Failed() {
+				out, _ := r.d.Logs(context.Background(), c.ID)
+				t.Logf("%s's log (tail):\n%s", name, indent(lastLines(out, 40)))
+			}
+			_ = r.d.Remove(context.Background(), c.ID)
+		})
+		return c
+	}
+	run("dctwin-nb-postgres", nos.Spec{Image: postgresImage, Env: []string{"POSTGRES_DB=netbox", "POSTGRES_USER=netbox", "POSTGRES_PASSWORD=netbox-db"}})
+	run("dctwin-nb-valkey", nos.Spec{Image: valkeyImage, Cmd: []string{"valkey-server", "--requirepass", "netbox-cache"}})
+	nb := run("dctwin-nb-netbox", nos.Spec{Image: netboxImage, Memory: 2 << 30, Binds: []string{work + ":/work"}, Env: []string{
+		"DB_HOST=localhost", "DB_NAME=netbox", "DB_USER=netbox", "DB_PASSWORD=netbox-db",
+		"REDIS_HOST=localhost", "REDIS_PASSWORD=netbox-cache", "REDIS_DATABASE=0", "REDIS_SSL=false",
+		"REDIS_CACHE_HOST=localhost", "REDIS_CACHE_PASSWORD=netbox-cache", "REDIS_CACHE_DATABASE=1", "REDIS_CACHE_SSL=false",
+		"SECRET_KEY=dctwin-day0-netbox-secret-key-of-at-least-fifty-characters-0123456789",
+		"SKIP_SUPERUSER=false", "SUPERUSER_NAME=admin", "SUPERUSER_EMAIL=admin@example.com",
+		"SUPERUSER_PASSWORD=" + netboxAdminPW, "SUPERUSER_API_TOKEN=" + netboxToken,
+	}})
+	local := "http://127.0.0.1:8080"
+	waitFor(t, 10*time.Minute, "NetBox answering (its first start migrates the database)", func() bool {
+		_, code, err := r.d.Exec(ctx, nb.ID, "python3", "-c",
+			"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('"+local+"/login/',timeout=5).status==200 else 1)")
+		return err == nil && code == 0
+	})
+	step := func(what string, cmd ...string) {
+		t.Helper()
+		start := time.Now()
+		out, code, err := r.d.Exec(ctx, nb.ID, cmd...)
+		t.Logf("%s (%s, exit %d):\n%s", what, time.Since(start).Round(time.Second), code, indent(out))
+		if err != nil || code != 0 {
+			t.Fatalf("%s failed: exit %d, %v", what, code, err)
+		}
+	}
+	step("import-csv.py: stack-inputs/day0/netbox through NetBox's CSV import",
+		"python3", "/work/harness/import-csv.py", local, "/work/day0/netbox", "--user", "admin", "--password", netboxAdminPW)
+	step("access-vlans.py: each access port's untagged VLAN over the REST API",
+		"python3", "/work/harness/access-vlans.py", local, "/work/day0", "--token", netboxToken)
+	tokenFile = filepath.Join(work, "netbox-token")
+	if err := os.WriteFile(tokenFile, []byte(netboxToken+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// the site as the export names it (day0.Design's site, else the estate)
+	site = r.design.Site
+	if site == "" {
+		site = r.design.Estate
+	}
+	return "http://" + at + ":8080", tokenFile, site
+}

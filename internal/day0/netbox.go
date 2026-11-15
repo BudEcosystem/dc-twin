@@ -30,8 +30,9 @@ var netboxOrder = []string{"custom_fields.csv", "sites.csv", "racks.csv", "manuf
 	"devices.csv", "vrfs.csv", "interfaces.csv", "mac_addresses.csv", "cables.csv", "rirs.csv", "asns.csv", "vlans.csv",
 	"prefixes.csv", "ip_addresses.csv"}
 
-// netboxCSVs renders the design as NetBox bulk-import CSVs, with a README.md. Devices and cables
-// are imported as planned (status planned): on day 0 nothing has been seen yet. Only
+// netboxCSVs renders the design as NetBox bulk-import CSVs, with a README.md. A factory switch is
+// imported as planned (nothing has been seen of it yet) and one the twin configured as active, as
+// a site's own source of truth holds it; cables are planned. Only
 // switch-to-switch cables with both ports named by their NOS are written, since a cable's ends
 // must be interfaces NetBox already holds; cabling.csv has every cable. Prefixes carry no scope:
 // a scope is a NetBox primary key or, in later releases only, a name.
@@ -112,7 +113,13 @@ func netboxCSVs(d Design) map[string][]byte {
 		if s.ASN != 0 {
 			asn = strconv.FormatUint(uint64(s.ASN), 10)
 		}
-		rows = append(rows, []string{s.Hostname, s.Role, manufacturer(s), model(s), s.NOS, s.Serial, "planned", site, s.Rack, pos, face, s.Path, asn})
+		// a switch the twin configured is active, as a site's own source of truth has it; one
+		// still in the factory is planned, since nothing has been seen of it yet
+		status := "active"
+		if s.Factory {
+			status = "planned"
+		}
+		rows = append(rows, []string{s.Hostname, s.Role, manufacturer(s), model(s), s.NOS, s.Serial, status, site, s.Rack, pos, face, s.Path, asn})
 	}
 	out["devices.csv"] = csvBytes(rows)
 	// an interface's VRF is looked up by its route distinguisher (InterfaceImportForm's vrf has
@@ -128,7 +135,7 @@ func netboxCSVs(d Design) map[string][]byte {
 	for i := range d.Switches {
 		hosts[d.Switches[i].Hostname] = &d.Switches[i]
 	}
-	type iface struct{ name, typ, speed, vrf, desc string }
+	type iface struct{ name, typ, speed, vrf, mode, desc string }
 	ifs := map[string]map[string]iface{}
 	add := func(host string, f iface) {
 		if ifs[host] == nil {
@@ -153,7 +160,13 @@ func netboxCSVs(d Design) map[string][]byte {
 			if f.Peer != "" {
 				desc += " to " + f.Peer
 			}
-			add(s.Hostname, iface{name: f.Name, typ: ifType(f.Speed), speed: kbps(f.Speed), desc: desc})
+			// an access port's mode, which the import form takes; the VLAN it is untagged in is
+			// not a column it has (access-vlans.py puts it in over REST)
+			mode := ""
+			if f.Vlan != "" {
+				mode = "access"
+			}
+			add(s.Hostname, iface{name: f.Name, typ: ifType(f.Speed), speed: kbps(f.Speed), mode: mode, desc: desc})
 		}
 		for _, v := range s.Vlans {
 			add(s.Hostname, iface{name: v.Name, typ: "virtual", desc: v.Network})
@@ -171,7 +184,7 @@ func netboxCSVs(d Design) map[string][]byte {
 			}
 		}
 	}
-	rows = [][]string{{"device", "name", "type", "speed", "enabled", "mgmt_only", "vrf", "description"}}
+	rows = [][]string{{"device", "name", "type", "speed", "enabled", "mgmt_only", "vrf", "mode", "description"}}
 	macs := [][]string{{"mac_address", "device", "interface", "is_primary"}}
 	for _, s := range d.Switches {
 		names := make([]string, 0, len(ifs[s.Hostname]))
@@ -185,7 +198,7 @@ func netboxCSVs(d Design) map[string][]byte {
 			if n == "eth0" {
 				mgmt = "true"
 			}
-			rows = append(rows, []string{s.Hostname, n, f.typ, f.speed, "true", mgmt, f.vrf, f.desc})
+			rows = append(rows, []string{s.Hostname, n, f.typ, f.speed, "true", mgmt, f.vrf, f.mode, f.desc})
 		}
 		if s.MgmtMAC != "" {
 			macs = append(macs, []string{strings.ToUpper(s.MgmtMAC), s.Hostname, "eth0", "true"})
@@ -228,21 +241,28 @@ func netboxCSVs(d Design) map[string][]byte {
 
 	// VLANs, prefixes and addresses
 	vlans := map[int]string{}
-	prefixes := map[string][2]string{} // prefix -> vrf, description
+	prefixes := map[string][3]string{} // prefix -> vrf, description, the VLAN's vid
 	gwCount := map[string]int{}
+	// a segment's gateway, by the VLAN that serves it: the prefix holding it is that VLAN's, which
+	// is how a tool tells which segment (so which rack) a prefix serves, NetBox prefixes carrying
+	// no scope of their own
+	gwVID := map[netip.Addr]int{}
 	for _, s := range d.Switches {
 		for _, v := range s.Vlans {
 			vlans[v.ID] = v.Name
 			// a segment's network is a prefix, or the name of an estate network (oob), which is
 			// no prefix NetBox could hold
 			if p, err := netip.ParsePrefix(v.Network); err == nil {
-				prefixes[p.Masked().String()] = [2]string{"", v.Name}
+				prefixes[p.Masked().String()] = [3]string{"", v.Name, strconv.Itoa(v.ID)}
+			}
+			if g, err := netip.ParsePrefix(v.Gateway); err == nil {
+				gwVID[g.Addr()] = v.ID
 			}
 			gwCount[v.Gateway]++
 		}
 		for _, f := range s.Interfaces {
 			if p, err := netip.ParsePrefix(f.Address); err == nil {
-				prefixes[p.Masked().String()] = [2]string{"", "fabric link " + s.Hostname + " " + f.Name}
+				prefixes[p.Masked().String()] = [3]string{"", "fabric link " + s.Hostname + " " + f.Name, ""}
 			}
 		}
 	}
@@ -251,9 +271,18 @@ func netboxCSVs(d Design) map[string][]byte {
 		if net == "" {
 			net = m.Network
 		}
-		if _, err := netip.ParsePrefix(net); err == nil {
-			prefixes[net] = [2]string{"mgmt", "management " + m.Rack}
+		p, err := netip.ParsePrefix(net)
+		if err != nil {
+			continue
 		}
+		vid := ""
+		for gw, id := range gwVID {
+			if p.Masked().Contains(gw) {
+				vid = strconv.Itoa(id)
+				break
+			}
+		}
+		prefixes[net] = [3]string{"mgmt", "management " + m.Rack, vid}
 	}
 	rows = [][]string{{"site", "vid", "name", "status"}}
 	ids := make([]int, 0, len(vlans))
@@ -265,9 +294,14 @@ func netboxCSVs(d Design) map[string][]byte {
 		rows = append(rows, []string{site, strconv.Itoa(id), vlans[id], "active"})
 	}
 	out["vlans.csv"] = csvBytes(rows)
-	rows = [][]string{{"prefix", "vrf", "status", "description"}}
+	// vlan (by VID) and vlan_site are the import form's way to say which VLAN a prefix belongs to
+	rows = [][]string{{"prefix", "vrf", "vlan", "vlan_site", "status", "description"}}
 	for _, p := range keys(prefixes) {
-		rows = append(rows, []string{p, prefixes[p][0], "active", prefixes[p][1]})
+		site4 := ""
+		if prefixes[p][2] != "" {
+			site4 = site
+		}
+		rows = append(rows, []string{p, prefixes[p][0], prefixes[p][2], site4, "active", prefixes[p][1]})
 	}
 	out["prefixes.csv"] = csvBytes(rows)
 	rows = [][]string{{"address", "status", "role", "device", "interface", "is_primary", "description"}}
@@ -301,8 +335,15 @@ func netboxCSVs(d Design) map[string][]byte {
 	b.WriteString("object type, or `POST /api/<app>/<model>/` with the rows as JSON). The columns are those NetBox's\n")
 	b.WriteString("import forms accept from 4.2 on: MAC addresses are objects of their own, imported after the\n")
 	b.WriteString("interfaces they belong to.\n\n")
-	b.WriteString("Devices and cables are `planned`. Only switch-to-switch cables are here; `../cabling.csv` has\n")
-	b.WriteString("every cable. Prefixes carry no scope. Import in this order:\n\n")
+	b.WriteString("A switch the twin configured is `active` and one still in the factory is `planned`, as\n")
+	b.WriteString("`../expected-switches.json` marks them; cables are `planned`. Only switch-to-switch cables are\n")
+	b.WriteString("here; `../cabling.csv` has every cable. Prefixes carry no scope. An access port carries\n")
+	b.WriteString("`mode: access`, but the VLAN it is untagged in is not a column NetBox's interface import form\n")
+	b.WriteString("has: set each access port's `untagged_vlan` over the REST API after the import, from\n")
+	b.WriteString("`../plan.json`'s VLAN ports (`compat/netbox-ansible/access-vlans.py` does it). Without it a\n")
+	b.WriteString("tool cannot tell which rack a management prefix serves, since prefixes carry no scope: the\n")
+	b.WriteString("rack follows from the segment each switch's management port is cabled into. Import in this\n")
+	b.WriteString("order:\n\n")
 	for i, n := range netboxOrder {
 		fmt.Fprintf(&b, "%d. `%s`\n", i+1, n)
 	}

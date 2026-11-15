@@ -535,6 +535,15 @@ func (s *Server) revision(w http.ResponseWriter, r *http.Request, rest []string)
 			problem(w, http.StatusConflict, "Conflict", "revision "+id+" is "+rv.state)
 			return
 		}
+		// one commit-confirm at a time: while a revision awaits its confirmation no other applies,
+		// so its rollback restores what was there before it and undoes nothing applied since
+		// (UNCONFIRMED as NVUE's own refusal; Cumulus documents the window, not what it blocks)
+		for other, x := range s.revs {
+			if x.state == stateAwaiting {
+				problem(w, http.StatusConflict, "Conflict", "revision "+other+" awaits its confirmation (nv config confirm), or its rollback")
+				return
+			}
+		}
 		// applying: no second apply of it, and the state lock is free while the switch works
 		rv.state = stateApplying
 		prev := Clone(s.applied)

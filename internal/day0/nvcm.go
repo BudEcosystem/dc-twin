@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/netip"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -47,6 +48,9 @@ const (
 	NVCMBMCVLAN      = 201
 	NVCMBMCVNI       = 2001
 	NVCMOOBLoopbacks = "10.254.240.0/24"
+	// NVCMBMCReserve is how many of VLAN 201's first addresses the BMC DHCP leases none of, at
+	// least: NICo's segments keep their first ten back
+	NVCMBMCReserve = 10
 )
 
 var nvcmRoles = map[string]string{"leaf": "In-Band-Leaf", "spine": "Converged-Spine", "oob": "OOB-Leaf"}
@@ -55,6 +59,7 @@ var nvcmRoles = map[string]string{"leaf": "In-Band-Leaf", "spine": "Converged-Sp
 // length: hostname -> 10.30.3.200/24.
 func NVCMMgmtAddrs(d Design) map[string]string {
 	out := map[string]string{}
+	// by rack path (a switch's path less its name): rack names repeat across halls and sites
 	byRack := map[string][]Switch{}
 	for _, s := range d.Switches {
 		// the switches NVCM brings up: factory Cumulus switches (one the twin configures is the
@@ -62,16 +67,11 @@ func NVCMMgmtAddrs(d Design) map[string]string {
 		if !s.Factory || strings.Contains(s.NOS, "sonic") || nvcmRoles[s.Role] == "" {
 			continue
 		}
-		byRack[s.Rack] = append(byRack[s.Rack], s)
+		rack := path.Dir(s.Path)
+		byRack[rack] = append(byRack[rack], s)
 	}
 	for rack, sws := range byRack {
-		var pfx netip.Prefix
-		for _, m := range d.Mgmt {
-			// a network's rack is its path (site-1/hall-a/n01), a switch's its name
-			if (m.Rack == rack || strings.HasSuffix(m.Rack, "/"+rack)) && m.Prefix != "" {
-				pfx, _ = netip.ParsePrefix(m.Prefix)
-			}
-		}
+		pfx := nvcmRackPrefix(d.Mgmt, rack, sws[0].Rack)
 		if !pfx.IsValid() {
 			continue
 		}
@@ -87,6 +87,29 @@ func NVCMMgmtAddrs(d Design) map[string]string {
 		}
 	}
 	return out
+}
+
+// nvcmRackPrefix is a rack's management network: the one whose rack is the rack's path, else the
+// one network whose rack path ends in the rack's name (a design whose switch paths are not under
+// their rack's path); none when two racks of that name have one.
+func nvcmRackPrefix(nets []MgmtNet, rackPath, rackName string) netip.Prefix {
+	var byName []netip.Prefix
+	for _, m := range nets {
+		p, err := netip.ParsePrefix(m.Prefix)
+		if err != nil {
+			continue
+		}
+		if m.Rack == rackPath {
+			return p
+		}
+		if rackName != "" && (m.Rack == rackName || strings.HasSuffix(m.Rack, "/"+rackName)) {
+			byName = append(byName, p)
+		}
+	}
+	if len(byName) == 1 {
+		return byName[0]
+	}
+	return netip.Prefix{}
 }
 
 func nvcmFiles(d Design, release string) (map[string][]byte, error) {
@@ -128,6 +151,7 @@ func nvcmFiles(d Design, release string) (map[string][]byte, error) {
 	oobLo := map[string]string{}
 	oobSVI := map[string]netip.Prefix{}
 	var bmcNet netip.Prefix
+	bmcReserve := 0
 	{
 		var leaves []Switch
 		for _, s := range d.Switches {
@@ -147,19 +171,27 @@ func nvcmFiles(d Design, release string) (map[string][]byte, error) {
 		}
 		// VLAN 201 is one L2 segment across every OOB-Leaf (its L2 VNI), so it is one subnet, as
 		// NVCM's designs have it: the smallest prefix holding every leaf's rack segment, VRR at its
-		// first address, each leaf's vlan201 from its third on (the BMC DHCP keeps its first ten
-		// back, as NICo's segments do)
+		// first address, each leaf's vlan201 from its third on. The BMC DHCP leases none of the
+		// subnet's first reserve addresses: NICo's segments keep their first NVCMBMCReserve back,
+		// and more when the leaves' SVIs reach past them (helpers.json's reserve, which the site's
+		// NICo segment is given)
 		bmcNet = nvcmCover(segs)
 		svi := bmcNet.Addr().Next().Next()
 		for _, s := range leaves {
 			oobSVI[s.Hostname] = netip.PrefixFrom(svi, bmcNet.Bits())
 			svi = svi.Next()
 		}
+		if len(leaves) > 0 {
+			bmcReserve = max(NVCMBMCReserve, 3+len(leaves))
+			if size := 1 << (32 - bmcNet.Bits()); bmcReserve >= size/2 {
+				return nil, fmt.Errorf("VLAN %d (%s): %d OOB-Leafs' addresses leave its BMCs too few", NVCMBMCVLAN, bmcNet, len(leaves))
+			}
+		}
 	}
 	var helpers []any
 	if len(oobLo) > 0 {
 		helpers = append(helpers, map[string]any{"vid": NVCMBMCVLAN, "helpers": []string{NVCMBMCDHCP}, "prefix": bmcNet.String(),
-			"gateway": bmcNet.Addr().Next().String()})
+			"gateway": bmcNet.Addr().Next().String(), "reserve": bmcReserve})
 	}
 	files := map[string][]byte{}
 	bp := filepath.Join("context", NVCMBlueprint)
@@ -399,8 +431,10 @@ Before loading, replace %s in every file with the address NVCM's ZTP and DHCP se
 and %s with the site's BMC DHCP server (the OOB-Leafs' VLAN %d relay). Each switch's eth0 address
 (its reservation) is in its devices/<hostname>.json. helpers.json relates VLAN %d to its relay's
 servers (NVCM's vlan_to_helper_address relationship), which the blueprint format cannot say: load
-it through Nautobot's API after the design job.
-`, NVCMBlueprint, NVCMBlueprint, NVCMBlueprint, NVCMZTPServer, NVCMBMCDHCP, NVCMBMCVLAN, NVCMBMCVLAN))
+it through Nautobot's API after the design job. Its reserve is how many of the VLAN's first
+addresses the BMC DHCP must not lease (the VRR's and every leaf's vlan%d): give the site's NICo
+segment at least that many reserved.
+`, NVCMBlueprint, NVCMBlueprint, NVCMBlueprint, NVCMZTPServer, NVCMBMCDHCP, NVCMBMCVLAN, NVCMBMCVLAN, NVCMBMCVLAN))
 	return files, nil
 }
 

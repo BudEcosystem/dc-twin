@@ -271,6 +271,7 @@ func TestDay0NVCMBMC(t *testing.T) {
 			Vid     int    `json:"vid"`
 			Prefix  string `json:"prefix"`
 			Gateway string `json:"gateway"`
+			Reserve int    `json:"reserve"`
 		} `json:"vlans"`
 	}
 	hb, err := os.ReadFile(filepath.Join(bp, "context", day0.NVCMBlueprint, "helpers.json"))
@@ -284,8 +285,9 @@ func TestDay0NVCMBMC(t *testing.T) {
 	for n := 1; n < 1<<(32-bmcNet.Bits())-1; n++ {
 		last = last.Next()
 	}
+	// its pool past the subnet's reserved first addresses (the VRR's and the leaves' SVIs)
 	first := bmcNet.Addr()
-	for n := 0; n < 10; n++ {
+	for n := 0; n < helpers.Vlans[0].Reserve; n++ {
 		first = first.Next()
 	}
 	kc, _ := json.Marshal(map[string]any{"Dhcp4": map[string]any{

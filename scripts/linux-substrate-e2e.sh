@@ -236,10 +236,14 @@ case $run in TestSonicVS) ;; *) image dctwin-nos-frr-dhcrelay:bookworm "$root/te
 case $run in *TestNVUE*|*TestVMHosts*|*TestDPU*|*TestHBN*|*TestDay0*) image dctwin-nos-nvue-frr:bookworm "$root/test/linuxnet/nos-nvue/Containerfile" "$root/test/linuxnet/nos-nvue" ;; esac
 # the NetBox + Ansible day-0 integration (compat/netbox-ansible): NetBox 4.2.9 with PostgreSQL and
 # Valkey, from quay.io and ECR Public (no Docker Hub), and its controller (net-configurator nc-v8.0.0)
-case $run in *TestDay0NetBox*|TestDay0)
+case $run in *NetBox*|TestDay0)
   for i in quay.io/netboxcommunity/netbox:v4.2.9-3.2.1 public.ecr.aws/docker/library/postgres:17-alpine public.ecr.aws/valkey/valkey:8.0-alpine; do
     "${eng[@]}" image inspect "$i" >/dev/null 2>&1 || "${eng[@]}" pull -q "$i" >/dev/null
-  done
+  done ;;
+esac
+# the controller is Ansible's, which only the NetBox + Ansible integration runs (a tool reading
+# the design from NetBox needs NetBox alone)
+case $run in *TestDay0NetBox*|TestDay0)
   image dctwin-netbox-ansible:test "$root/compat/netbox-ansible/Containerfile" "$root/compat/netbox-ansible" ;;
 esac
 # NVIDIA's nvidia.nvue Ansible collection from Galaxy, the client TestDay0Ansible drives NVUE with

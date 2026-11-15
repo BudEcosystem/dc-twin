@@ -3,13 +3,17 @@
 package tap
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"net"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
+
+	"golang.org/x/sys/unix"
 
 	"github.com/BudEcosystem/dc-twin/internal/day0/clsys"
 	"github.com/BudEcosystem/dc-twin/internal/engine"
@@ -64,6 +68,17 @@ func (s *Substrate) execOne(sw *nosSwitch, c net.Conn) {
 		return
 	}
 	if q.Log != nil {
+		// the socket is the switch's docker daemon, open to its accounts; a record of an SSH
+		// command is taken only from the sshd ForceCommand that ran it
+		pid, ok := peerPID(c)
+		if !ok || !sshCommandPeer(pid, procStat) {
+			// loudly, not silently: a record the twin drops is a tool's doing it does not score,
+			// and the switch's own ForceCommand must never be the one dropped
+			s.log.Warn("a record of an SSH command came from something other than the switch's sshd ForceCommand",
+				"switch", sw.plan.Device.Path, "pid", pid, "command", q.Log.Command)
+			reply(clsys.ExecReply{Code: 1, Error: "dctwin: an SSH command's record is taken from the switch's sshd ForceCommand only"})
+			return
+		}
 		s.recordSSH(sw, *q.Log)
 		reply(clsys.ExecReply{})
 		return
@@ -96,4 +111,41 @@ func (s *Substrate) recordSSH(sw *nosSwitch, l clsys.SSHLog) {
 	}
 	s.eng.LogRead(engine.Request{Path: sw.plan.Device.Path, Canonical: canonical, Protocol: "ssh", Method: method, Target: l.Command,
 		Source: schema.EventSource{Class: "stack", Principal: l.User, Address: l.Address}, Detail: map[string]string{"exit": strconv.Itoa(l.Code)}}, status)
+}
+
+// peerPID is the pid of the process at a Unix socket's other end (SO_PEERCRED), in the twin's pid
+// namespace.
+func peerPID(c net.Conn) (int, bool) {
+	uc, ok := c.(*net.UnixConn)
+	if !ok {
+		return 0, false
+	}
+	raw, err := uc.SyscallConn()
+	if err != nil {
+		return 0, false
+	}
+	var cred *unix.Ucred
+	var cerr error
+	if err := raw.Control(func(fd uintptr) { cred, cerr = unix.GetsockoptUcred(int(fd), unix.SOL_SOCKET, unix.SO_PEERCRED) }); err != nil || cerr != nil {
+		return 0, false
+	}
+	return int(cred.Pid), cred.Pid > 0
+}
+
+// procStat is a process's comm and parent, from /proc/<pid>/stat.
+func procStat(pid int) (string, int, bool) {
+	b, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	if err != nil {
+		return "", 0, false
+	}
+	open, end := bytes.IndexByte(b, '('), bytes.LastIndexByte(b, ')')
+	if open < 0 || end < open {
+		return "", 0, false
+	}
+	f := strings.Fields(string(b[end+1:]))
+	if len(f) < 2 {
+		return "", 0, false
+	}
+	ppid, err := strconv.Atoi(f[1])
+	return string(b[open+1 : end]), ppid, err == nil
 }

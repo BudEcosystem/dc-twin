@@ -58,14 +58,23 @@ func converged() map[string]Observed {
 	}
 }
 
+// twoSegments adds a switch the twin configures with a second rack's segment (10.30.2.0/24), so
+// the design's segments span 10.30.0.0/22.
+func twoSegments(d *Design) {
+	d.Switches = append(d.Switches, Switch{Path: "site-1/a11/oob", Hostname: "a11-oob", Role: "oob", Rack: "a11", NOS: "generic/nvue-frr",
+		Vlans: []Vlan{{Name: "Vlan1002", ID: 1002, Network: "10.30.2.0/24", Gateway: "10.30.2.1/24", Ports: []string{"swp1"}}}})
+}
+
 func TestEvaluate(t *testing.T) {
 	cases := []struct {
-		name  string
-		plan  string
-		edit  func(o map[string]Observed)
-		path  string
-		phase string
-		diffs []string
+		name string
+		plan string
+		edit func(o map[string]Observed)
+		// design, when set, changes the design first
+		design func(d *Design)
+		path   string
+		phase  string
+		diffs  []string
 	}{
 		{name: "converged", plan: "given", path: "site-1/a10/leaf-1", phase: PhaseConverged},
 		{name: "factory", plan: "given", path: "site-1/a10/leaf-1", phase: PhaseFactory,
@@ -102,7 +111,7 @@ func TestEvaluate(t *testing.T) {
 				o["site-1/a10/leaf-1"] = s
 			},
 			diffs: []string{"Vlan1000 has 10.30.0.2/24, the design says 10.30.0.1/24", "eth0 holds no management lease"}},
-		{name: "the segment in the tool's wider subnet", plan: "given", path: "site-1/a10/leaf-1", phase: PhaseConverged,
+		{name: "the segment in the tool's wider subnet", plan: "given", path: "site-1/a10/leaf-1", phase: PhaseConverged, design: twoSegments,
 			edit: func(o map[string]Observed) {
 				// a leaf whose segment (10.30.0.0/24) lies inside VLAN 201's one subnet, gateway elsewhere in it
 				s := o["site-1/a10/leaf-1"]
@@ -110,7 +119,16 @@ func TestEvaluate(t *testing.T) {
 				s.VlanAddrs = map[string][]string{"vlan201": {"10.30.2.3/22", "10.30.2.1/22"}}
 				o["site-1/a10/leaf-1"] = s
 			}},
-		{name: "the gateway on the tool's own VLAN", plan: "given", path: "site-1/a10/leaf-1", phase: PhaseConverged,
+		{name: "a subnet wider than the design's segments", plan: "given", path: "site-1/a10/leaf-1", phase: PhaseConfigured, design: twoSegments,
+			edit: func(o map[string]Observed) {
+				// one SVI over the whole OOB space serves no segment of the design's
+				s := o["site-1/a10/leaf-1"]
+				s.Vlans = map[string]string{"vlan201": "10.30.0.2/20"}
+				s.VlanAddrs = map[string][]string{"vlan201": {"10.30.0.2/20"}}
+				o["site-1/a10/leaf-1"] = s
+			},
+			diffs: []string{"Vlan1000 is missing, the design says 10.30.0.1/24"}},
+		{name: "the gateway on the tool's own VLAN", plan: "given", path: "site-1/a10/leaf-1", phase: PhaseConverged, design: twoSegments,
 			edit: func(o map[string]Observed) {
 				// NVCM's OOB-Leaf: VLAN 201, one subnet across its leaves, the design's gateway its VRR
 				s := o["site-1/a10/leaf-1"]
@@ -164,7 +182,11 @@ func TestEvaluate(t *testing.T) {
 			if c.edit != nil {
 				c.edit(obs)
 			}
-			vs := Evaluate(fabric(c.plan), obs)
+			d := fabric(c.plan)
+			if c.design != nil {
+				c.design(&d)
+			}
+			vs := Evaluate(d, obs)
 			if len(vs) != 3 || vs[0].Path != "site-1/a10/leaf-1" {
 				t.Fatalf("verdicts not one per switch in path order: %+v", vs)
 			}
@@ -209,7 +231,11 @@ func TestWriteInputs(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(dir, "plan.json")); !os.IsNotExist(err) {
 		t.Error("plan: tool left a plan.json")
 	}
-	if err := WriteInputs(dir, fabric("given")); err != nil {
+	// the design with a switch the twin configured (the OOB aggregation of a factory OOB fabric),
+	// so the import's device statuses are both kinds
+	given := fabric("given")
+	twoSegments(&given)
+	if err := WriteInputs(dir, given); err != nil {
 		t.Fatal(err)
 	}
 
@@ -218,7 +244,7 @@ func TestWriteInputs(t *testing.T) {
 	if err := json.Unmarshal(data, &exp); err != nil {
 		t.Fatal(err)
 	}
-	if len(exp) != 3 || exp[0].Hostname != "a10-leaf-1" || exp[2].MgmtMAC != "02:00:00:00:01:01" || !exp[2].Factory || exp[2].NOS != "generic/nvue-frr" {
+	if len(exp) != 4 || exp[0].Hostname != "a10-leaf-1" || exp[2].MgmtMAC != "02:00:00:00:01:01" || !exp[2].Factory || exp[2].NOS != "generic/nvue-frr" {
 		t.Errorf("expected-switches.json: %+v", exp)
 	}
 
@@ -238,7 +264,7 @@ func TestWriteInputs(t *testing.T) {
 	if err := json.Unmarshal(data, &plan); err != nil {
 		t.Fatal(err)
 	}
-	if len(plan.Switches) != 3 || plan.Switches[0].ASN != 65101 || plan.Switches[0].Interfaces[0].Name != "swp1" || len(plan.Mgmt) != 1 {
+	if len(plan.Switches) != 4 || plan.Switches[0].ASN != 65101 || plan.Switches[0].Interfaces[0].Name != "swp1" || len(plan.Mgmt) != 1 {
 		t.Errorf("plan.json: %+v", plan)
 	}
 
@@ -253,31 +279,49 @@ func TestWriteInputs(t *testing.T) {
 		devs[1][0] != "a10-leaf-1" || devs[1][12] != "65101" || devs[1][2] != "Generic" || devs[1][3] != "generic/leaf-switch-400g" || devs[3][3] != "Spine 400G" {
 		t.Errorf("devices.csv: %v", devs)
 	}
+	// a factory switch is planned, one the twin configured active
+	status := map[string]string{}
+	for _, r := range devs[1:] {
+		status[r[0]] = r[6]
+	}
+	if status["a10-leaf-1"] != "planned" || status["a11-oob"] != "active" {
+		t.Errorf("devices.csv statuses (a factory switch is planned, the twin's active): %v", status)
+	}
 	cables := readCSV(t, filepath.Join(nb, "cables.csv"))
 	if len(cables) != 3 || cables[1][1] != "dcim.interface" {
 		t.Errorf("cables.csv (switch-to-switch only): %v", cables)
 	}
 	ifs := readCSV(t, filepath.Join(nb, "interfaces.csv"))
+	mode := map[string]string{} // <device> <port> -> its mode
 	found := false
 	for _, r := range ifs {
 		if r[0] == "a10-spine-1" && r[1] == "swp1" {
 			found = r[2] == "400gbase-x-qsfpdd" && r[3] == "400000000"
 		}
+		if len(r) > 7 {
+			mode[r[0]+" "+r[1]] = r[7]
+		}
 	}
 	if !found {
 		t.Errorf("interfaces.csv: %v", ifs)
+	}
+	// an access port is mode access (its untagged VLAN goes in over REST); nothing else is
+	if mode["a10-leaf-1 swp1"] != "access" || mode["a10-leaf-1 swp63"] != "" || mode["a10-leaf-1 Vlan1000"] != "" {
+		t.Errorf("interfaces.csv modes: %v", mode)
 	}
 	ips := readCSV(t, filepath.Join(nb, "ip_addresses.csv"))
 	if ips[1][0] != "10.255.0.2/32" || ips[1][2] != "loopback" || ips[1][4] != "lo" {
 		t.Errorf("ip_addresses.csv: %v", ips)
 	}
 	readme, _ := os.ReadFile(filepath.Join(nb, "README.md"))
-	if !strings.Contains(string(readme), "NetBox "+NetBoxVersion) || !strings.Contains(string(readme), "1. `custom_fields.csv`") {
+	if !strings.Contains(string(readme), "NetBox "+NetBoxVersion) || !strings.Contains(string(readme), "1. `custom_fields.csv`") ||
+		!strings.Contains(string(readme), "untagged_vlan") {
 		t.Errorf("README.md: %s", readme)
 	}
 
 	// deterministic: the same design in another order writes the same bytes
 	d2 := fabric("given")
+	twoSegments(&d2)
 	d2.Switches[0], d2.Switches[2] = d2.Switches[2], d2.Switches[0]
 	dir2 := t.TempDir()
 	if err := WriteInputs(dir2, d2); err != nil {
