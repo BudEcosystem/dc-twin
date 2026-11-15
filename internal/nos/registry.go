@@ -35,19 +35,19 @@ func FromRegistry(registry, image string) string {
 }
 
 // ValidRegistry checks a registry as the twin takes one: a host with an optional port and path
-// (ghcr.io/budecosystem, registry.lab:5000/dc-twin), no scheme, no tag.
+// (registry.bud.studio/gpu-foundry, registry.lab:5000/dc-twin), no scheme, no tag.
 func ValidRegistry(registry string) error {
 	switch {
 	case registry == "":
 		return nil
 	case strings.Contains(registry, "://"):
-		return fmt.Errorf("%q: a registry is named without a scheme (ghcr.io/budecosystem)", registry)
+		return fmt.Errorf("%q: a registry is named without a scheme (registry.bud.studio/gpu-foundry)", registry)
 	case strings.ContainsAny(registry, " @"):
 		return fmt.Errorf("%q: not a registry", registry)
 	}
 	host, _, _ := strings.Cut(strings.TrimRight(registry, "/"), "/")
 	if !strings.ContainsAny(host, ".:") && host != "localhost" {
-		return fmt.Errorf("%q: a registry's first part is its host (ghcr.io, registry.lab:5000, localhost:5000)", registry)
+		return fmt.Errorf("%q: a registry's first part is its host (registry.bud.studio, registry.lab:5000, localhost:5000)", registry)
 	}
 	return nil
 }

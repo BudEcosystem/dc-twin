@@ -9,20 +9,26 @@ pod runs unprivileged, as a non-root user with a read-only root filesystem.
 ## Install
 
 The chart runs the image the repository's `Dockerfile` builds, which `.github/workflows/images.yml`
-publishes to `ghcr.io/budecosystem/dc-twin` for amd64 and arm64: the chart's `appVersion` (its
-default tag) once, and every commit on `main` as `sha-<commit>` (set `image.tag` to pin one).
-GitHub's registry keeps a new package private: make it public, or give the cluster a pull secret
-(`imagePullSecrets`) for a token that can read packages.
+publishes to `registry.bud.studio/gpu-foundry/dc-twin` for amd64 and arm64: the chart's
+`appVersion` (its default tag) once, and every commit on `main` as `sha-<commit>` (set `image.tag`
+to pin one). The project is private, so give the cluster a pull secret for an account that can
+read it, and name it in `imagePullSecrets`:
+
+```bash
+kubectl -n dc-twin create secret docker-registry bud-registry --docker-server=registry.bud.studio \
+  --docker-username='<robot account>' --docker-password='<its secret>'
+helm install dc-twin charts/dc-twin -n dc-twin --set 'imagePullSecrets[0].name=bud-registry'
+```
 
 Before the workflow has published it, or to run your own change, build it where your cluster can
 pull it:
 
 ```bash
-make image                                   # ghcr.io/budecosystem/dc-twin:<appVersion>
+make image                                   # registry.bud.studio/gpu-foundry/dc-twin:<appVersion>
 ```
 
 That is enough for a cluster that runs on the same Docker Engine (Docker Desktop, Colima, k3s
-with Docker). Load it into kind with `kind load docker-image ghcr.io/budecosystem/dc-twin:0.1.0`.
+with Docker). Load it into kind with `kind load docker-image registry.bud.studio/gpu-foundry/dc-twin:0.1.0`.
 For any other cluster, push it to a registry and set `image.repository`:
 
 ```bash
@@ -141,7 +147,7 @@ want to keep and install it with `estate.file`.
 
 | Value | Default | |
 |---|---|---|
-| `image.repository`, `image.tag` | `ghcr.io/budecosystem/dc-twin`, the appVersion | |
+| `image.repository`, `image.tag` | `registry.bud.studio/gpu-foundry/dc-twin`, the appVersion | |
 | `adapters` | `[]` (every adapter) | `dctwin up --adapters`, e.g. `[redfish, bms]` |
 | `console` | `true` | Serve the console beside the control API |
 | `control.port` | `8765` | The control API's and the console's port |

@@ -125,7 +125,7 @@ type NOSOptions struct {
 	Image string `json:"image,omitempty"`
 	// Registry is where the twin's own images (its NOSes' and their sidecars', named with no
 	// registry: dctwin-nos-nvue-frr:bookworm) are pulled from when the Docker host does not have
-	// one: <registry>/<name>:<tag>, then tagged as the twin names it (ghcr.io/budecosystem). Unset,
+	// one: <registry>/<name>:<tag>, then tagged as the twin names it (registry.bud.studio/gpu-foundry). Unset,
 	// the DCTWIN_REGISTRY environment variable; unset too, a missing image is an error.
 	Registry string `json:"registry,omitempty"`
 	// Underlay is the IPv4 prefix fabric links' /31s are numbered from (default 10.255.0.0/16).

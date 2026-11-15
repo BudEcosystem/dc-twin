@@ -1370,7 +1370,7 @@ tool, or NVCM leaves DSX OS.
 *Built (2026-11-15).* The images the twin runs and the e2e script builds (its NOSes', HBN's, the
 tests' Kea, runner and controllers) and SONiC's sidecars (which SONiC publishes only as build
 artifacts, which expire) are published to a registry (`scripts/publish-images.sh`, run by
-`.github/workflows/images.yml`; GitHub's container registry). A Docker host that lacks one pulls
+`.github/workflows/images.yml`; `registry.bud.studio/gpu-foundry`, a Harbor). A Docker host that lacks one pulls
 `<registry>/<name>:<tag>` and tags it with the name the twin runs it by
 (`spec.adapters.network.nos.registry`, `DCTWIN_REGISTRY`; the e2e script's `REGISTRY`), so nothing
 that runs it changes, and a host with no registry builds as before. An image named with a registry

@@ -5,7 +5,7 @@
 # names it. .github/workflows/images.yml runs it; by hand it needs docker with buildx (and QEMU's
 # binfmt for the other architecture), skopeo, and a login to the registry.
 #
-#   REGISTRY=ghcr.io/budecosystem scripts/publish-images.sh [built|sonic|twin|all]   (all: the default)
+#   REGISTRY=registry.bud.studio/gpu-foundry scripts/publish-images.sh [built|sonic|twin|all]   (all: the default)
 #   DRY_RUN=1 …     prints what it would build and push, and reads nothing from the registry
 #
 # What it publishes:
@@ -29,7 +29,7 @@
 # checkout's committed content: a context with uncommitted changes is refused.
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
-reg=${REGISTRY:?REGISTRY=<host>/<path>, e.g. ghcr.io/budecosystem}
+reg=${REGISTRY:?REGISTRY=<host>/<path>, e.g. registry.bud.studio/gpu-foundry}
 reg=${reg%/}
 platforms=${PLATFORMS:-linux/amd64,linux/arm64}
 what=${1:-all}
@@ -82,6 +82,24 @@ published() {
   [ -z "$dry" ] && skopeo inspect --raw "docker://$1" >/dev/null 2>&1
 }
 
+# published_platforms <ref>: the os/arch of each image published under it (an index's entries, or
+# the one image's own)
+published_platforms() {
+  local raw
+  raw=$(skopeo inspect --raw "docker://$1" 2>/dev/null) || return 0
+  if grep -q '"manifests"' <<<"$raw"; then
+    python3 -c '
+import json, sys
+for m in json.loads(sys.argv[1]).get("manifests", []):
+    p = m.get("platform") or {}
+    if p.get("architecture") not in (None, "unknown"):  # buildx attestations are unknown/unknown
+        print(p.get("os", "linux") + "/" + p["architecture"])
+' "$raw"
+  else
+    skopeo inspect --format '{{.Os}}/{{.Architecture}}' "docker://$1" 2>/dev/null
+  fi
+}
+
 # published_identity <ref>: its dc-twin.context label ("" when it has none)
 published_identity() {
   skopeo inspect --override-os linux --override-arch amd64 --format '{{index .Labels "dc-twin.context"}}' "docker://$1" 2>/dev/null | sed 's/<no value>//'
@@ -107,17 +125,27 @@ publish_built() { # <tag> <context> [<base tag> <base context>]
     local have
     have=$(published_identity "$reg/$tag")
     if [ "$have" = "$id" ]; then
-      echo "$tag: published, from the same $ctx"
-      return
+      # the same content: published, unless a platform is missing (one published from a single
+      # host has its own only), which is added by publishing it again for every platform
+      local have_platforms missing="" p
+      have_platforms=$(published_platforms "$reg/$tag")
+      for p in ${platforms//,/ }; do grep -qx "$p" <<<"$have_platforms" || missing+=" $p"; done
+      if [ -z "$missing" ]; then
+        echo "$tag: published, from the same $ctx"
+        return
+      fi
+      echo "$tag: published from the same $ctx, but not for$missing: publishing it again for $platforms"
+    else
+      echo "FAIL: $reg/$tag is published from another $ctx${basectx:+ and $basectx} (${have:-no dc-twin.context label}; now $id)." >&2
+      echo "  A host that has the tag never pulls it again: give the image a new tag where it is named" >&2
+      echo "  (internal/nos, scripts/linux-substrate-e2e.sh and scripts/publish-images.sh)." >&2
+      return 1
     fi
-    echo "FAIL: $reg/$tag is published from another $ctx${basectx:+ and $basectx} (${have:-no dc-twin.context label}; now $id)." >&2
-    echo "  A host that has the tag never pulls it again: give the image a new tag where it is named" >&2
-    echo "  (internal/nos, scripts/linux-substrate-e2e.sh and scripts/publish-images.sh)." >&2
-    return 1
+  else
+    echo "$tag: building from $ctx for $platforms"
   fi
   local file=$ctx/Containerfile dir=$ctx
   if [ -f "$root/$ctx" ]; then file=$ctx dir=$(dirname "$ctx"); fi
-  echo "$tag: building from $ctx for $platforms"
   run docker buildx build --platform "$platforms" --label "dc-twin.context=$id" \
     ${base:+--build-arg "BASE=$reg/$base"} -t "$reg/$tag" -f "$root/$file" --push "$root/$dir"
 }
@@ -184,9 +212,15 @@ publish_sonic_vs() {
 case $what in built|sonic|twin|all) ;; *) echo "usage: publish-images.sh [built|sonic|twin|all]" >&2; exit 2 ;; esac
 failed=0
 case $what in built|all)
+  unpublished=" " # tags that failed here: an image built on one is not built on what the registry still holds
   for b in "${built[@]}"; do
     read -r tag ctx base basectx <<<"$b"
-    publish_built "$tag" "$ctx" "${base:-}" "${basectx:-}" || failed=1
+    if [ -n "${base:-}" ] && [[ $unpublished == *" $base "* ]]; then
+      echo "FAIL: $tag is built on $base, which was not published: not built" >&2
+      failed=1 unpublished+="$tag "
+      continue
+    fi
+    publish_built "$tag" "$ctx" "${base:-}" "${basectx:-}" || { failed=1; unpublished+="$tag "; }
   done ;;
 esac
 case $what in sonic|all)

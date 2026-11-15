@@ -64,7 +64,7 @@
 #       (RUN=TestDPUAgent MODE=native HBN_BINARIES=...).
 #   NOS_MEMORY=512m: every container the twin and the tests create gets that memory limit, with no
 #     swap beyond it (spec.adapters.network.nos.memory), for a host with a memory budget.
-#   REGISTRY=ghcr.io/budecosystem: the images this script builds or fetches (the NOSes', SONiC's
+#   REGISTRY=registry.bud.studio/gpu-foundry: the images this script builds or fetches (the NOSes', SONiC's
 #     sidecars, the tests' Kea and controllers) are pulled from <REGISTRY>/<name>:<tag> first, and
 #     built or fetched only when the registry has none (.github/workflows/images.yml publishes
 #     them); the twin is given it as DCTWIN_REGISTRY, so it pulls any switch image still missing.

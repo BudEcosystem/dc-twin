@@ -3,7 +3,7 @@
 # definition, the os: twin guest image) are not in the image: some may not be redistributed (D13),
 # so `dctwin assets fetch` obtains them where the twin runs, as the chart's init container does.
 #
-#   docker build -t ghcr.io/budecosystem/dc-twin:dev .
+#   docker build -t registry.bud.studio/gpu-foundry/dc-twin:dev .
 #   docker buildx build --platform linux/amd64,linux/arm64 -t <registry>/dc-twin:<tag> --push .
 
 FROM --platform=$BUILDPLATFORM golang:1.26 AS build

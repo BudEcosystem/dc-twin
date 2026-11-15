@@ -3,9 +3,10 @@
 # the site gateway.
 
 image:
-  repository: ghcr.io/budecosystem/dc-twin
+  repository: registry.bud.studio/gpu-foundry/dc-twin
   tag: ""  # defaults to the chart's appVersion
   pullPolicy: IfNotPresent
+# the registry's project is private: a secret for an account that can read it (README: Install)
 imagePullSecrets: []
 nameOverride: ""
 fullnameOverride: ""
