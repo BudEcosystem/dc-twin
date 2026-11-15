@@ -1394,9 +1394,10 @@ the twin drives it as it drives a host's, and opens each switch's network namesp
 because the twin hands the engine paths in it to mount into switches; the day-0 programs, now built
 into the twin's image (`/opt/dctwin/day0`), are copied by the engine to a shared directory the twin
 is told of by `DCTWIN_DAY0_BINARIES` (after the estate's `nos.day0Binaries`, before the directory
-beside the twin's executable). The engine pulls the twin's switch images from a registry (D81),
-logged in with a pull secret, since Podman's API reads its own credentials where Docker's needs
-the client's. The site's day-0 servers are containers the engine starts before the twin, attached
+beside the twin's executable). The engine pulls the twin's switch images from a registry (D81)
+with a pull secret's login, which the twin sends with each pull (`X-Registry-Auth`, read from
+`REGISTRY_AUTH_FILE` or Docker's `config.json`) as the Docker CLI does: neither engine's API logs
+in with anything else, Podman's included, though its own CLI reads its auth file. The site's day-0 servers are containers the engine starts before the twin, attached
 by name as on a host: DHCP and ZTP happen on a switch's management network, which no other pod is
 on. **Why:** GPU Foundry, the software under test, runs in a cluster and is integrated against a
 twin at a URL; day 0 was otherwise only on a Linux host with the e2e script. **Amends:** D34 (the

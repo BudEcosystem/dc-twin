@@ -164,6 +164,11 @@ spec:
             - name: DCTWIN_REGISTRY
               value: {{ . | quote }}
             {{- end }}
+            {{- if $auth }}
+            # the login the twin sends with each pull (X-Registry-Auth), as the Docker CLI does
+            - name: REGISTRY_AUTH_FILE
+              value: /etc/dctwin/engine-auth/.dockerconfigjson
+            {{- end }}
             {{- end }}
             {{- with .Values.extraEnv }}
             {{- toYaml . | nindent 12 }}
@@ -207,6 +212,11 @@ spec:
             {{- if $tap }}
             - name: engine-run
               mountPath: /run/dctwin-engine
+            {{- if $auth }}
+            - name: engine-auth
+              mountPath: /etc/dctwin/engine-auth
+              readOnly: true
+            {{- end }}
             {{- end }}
             - name: state
               mountPath: /var/lib/dctwin/state
