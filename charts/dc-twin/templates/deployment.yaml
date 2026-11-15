@@ -78,6 +78,10 @@ spec:
           args:
             - |
               rm -f /run/dctwin-engine/podman.sock /run/dctwin-engine/ready
+              # the image's defaults run containers in the engine's own namespaces, with no
+              # cgroups (for Podman in Podman); a switch has its own hostname and memory limit
+              printf '[containers]\nnetns="private"\nipcns="private"\nutsns="private"\ncgroupns="private"\ncgroups="enabled"\n' >/tmp/dctwin-engine.conf
+              export CONTAINERS_CONF_OVERRIDE=/tmp/dctwin-engine.conf
               podman system service --time=0 unix:///run/dctwin-engine/podman.sock &
               svc=$!
               until [ -S /run/dctwin-engine/podman.sock ]; do sleep 0.2; done
