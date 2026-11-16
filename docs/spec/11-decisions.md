@@ -1399,7 +1399,11 @@ with a pull secret's login, which the twin sends with each pull (`X-Registry-Aut
 `REGISTRY_AUTH_FILE` or Docker's `config.json`) as the Docker CLI does: neither engine's API logs
 in with anything else, Podman's included, though its own CLI reads its auth file. The site's day-0 servers are containers the engine starts before the twin, attached
 by name as on a host: DHCP and ZTP happen on a switch's management network, which no other pod is
-on. **Why:** GPU Foundry, the software under test, runs in a cluster and is integrated against a
+on. Each is a management server's two networks: the switch network through the attach (its
+`routes` the site's networks), and its backend on an engine network whose default route leaves
+through the pod, so the tooling's backend runs in the cluster; files, flags and networks are the
+chart's (`tap.files`, `options`, `tap.networks`), and the engine clears a previous pod's
+containers when it starts, since its store outlives the pod. **Why:** GPU Foundry, the software under test, runs in a cluster and is integrated against a
 twin at a URL; day 0 was otherwise only on a Linux host with the e2e script. **Amends:** D34 (the
 loopback substrate is the chart's default, no longer its only one). **Reversed if:** a cluster
 network can put a pod on a switch's management segment (Multus or a CNI the twin drives), so the

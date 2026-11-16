@@ -55,8 +55,15 @@ spec:
       nos:
         cumulusVersion: "5.14.0"
         images: []
+      # The site's tooling, the slots GPU Foundry fills (charts/dc-twin tap.containers). Each reaches
+      # the management network (10.30.0.0/20), the service networks (10.90.0.0/16) and the
+      # switches' loopbacks through its port, and keeps its default route on its own side: the
+      # cluster, where the tooling's backends (NVCM's, NICo's) run.
       attach:
-        - { container: nvcm-edge, port: "oob-agg-1:eth128", address: 10.90.0.10/24, gateway: 10.90.0.1, interface: eth0 }
-        - { container: site-tooling, port: "oob-agg-1:eth127", address: 10.90.1.10/24, gateway: 10.90.1.1, interface: probe0 }
+        - { container: nvcm-edge, port: "oob-agg-1:eth128", address: 10.90.0.10/24, gateway: 10.90.0.1, interface: eth0,
+            routes: [10.30.0.0/20, 10.90.0.0/16, 10.255.255.0/24] }
+        - { container: site-tooling, port: "oob-agg-1:eth127", address: 10.90.1.10/24, gateway: 10.90.1.1, interface: probe0,
+            routes: [10.30.0.0/20, 10.90.0.0/16, 10.255.255.0/24] }
         # the BMCs' DHCP (NICo's forge-dhcp-server), in VRF OOB on the aggregation switch
-        - { container: nico-dhcp, port: "oob-agg-1:eth122", address: 10.90.2.10/24, gateway: 10.90.2.1, interface: svc0 }
+        - { container: nico-dhcp, port: "oob-agg-1:eth122", address: 10.90.2.10/24, gateway: 10.90.2.1, interface: svc0,
+            routes: [10.30.0.0/20, 10.90.0.0/16, 10.255.255.0/24] }

@@ -102,16 +102,40 @@ tap:
   # kubernetes.io/dockerconfigjson Secret it logs in with; "" uses the first of imagePullSecrets.
   registry: registry.bud.studio/gpu-foundry
   registryAuthSecret: ""
-  # Containers the engine starts before the twin: what the estate's spec.adapters.network.attach
-  # names by `container`, cabled to a switch port when the twin comes up, such as the site's day-0
-  # DHCP and ZTP servers. They start with no network unless `network` names one of the engine's.
-  # (An attach by `netns` is not supported here.)
+  # The site's day-0 tooling (18): containers the engine starts, in this order, before the twin.
+  # The estate's spec.adapters.network.attach cables one to a switch port by its `container` name
+  # when the twin comes up, as the site's DHCP and ZTP servers are on its management network.
+  # (An attach by `netns` is not supported here.) Each container:
+  #   network  none (the default): only what the twin attaches; an engine network (tap.networks),
+  #            with podman's options ("nvcm-net:interface_name=eth1" leaves eth0 to the twin);
+  #            "container:<name>" to share an earlier container's network namespace; "podman",
+  #            the engine's default bridge, which reaches the cluster through the pod
+  #   mounts   "<file set>[/<path>]:<container path>[:ro]", a file of tap.files or a whole set
+  #   options  more `podman run` flags: --cap-add, --sysctl, --hostname, -v <volume>:<path> (a
+  #            named volume lives in the engine's store, so it survives the pod)
+  # A container the twin attached loses its port if it restarts: the twin attaches at `up` only.
   containers: []
+    # NVIDIA Config Manager's edge, as compat/nvcm/nvcm.sh runs it: Kea on its backend's network as
+    # eth1, the twin's management network as eth0, and its DHCP API, configuration sync, ZTP API
+    # and SFTP in its network namespace
     # - name: nvcm-edge
     #   image: registry.bud.studio/gpu-foundry/nvcm-kea:1.4.1
-    #   args: []
-    #   env: { KEA_CONFIG: /etc/kea/kea-dhcp4.conf }
-    #   network: none
+    #   network: "nvcm-net:interface_name=eth1"
+    #   mounts: ["nvcm/nv-config-manager.ini:/etc/vault/nv-config-manager.ini:ro"]
+    #   options: [--hostname, nvcm-edge, --cap-add, NET_RAW, --cap-add, NET_BIND_SERVICE,
+    #             --sysctl, net.ipv4.ip_unprivileged_port_start=0]
+    # - name: nvcm-ztp
+    #   image: registry.bud.studio/gpu-foundry/nvcm-app:1.4.1
+    #   network: "container:nvcm-edge"
+    #   env: { NV_CONFIG_MANAGER_INI: /etc/nv-config-manager/nv-config-manager.ini, NV_CONFIG_MANAGER_REJECT_IDENTITY_HEADERS: "true" }
+    #   mounts: ["nvcm/nv-config-manager.ini:/etc/nv-config-manager/nv-config-manager.ini:ro"]
+    #   args: [nv-config-manager-ztp-api, --port, "80"]
+  # Engine networks the containers join by name, made if missing.
+  networks: []
+    # - nvcm-net
+  # Files the containers mount: each a Secret or ConfigMap of yours, as a file set by `name`.
+  files: []
+    # - { name: nvcm, secret: nvcm-config }
 
 # Accept vm guests of another architecture under TCG (dctwin up --allow-tcg).
 allowTCG: false

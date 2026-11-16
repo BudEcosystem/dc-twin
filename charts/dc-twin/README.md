@@ -177,6 +177,25 @@ helm install day0 charts/dc-twin -n dc-twin-day0 \
   -f day0-containers.yaml   # tap.containers: the attach targets
 ```
 
+### The site's day-0 tooling in the slots
+
+The software under test brings its own DHCP and ZTP servers, as NVIDIA Config Manager's edge
+(Kea with its DHCP API, configuration sync, ZTP API and SFTP; `compat/nvcm/nvcm.sh`) or NICo's DHCP
+server. Each runs as it would on a site's management server, with two networks:
+
+- **The switch network**, as `eth0` (or the attach's `interface`): the twin's port, at the
+  attach's address. Give the attach `routes`, the site's networks (the management network, the
+  service networks, the switches' loopbacks), so only those go through the switch.
+- **Its backend**, as `eth1`: an engine network (`tap.networks`, `network:
+  "<net>:interface_name=eth1"`), whose traffic leaves through the pod. Its default route is here,
+  so it reaches the cluster: its backend's Services by name, as a pod does.
+
+Further containers share the edge's network namespace (`network: "container:nvcm-edge"`).
+Configuration files come from your Secrets and ConfigMaps (`tap.files`, `mounts`); capabilities,
+sysctls and the hostname are `options`. A named volume (`options: [-v, <name>:<path>]`) is kept in
+the engine's store across pods; containers are not: each pod starts the tooling again, and the
+twin cables it again at `up`. values.yaml has NVIDIA Config Manager's edge as an example.
+
 ## Values
 
 | Value | Default | |
@@ -200,7 +219,9 @@ helm install day0 charts/dc-twin -n dc-twin-day0 \
 | `tap.engine.image`, `.resources` | `quay.io/podman/stable:v5.2.2` | The engine sidecar |
 | `tap.engine.persistence.enabled`, `.size`, `.storageClass`, `.existingClaim` | `true`, `20Gi`, default class | The engine's image store |
 | `tap.registry`, `tap.registryAuthSecret` | `registry.bud.studio/gpu-foundry`, the first pull secret | Where the twin's switch images come from (`DCTWIN_REGISTRY`) |
-| `tap.containers` | `[]` | `name`, `image`, `args`, `env`, `network` (default `none`): started before the twin, for `attach` |
+| `tap.containers` | `[]` | `name`, `image`, `args`, `env`, `network` (default `none`), `mounts`, `options`: started in order before the twin, for `attach` |
+| `tap.networks` | `[]` | Engine networks the containers join by name |
+| `tap.files` | `[]` | `name`, and a `secret` or a `configMap`: file sets the containers mount |
 
 The pod and container security contexts, the service account (it mounts no token: the twin calls
 no Kubernetes API), node selector, tolerations and affinity are in [values.yaml](values.yaml).

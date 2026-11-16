@@ -85,14 +85,30 @@ spec:
               podman system service --time=0 unix:///run/dctwin-engine/podman.sock &
               svc=$!
               until [ -S /run/dctwin-engine/podman.sock ]; do sleep 0.2; done
-              podman pull -q {{ include "dc-twin.image" . | squote }} >/dev/null
-              c=$(podman create --entrypoint /none {{ include "dc-twin.image" . | squote }})
+              # the store outlives the pod: a previous pod's containers (its switches, its tooling)
+              # are gone with it, and the tooling is started again below; named volumes are kept
+              podman rm -a -f -t 0 >/dev/null 2>&1 || true
+              podman pull -q {{ include "dc-twin.shq" (include "dc-twin.image" .) }} >/dev/null
+              c=$(podman create --entrypoint /none {{ include "dc-twin.shq" (include "dc-twin.image" .) }})
               podman cp "$c:/opt/dctwin/day0/." /opt/dctwin-day0/
               podman rm "$c" >/dev/null
+              {{- range .Values.tap.networks }}
+              podman network exists {{ include "dc-twin.shq" . }} || podman network create {{ include "dc-twin.shq" . }} >/dev/null
+              {{- end }}
+              {{- $sets := dict }}
+              {{- range .Values.tap.files }}
+              {{- $_ := set $sets .name true }}
+              {{- end }}
               {{- range .Values.tap.containers }}
-              podman run -d --replace --name {{ .name | squote }} --network {{ default "none" .network | squote }}
-              {{- range $k, $v := .env }} -e {{ printf "%s=%s" $k $v | squote }}{{ end }} {{ .image | squote }}
-              {{- range .args }} {{ . | squote }}{{ end }} >/dev/null
+              {{- $c := . }}
+              podman run -d --replace --name {{ include "dc-twin.shq" .name }} --network {{ include "dc-twin.shq" (default "none" .network) }}
+              {{- range $k, $v := .env }} -e {{ include "dc-twin.shq" (printf "%s=%s" $k $v) }}{{ end }}
+              {{- range .mounts }}
+              {{- $set := regexFind "^[^/:]*" . }}
+              {{- if not (hasKey $sets $set) }}{{ fail (printf "tap.containers %s: mount %q: %q is not in tap.files" $c.name . $set) }}{{ end }} -v {{ include "dc-twin.shq" (printf "/etc/dctwin/tap-files/%s" .) }}
+              {{- end }}
+              {{- range .options }} {{ include "dc-twin.shq" . }}{{ end }} {{ include "dc-twin.shq" .image }}
+              {{- range .args }} {{ include "dc-twin.shq" . }}{{ end }} >/dev/null
               {{- end }}
               touch /run/dctwin-engine/ready
               wait $svc
@@ -122,6 +138,11 @@ spec:
             {{- if $auth }}
             - name: engine-auth
               mountPath: /etc/dctwin/engine-auth
+              readOnly: true
+            {{- end }}
+            {{- range .Values.tap.files }}
+            - name: tap-files-{{ .name }}
+              mountPath: /etc/dctwin/tap-files/{{ .name }}
               readOnly: true
             {{- end }}
       {{- end }}
@@ -272,6 +293,18 @@ spec:
         - name: engine-auth
           secret:
             secretName: {{ $auth }}
+        {{- end }}
+        {{- range .Values.tap.files }}
+        - name: tap-files-{{ .name }}
+          {{- if .secret }}
+          secret:
+            secretName: {{ .secret }}
+          {{- else if .configMap }}
+          configMap:
+            name: {{ .configMap }}
+          {{- else }}
+          {{- fail (printf "tap.files %s: name a secret or a configMap" .name) }}
+          {{- end }}
         {{- end }}
         {{- end }}
         {{- if $cm }}
