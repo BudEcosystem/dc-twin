@@ -1,11 +1,12 @@
 # A DSX OS site's day 0 (18 — Z7d) on GB300 NVL72 racks: dsx-day0's shape, with two NVIDIA GB300
 # NVL72 racks (18 compute trays, 9 NVLink switch trays and 8 power shelves each) in place of its CPU
-# racks, fed through a UPS and a remote power panel per feed. Each rack's two management switches
-# leave the factory and are NVIDIA Config Manager's OOB-Leafs, brought up by NVCM's DHCP and ZTP
-# through the OOB aggregation switch, the one switch the twin configures; the trays' and shelves'
-# BMCs lease from NICo's DHCP through the relays NVCM renders on the leaves (VRF OOB, over EVPN to
-# the aggregation switch). Kea (NVCM's edge) attaches at the aggregation switch's eth128, the site's
-# tooling at eth127, NICo's DHCP at eth122 (the leaves' management ports take eth123 to eth126).
+# racks, fed through a UPS and a remote power panel per feed, with their InfiniBand scale-out
+# fabric under UFM. Each rack's two management switches leave the factory and are NVIDIA Config
+# Manager's OOB-Leafs, brought up by NVCM's DHCP and ZTP through the OOB aggregation switch, the one
+# switch the twin configures; the trays' and shelves' BMCs lease from NICo's DHCP through the relays
+# NVCM renders on the leaves (VRF OOB, over EVPN to the aggregation switch). Kea (NVCM's edge)
+# attaches at the aggregation switch's eth128, the site's tooling at eth127, NICo's DHCP at eth122
+# (the leaves' management ports take eth123 to eth126).
 apiVersion: dc-twin/v1alpha1
 kind: Estate
 metadata:
@@ -26,15 +27,20 @@ spec:
               racks:
                 - { name: r01, position: 1, format: nvidia/gb300-nvl72, feeds: [A, B] }
                 - { name: r02, position: 2, format: nvidia/gb300-nvl72, feeds: [A, B] }
-                - { name: n01, position: 4, format: generic/network-rack, feeds: [A, B] }
+                - { name: n01, position: 4, format: generic/network-rack, params: { ufm: nvidia/ufm-appliance, ibRails: 4 }, feeds: [A, B] }
   networks:
     oob: { role: management, dhcp: stack, cidr: 10.30.0.0/20, fabric: oob, server: 10.90.0.10 }
+    backend: { role: scale-out, fabric: backend }
   fabrics:
     - name: oob
       template: oob-flat
       nos: generic/nvue-frr
       bringUp: factory
       factory: { install: preinstalled, ztp: enabled, bootTime: 60s, installTime: 2m, plan: given, select: "r01/mgmt-switch-* r02/mgmt-switch-*" }
+    # the trays' ConnectX-8 InfiniBand, four rails of NVIDIA Quantum switches in the network rack, and
+    # UFM (its appliance in n01) managing them: UFM's REST answers at the appliance's management
+    # lease, which the site's DHCP gives it
+    - { name: backend, template: rail-optimised, technology: infiniband, nos: none, manager: nvidia/ufm, params: { rails: 4 }, select: "r0*", placeIn: n01 }
   stacks: []
   facility:
     power:
