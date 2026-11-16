@@ -1,0 +1,24 @@
+apiVersion: dc-twin/v1alpha1
+kind: MibDialect
+metadata: { name: generic/ups-mib, version: 0.1.0 }
+spec:
+  # upsMIB itself: a card that implements the standard UPS-MIB and no vendor MIB
+  sysObjectID: 1.3.6.1.2.1.33
+  sysDescr: "UPS network management card (UPS-MIB, RFC 1628) (dc-twin model UPS)"
+  objects:
+    upsIdentManufacturer:         1.3.6.1.2.1.33.1.1.1.0
+    upsIdentModel:                1.3.6.1.2.1.33.1.1.2.0
+    upsIdentName:                 1.3.6.1.2.1.33.1.1.5.0
+    upsBatteryStatus:             1.3.6.1.2.1.33.1.2.1.0
+    upsSecondsOnBattery:          1.3.6.1.2.1.33.1.2.2.0
+    upsEstimatedMinutesRemaining: 1.3.6.1.2.1.33.1.2.3.0
+    upsEstimatedChargeRemaining:  1.3.6.1.2.1.33.1.2.4.0
+    upsOutputSource:              1.3.6.1.2.1.33.1.4.1.0
+    upsOutputNumLines:            1.3.6.1.2.1.33.1.4.3.0
+    upsOutputPower:               1.3.6.1.2.1.33.1.4.4.1.4.1
+    upsOutputPercentLoad:         1.3.6.1.2.1.33.1.4.4.1.5.1
+    upsAlarmsPresent:             1.3.6.1.2.1.33.1.6.1.0
+  isNot:
+    - "A subset of UPS-MIB: identity, the battery group's status, time on battery, minutes and charge remaining, and one output line's power and load. No input group, no voltages or currents, no alarm table (only the count), no tests, no control group, no traps."
+    - "upsBatteryStatus is batteryLow from two minutes of estimated runtime (upsConfigLowBattTime's value here, not settable)."
+  sources: [{ what: "UPS-MIB (RFC 1628)", url: "https://www.rfc-editor.org/rfc/rfc1628", date: 2026-11-16 }]

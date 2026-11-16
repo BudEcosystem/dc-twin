@@ -86,22 +86,27 @@ metadata: { name: generic/ups, version: 0.1.0 }
 spec:
   class: ups
   form: { mounting: none }
-  identity: { serialFormat: "UPS{digits:8}", manufacturer: "dc-twin", model: "Double-conversion UPS" }
-  ports: []
+  identity: { serialFormat: "UPS{digits:8}", macOUI: "02:dc:21", manufacturer: "dc-twin", model: "Double-conversion UPS" }
+  # its network management card, on the OOB network (an OOB fabric cables it to the management
+  # switches of the rack its aggregation switch is in)
+  ports:
+    - { name: mgmt0, kind: ethernet, speed: 1G, role: management }
   power: { standbyW: 0, idleW: 0, maxW: 0 }
   cooling: { kind: none }
   sensors:
     - { name: output-power, quantity: power, unit: W, source: node-load }
     - { name: battery, quantity: charge, unit: "%", source: ups-charge }
     - { name: runtime, quantity: duration, unit: s, source: ups-runtime }
+  snmp: { mib: generic/ups-mib }
   faults: [generic/power]
   fidelity: { model: {} }
-  provides: []
+  provides: [{ capability: "facility/ups-snmp:generic/ups-mib", at: [model] }]
   isNot:
     - "The battery drains linearly with load (ride-through at rated load is runtimeS): no Peukert effect, no ageing, no temperature."
     - "No static bypass and no generator: when the battery is empty the UPS's output is lost until its input returns."
     - "It recharges linearly, to full in ten times its ride-through."
     - "The DSX exchange AsyncAPI defines no electrical point types, so the UPS publishes no BMS points."
+    - "Its management card stays up on an empty battery: a real card loses power with the UPS's output unless it is fed separately."
   sources: []
 ---
 apiVersion: dc-twin/v1alpha1

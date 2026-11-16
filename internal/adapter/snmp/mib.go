@@ -92,7 +92,41 @@ const (
 	objOutletCommand = "outletCommand"
 )
 
-var scalarNames = []string{objDeviceName, objDevicePower, objDeviceLoad, objPhaseCurrent}
+// A UPS's objects (UPS-MIB, RFC 1628): its identity, its battery, and its one output line. Each
+// is a scalar, named by its full instance OID (.0, or .1 for the output line).
+const (
+	objUPSManufacturer     = "upsIdentManufacturer"
+	objUPSModel            = "upsIdentModel"
+	objUPSName             = "upsIdentName"
+	objUPSBatteryStatus    = "upsBatteryStatus"
+	objUPSSecondsOnBattery = "upsSecondsOnBattery"
+	objUPSMinutesRemaining = "upsEstimatedMinutesRemaining"
+	objUPSChargeRemaining  = "upsEstimatedChargeRemaining"
+	objUPSOutputSource     = "upsOutputSource"
+	objUPSOutputNumLines   = "upsOutputNumLines"
+	objUPSOutputPower      = "upsOutputPower"
+	objUPSOutputPercent    = "upsOutputPercentLoad"
+	objUPSAlarmsPresent    = "upsAlarmsPresent"
+)
+
+// upsBatteryStatus and upsOutputSource values (RFC 1628).
+const (
+	batteryNormal   = 2
+	batteryLow      = 3
+	batteryDepleted = 4
+
+	outputNone    = 2
+	outputNormal  = 3
+	outputBattery = 5
+)
+
+// lowBatteryMinutes is when a UPS on battery reports batteryLow: RFC 1628's
+// upsConfigLowBattTime, which this agent does not let a manager set.
+const lowBatteryMinutes = 2
+
+var scalarNames = []string{objDeviceName, objDevicePower, objDeviceLoad, objPhaseCurrent,
+	objUPSManufacturer, objUPSModel, objUPSName, objUPSBatteryStatus, objUPSSecondsOnBattery, objUPSMinutesRemaining,
+	objUPSChargeRemaining, objUPSOutputSource, objUPSOutputNumLines, objUPSOutputPower, objUPSOutputPercent, objUPSAlarmsPresent}
 var columnNames = []string{objOutletName, objOutletState, objOutletCommand}
 
 // Outlet command values (PowerNet-MIB rPDU2OutletSwitchedControlCommand).

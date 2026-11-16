@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"sort"
+	"time"
 
 	"github.com/BudEcosystem/dc-twin/internal/model"
 )
@@ -69,6 +70,11 @@ func (e *Engine) recomputeChain(cause uint64) {
 		}
 		if mode != n.Mode && n.Mode != "" {
 			e.stateEvent(n.Device.Path, "mode", n.Mode, mode, behaviourSrc, cause, chainHealth(mode))
+		}
+		if n.Kind == "ups" && !in && n.InputLost.IsZero() {
+			n.InputLost = e.now
+		} else if in {
+			n.InputLost = time.Time{}
 		}
 		n.Mode = mode
 		n.Up = mode == "online" || mode == "battery" || mode == "closed"
@@ -192,4 +198,31 @@ func (e *Engine) powerChainView() []any {
 		out = append(out, v)
 	}
 	return out
+}
+
+// UPSReading is a UPS as its management card reports it (the snmp adapter's UPS-MIB): its mode,
+// its battery, and the load it carries. Durations are in behaviour seconds, as runtimeS is.
+type UPSReading struct {
+	Mode         string // online, battery, depleted or fault
+	ChargePct    float64
+	RuntimeLeftS float64 // how long the battery would carry the load now
+	OnBatteryS   float64 // how long it has been without its input (on battery, then depleted); 0 with it
+	LoadW        float64
+	CapacityW    float64
+}
+
+// UPS reads a UPS of the power chain; false for a device that is not one.
+func (e *Engine) UPS(d *model.Device) (UPSReading, bool) {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	n := e.M.PowerBy[d.Path]
+	if n == nil || n.Kind != "ups" {
+		return UPSReading{}, false
+	}
+	r := UPSReading{Mode: n.Mode, ChargePct: 100 * e.chargeNow(n), RuntimeLeftS: e.upsRuntimeLeft(n),
+		LoadW: e.nodeLoad(n), CapacityW: n.CapacityW}
+	if !n.InputLost.IsZero() {
+		r.OnBatteryS = e.now.Sub(n.InputLost).Seconds() / e.scale
+	}
+	return r, true
 }

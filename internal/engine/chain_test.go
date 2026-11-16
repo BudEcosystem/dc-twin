@@ -176,3 +176,36 @@ func TestUPSFailureDropsItsWholeSide(t *testing.T) {
 		}
 	}
 }
+
+// A UPS as its management card reads it: online with a full battery; on a feed loss, on battery
+// with the time since then; depleted, still counting; online again, at zero.
+func TestUPSReading(t *testing.T) {
+	e := mixedHall(t)
+	ups := node(t, e, "ups-a")
+	r, ok := e.UPS(ups.Device)
+	if !ok || r.Mode != "online" || r.ChargePct != 100 || r.OnBatteryS != 0 || r.LoadW <= 0 || r.CapacityW != 800000 {
+		t.Fatalf("at up: %+v, %v", r, ok)
+	}
+	if _, ok := e.UPS(node(t, e, "rpp-a1").Device); ok {
+		t.Fatal("a panel is not a UPS")
+	}
+	if err := e.SetFeed("A", false, user); err != nil {
+		t.Fatal(err)
+	}
+	e.Advance(10 * time.Second)
+	r, _ = e.UPS(ups.Device)
+	// in behaviour seconds: 10 s of the clock at the estate's time scale
+	if want := 10 / e.scale; r.Mode != "battery" || r.OnBatteryS < want-1 || r.OnBatteryS > want+1 || r.ChargePct >= 100 || r.RuntimeLeftS <= 0 {
+		t.Fatalf("10 s after the feed loss: %+v", r)
+	}
+	e.Advance(time.Duration(r.RuntimeLeftS*e.scale+5) * time.Second)
+	if r, _ = e.UPS(ups.Device); r.Mode != "depleted" || r.ChargePct != 0 || r.OnBatteryS <= 10/e.scale {
+		t.Fatalf("depleted: %+v", r)
+	}
+	if err := e.SetFeed("A", true, user); err != nil {
+		t.Fatal(err)
+	}
+	if r, _ = e.UPS(ups.Device); r.Mode != "online" || r.OnBatteryS != 0 {
+		t.Fatalf("the feed back: %+v", r)
+	}
+}

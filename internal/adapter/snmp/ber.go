@@ -176,6 +176,7 @@ func intValue(i int64) value    { return value{tag: tagInteger, i: i} }
 func strValue(s string) value   { return value{tag: tagOctetString, b: []byte(s)} }
 func oidValue(o OID) value      { return value{tag: tagOID, oid: o} }
 func ticksValue(t uint64) value { return value{tag: tagTimeTicks, u: t} }
+func gaugeValue(g uint64) value { return value{tag: tagGauge32, u: g} }
 func exception(tag byte) value  { return value{tag: tag} }
 
 type varbind struct {

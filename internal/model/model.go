@@ -371,6 +371,7 @@ type PowerNode struct {
 	Sources   []*Device // the rack power sources (PDUs, shelves) that draw through it
 	Up        bool      // delivering
 	Mode      string    // a UPS: online, battery, depleted or fault; a busway or panel: closed or open
+	InputLost time.Time // a UPS: when its input went, on the twin clock; zero while it has it
 	Charge    float64   // a UPS's battery, 0..1, as of ChargeAt
 	ChargeAt  time.Time
 	DrainPerS float64 // the charge lost per behaviour second (negative while recharging)

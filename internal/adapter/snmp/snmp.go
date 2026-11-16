@@ -1,8 +1,8 @@
-// Package snmp is the facility adapter for PDUs over SNMP (docs/spec/05-interfaces.md —
+// Package snmp is the facility adapter for PDUs and UPSes over SNMP (docs/spec/05-interfaces.md —
 // Facility): one SNMPv1/v2c agent per device whose profile has `spec.snmp`, on its own netsim
 // UDP endpoint, serving the MIB-II system group and the objects of the profile's MIB dialect.
 // Reads project committed state (relay states, faults, the PDU's derived output power and
-// current); an outlet command is translated into engine.SetOutlet and never changes state here.
+// current, a UPS's mode and battery in the power chain); an outlet command is translated into engine.SetOutlet and never changes state here.
 package snmp
 
 import (
@@ -243,9 +243,9 @@ func (a *Adapter) Report() adapter.Report {
 	}
 	sort.Strings(names)
 	rep.Lines = append(rep.Lines,
-		fmt.Sprintf("PDUs over SNMPv1/v2c: %d agents, MIB dialects %s", len(a.agents), strings.Join(names, ", ")),
+		fmt.Sprintf("PDUs and UPSes over SNMPv1/v2c: %d agents, MIB dialects %s", len(a.agents), strings.Join(names, ", ")),
 		"communities: one read-only, one read-write; an unknown community is dropped without a response",
-		"an agent answers only while its PDU's management controller is available; a BMC latency fault delays answers and an error fault answers genErr")
+		"an agent answers only while its device's management controller is available; a BMC latency fault delays answers and an error fault answers genErr")
 	for _, n := range names {
 		b := a.dialects[n]
 		rep.IsNot = append(rep.IsNot, b.spec.IsNot.All...)
@@ -260,6 +260,44 @@ func (a *Adapter) Report() adapter.Report {
 		fmt.Sprintf("Outlet commands are immediateOn, immediateOff and immediateReboot; delayed commands and cancelPendingCommand answer wrongValue. immediateReboot holds the outlet off for a fixed %s (behaviour-scaled), not a per-outlet reboot duration, and its second half is timed by the adapter against the engine clock.", a.cfg.RebootDuration),
 		"Loopback UDP endpoints: the site gateway carries TCP only, so SNMP is not reachable at a PDU's site address.")
 	return rep
+}
+
+// upsView adds a UPS's UPS-MIB objects: the engine's reading of it as the power chain has it.
+func (ag *agent) upsView(scalar func(string, value, string), u engine.UPSReading) {
+	id := ag.dev.Profile.Spec.Identity
+	scalar(objUPSManufacturer, strValue(id.Manufacturer), "inventory.read")
+	scalar(objUPSModel, strValue(id.Model), "inventory.read")
+	scalar(objUPSName, strValue(ag.dev.Name), "inventory.read")
+	minutes := int64(math.Ceil(u.RuntimeLeftS / 60))
+	battery, source, alarms := int64(batteryNormal), int64(outputNormal), int64(0)
+	switch u.Mode {
+	case "battery":
+		source, alarms = outputBattery, 1 // upsAlarmOnBattery
+		if minutes <= lowBatteryMinutes {
+			battery, alarms = batteryLow, 2 // and upsAlarmLowBattery
+		}
+	case "depleted":
+		battery, source, alarms = batteryDepleted, outputNone, 3 // on battery, low, depleted
+	case "fault":
+		source, alarms = outputNone, 1 // upsAlarmOutputOff
+	}
+	pct := int64(0)
+	if u.CapacityW > 0 && source != outputNone {
+		pct = int64(math.Round(100 * u.LoadW / u.CapacityW))
+	}
+	watts := int64(0)
+	if source != outputNone {
+		watts = int64(math.Round(u.LoadW))
+	}
+	scalar(objUPSBatteryStatus, intValue(battery), "health.read")
+	scalar(objUPSSecondsOnBattery, intValue(int64(u.OnBatteryS)), "health.read")
+	scalar(objUPSMinutesRemaining, intValue(minutes), "health.read")
+	scalar(objUPSChargeRemaining, intValue(int64(math.Round(u.ChargePct))), "health.read")
+	scalar(objUPSOutputSource, intValue(source), "health.read")
+	scalar(objUPSOutputNumLines, intValue(1), "inventory.read")
+	scalar(objUPSOutputPower, intValue(watts), "health.read")
+	scalar(objUPSOutputPercent, intValue(pct), "health.read")
+	scalar(objUPSAlarmsPresent, gaugeValue(uint64(alarms)), "health.read")
 }
 
 // ---------------------------------------------------------------- one device's agent
@@ -691,6 +729,9 @@ func (ag *agent) snapshot() *view {
 			scalar(objDeviceLoad, intValue(load), "health.read")
 			scalar(objPhaseCurrent, intValue(int64(math.Round(amps*10))), "health.read")
 		}
+	}
+	if u, ok := e.UPS(ag.dev); ok {
+		ag.upsView(scalar, u)
 	}
 	for n := 1; n <= ag.outlets; n++ {
 		on := relay[n]
