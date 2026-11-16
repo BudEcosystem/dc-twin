@@ -1403,7 +1403,12 @@ on. Each is a management server's two networks: the switch network through the a
 `routes` the site's networks), and its backend on an engine network whose default route leaves
 through the pod, so the tooling's backend runs in the cluster; files, flags and networks are the
 chart's (`tap.files`, `options`, `tap.networks`), and the engine clears a previous pod's
-containers when it starts, since its store outlives the pod. **Why:** GPU Foundry, the software under test, runs in a cluster and is integrated against a
+containers when it starts, since its store outlives the pod. Software in the cluster reaches the
+site's networks through the site gateway: an attach marked `siteGateway` is its way on, and a
+CONNECT that no estate endpoint answers, to an address in that host's subnet or routes, is dialled
+from the host's network namespace (the socket made there, `netsim.SiteDialer`), as a management
+server on the OOB network reaches a switch at its lease, so the gateway stays closed to anything
+else. **Why:** GPU Foundry, the software under test, runs in a cluster and is integrated against a
 twin at a URL; day 0 was otherwise only on a Linux host with the e2e script. **Amends:** D34 (the
 loopback substrate is the chart's default, no longer its only one). **Reversed if:** a cluster
 network can put a pod on a switch's management segment (Multus or a CNI the twin drives), so the

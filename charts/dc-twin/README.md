@@ -166,8 +166,14 @@ containers. `substrate: tap` runs it in the pod
 - **The site's day-0 servers** are containers the engine starts before the twin
   (`tap.containers`); the estate's `spec.adapters.network.attach` cables each to a switch port by
   its `container` name. A DHCP and ZTP server has to sit on the switches' management network, so it
-  runs here, not as a pod of its own; everything else reaches the switches at their leases through
-  the site gateway (SSH, NVUE, gNMI).
+  runs here, not as a pod of its own.
+- **Software in the cluster reaches the site's networks through the site gateway** when one
+  attach is the estate's `siteGateway`: a CONNECT to an address in that host's subnet or its
+  `routes` that no estate endpoint answers is dialled from the host's network namespace, as a
+  management server on the OOB network reaches it. So a switch's SSH, NVUE and gNMI at its lease
+  or its loopback, and a tool's API in a slot (Kea's control agent), are reached as a BMC's Redfish
+  is: `CONNECT 10.30.0.21:22` to `dc-twin-gateway:3128`. Anything off those networks is still
+  refused.
 
 ```bash
 helm install day0 charts/dc-twin -n dc-twin-day0 \

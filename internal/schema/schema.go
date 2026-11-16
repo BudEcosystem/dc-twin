@@ -186,6 +186,11 @@ type Attachment struct {
 	// Serves are prefixes the host answers for besides its address (services on another of its
 	// interfaces): the switch routes them to it and its BGP carries them across the fabric.
 	Serves []string `json:"serves,omitempty"`
+	// SiteGateway makes the host the site gateway's way onto the site's networks: a CONNECT to an
+	// address in its own subnet or its Routes, which no estate endpoint answers (a real switch's
+	// SSH, NVUE or gNMI, a tool's API), is dialled from the host's network namespace, as a
+	// management server reaches them. At most one host.
+	SiteGateway bool `json:"siteGateway,omitempty"`
 }
 
 type FidelitySpec struct {

@@ -177,6 +177,8 @@ type AttachPlan struct {
 	Gateway   netip.Addr
 	// Routes are what the host routes through the port (none: a default route).
 	Routes []netip.Prefix
+	// SiteGateway: the site gateway dials the host's subnet and Routes from its namespace.
+	SiteGateway bool
 }
 
 // kernelProbes are the overlay devices a NOS that provides VRFs creates, and how to make one.
@@ -514,7 +516,15 @@ func BuildPlan(m *model.Model, est *schema.Estate, outputs map[string]string, ho
 		if swIf == "" {
 			return nil, fmt.Errorf("spec.adapters.network.attach[%d]: %s is not a front-panel port %s can carry", i, mp.Ref, sp.NOS.Name)
 		}
-		ap := &AttachPlan{Container: at.Container, Netns: at.Netns, Interface: ifname, Switch: sp, Port: portName, SwitchIf: swIf, Address: addr, Gateway: gw}
+		ap := &AttachPlan{Container: at.Container, Netns: at.Netns, Interface: ifname, Switch: sp, Port: portName, SwitchIf: swIf, Address: addr, Gateway: gw,
+			SiteGateway: at.SiteGateway}
+		if at.SiteGateway {
+			for _, prev := range p.Attach {
+				if prev.SiteGateway {
+					return nil, fmt.Errorf("spec.adapters.network.attach[%d].siteGateway: %s%s is the site gateway's already; at most one host is", i, prev.Container, prev.Netns)
+				}
+			}
+		}
 		svc := nos.Service{Port: portName, Gateway: netip.PrefixFrom(gw, addr.Bits())}
 		for _, r := range at.Routes {
 			pfx, err := netip.ParsePrefix(r)
