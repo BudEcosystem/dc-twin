@@ -1,11 +1,11 @@
 # A DSX OS site's day 0 (18 — Z7d) on GB300 NVL72 racks: dsx-day0's shape, with two NVIDIA GB300
 # NVL72 racks (18 compute trays, 9 NVLink switch trays and 8 power shelves each) in place of its CPU
-# racks. Each rack's two management switches leave the factory and are NVIDIA Config Manager's
-# OOB-Leafs, brought up by NVCM's DHCP and ZTP through the OOB aggregation switch, the one switch
-# the twin configures; the trays' and shelves' BMCs lease from NICo's DHCP through the relays NVCM
-# renders on the leaves (VRF OOB, over EVPN to the aggregation switch). Kea (NVCM's edge) attaches
-# at the aggregation switch's eth128, the site's tooling at eth127, NICo's DHCP at eth122 (the
-# leaves' management ports take eth123 to eth126).
+# racks, fed through a UPS and a remote power panel per feed. Each rack's two management switches
+# leave the factory and are NVIDIA Config Manager's OOB-Leafs, brought up by NVCM's DHCP and ZTP
+# through the OOB aggregation switch, the one switch the twin configures; the trays' and shelves'
+# BMCs lease from NICo's DHCP through the relays NVCM renders on the leaves (VRF OOB, over EVPN to
+# the aggregation switch). Kea (NVCM's edge) attaches at the aggregation switch's eth128, the site's
+# tooling at eth127, NICo's DHCP at eth122 (the leaves' management ports take eth123 to eth126).
 apiVersion: dc-twin/v1alpha1
 kind: Estate
 metadata:
@@ -39,6 +39,14 @@ spec:
   facility:
     power:
       feeds: [{ name: A, capacityW: 600000 }, { name: B, capacityW: 600000 }]
+      # each feed through a UPS to a remote power panel serving every rack: a feed loss rides
+      # through on that UPS's battery for as long as it lasts at the load, then that side of every
+      # rack goes dark and the other side carries it (13)
+      topology:
+        - { name: ups-a, kind: ups, from: A, capacityW: 600000, runtimeS: 300 }
+        - { name: ups-b, kind: ups, from: B, capacityW: 600000, runtimeS: 300 }
+        - { name: rpp-a1, kind: pdu-panel, from: ups-a, capacityW: 600000, serves: ["r0*", "n01"] }
+        - { name: rpp-b1, kind: pdu-panel, from: ups-b, capacityW: 600000, serves: ["r0*", "n01"] }
     cooling:
       loops: [{ name: cdu-1, profile: generic/cdu-inrow, racks: [r01, r02], capacityKW: 400 }]
   adapters:
