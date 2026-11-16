@@ -102,6 +102,16 @@ tap:
   # kubernetes.io/dockerconfigjson Secret it logs in with; "" uses the first of imagePullSecrets.
   registry: registry.bud.studio/gpu-foundry
   registryAuthSecret: ""
+  # The site's management node (bootstrap): the hosts the estate's spec.adapters.network.attach
+  # names by `container`, each its NIC on the switch network. A host with no container of that name
+  # below is bare (tap.hostImage, idle): there, cabled, running nothing until the site's tooling is
+  # put on it. The twin's own values name the hosts; the tooling's values list only the containers
+  # it runs, so neither replaces the other's list.
+  hosts: []
+    # - nvcm-edge
+    # - nico-dhcp
+    # - site-tooling
+  hostImage: docker.io/library/busybox:1.36
   # The site's day-0 tooling (18): containers the engine starts, in this order, before the twin.
   # The estate's spec.adapters.network.attach cables one to a switch port by its `container` name
   # when the twin comes up, as the site's DHCP and ZTP servers are on its management network.

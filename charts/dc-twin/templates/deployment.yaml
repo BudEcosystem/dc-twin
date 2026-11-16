@@ -95,6 +95,15 @@ spec:
               {{- range .Values.tap.networks }}
               podman network exists {{ include "dc-twin.shq" . }} || podman network create {{ include "dc-twin.shq" . }} >/dev/null
               {{- end }}
+              {{- $named := dict }}
+              {{- range .Values.tap.containers }}
+              {{- $_ := set $named .name true }}
+              {{- end }}
+              {{- range .Values.tap.hosts }}
+              {{- if not (hasKey $named .) }}
+              podman run -d --replace --name {{ include "dc-twin.shq" . }} --network none {{ include "dc-twin.shq" $.Values.tap.hostImage }} sleep infinity >/dev/null
+              {{- end }}
+              {{- end }}
               {{- $sets := dict }}
               {{- range .Values.tap.files }}
               {{- $_ := set $sets .name true }}

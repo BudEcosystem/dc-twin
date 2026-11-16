@@ -1408,7 +1408,12 @@ site's networks through the site gateway: an attach marked `siteGateway` is its 
 CONNECT that no estate endpoint answers, to an address in that host's subnet or routes, is dialled
 from the host's network namespace (the socket made there, `netsim.SiteDialer`), as a management
 server on the OOB network reaches a switch at its lease, so the gateway stays closed to anything
-else. **Why:** GPU Foundry, the software under test, runs in a cluster and is integrated against a
+else. The line between the twin and the software under test is the site's own: what a site has
+before day 0 (the switches, the aggregation switch, the management node's NICs as `tap.hosts`, the
+gateway) is the twin's; the DHCP and ZTP servers, their configuration and everything after are the
+tooling's, in its own values file over the twin's release. A device on a `dhcp: stack` management
+network is not routed by host name before its lease (a BMC's Redfish, NVOS's NVUE and NMX-C):
+otherwise software would reach a BMC the site has given no address or name. **Why:** GPU Foundry, the software under test, runs in a cluster and is integrated against a
 twin at a URL; day 0 was otherwise only on a Linux host with the e2e script. **Amends:** D34 (the
 loopback substrate is the chart's default, no longer its only one). **Reversed if:** a cluster
 network can put a pod on a switch's management segment (Multus or a CNI the twin drives), so the

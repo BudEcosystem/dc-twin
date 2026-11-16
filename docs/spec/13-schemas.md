@@ -42,7 +42,7 @@ may add values ([04 — Open registries](04-devices-and-racks.md#open-registries
 | `spec.networks` | R | map `name → network` | |
 | `network.role` | R | `management` \| `provisioning` \| `frontend` \| `scale-out` \| `storage` \| `service` | Profiles bind ports to roles, never to network names ([R-37](../reviews/2026-10-18-spec-review.md)). A role maps to at most one network per rack |
 | `network.cidr` | O | CIDR | Required when `dhcp: twin` or when the twin allocates static addresses on it |
-| `network.dhcp` | O | `stack` \| `twin` \| `none`, D `stack` | Who serves DHCP on it. `stack`: the software under test, through the relays the fabric provides ([05](05-interfaces.md#boot-and-addressing)) |
+| `network.dhcp` | O | `stack` \| `twin` \| `none`, D `stack` | Who serves DHCP on it. `stack`: the software under test, through the relays the fabric provides ([05](05-interfaces.md#boot-and-addressing)). On a management network with `dhcp: stack`, a device has neither an address nor a name until the stack leases it one: the site gateway routes a BMC's Redfish, and NVOS's NVUE and NMX-C, by host name only while it holds a lease, as by address |
 | `network.fabric` | R for every network a NOS or model switch serves | fabric name | The fabric that carries it and relays it |
 | `spec.fabrics[]` | R | | |
 | `fabric.name` | R | name | |

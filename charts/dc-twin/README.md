@@ -185,6 +185,22 @@ helm install day0 charts/dc-twin -n dc-twin-day0 \
 
 ### The site's day-0 tooling in the slots
 
+What a site has before anyone runs day 0 is the twin's; everything that takes the switches from
+factory state to the design is the software under test's:
+
+| The twin's: bootstrap | The software under test's: day 0 |
+|---|---|
+| The switches, cabled, in factory state; the aggregation switch it configures, relaying to the tooling's addresses (the estate) | DHCP and ZTP servers, their images and configuration (`tap.containers`, `tap.networks`, `tap.files`) |
+| The management node's NICs: each attach's address, `routes` and `siteGateway` (the estate), and its bare host (`tap.hosts`) | The design, every switch's configuration, the BMCs' DHCP, the tooling's backends (pods in the cluster) |
+| The gateway, standing in for the site's routing | |
+
+So the twin's values name the hosts (`tap.hosts`) and the tooling's values list only the
+containers it runs (`tap.containers`), each by the host's name; Helm replaces a list a later
+values file sets, so the two never overwrite each other. Upgrade with both files. A host with no
+container stays bare and cabled. Until the tooling serves them, a management network with
+`dhcp: stack` leaves its devices without addresses, and the gateway routes no BMC by its host
+name either, as on a site.
+
 The software under test brings its own DHCP and ZTP servers, as NVIDIA Config Manager's edge
 (Kea with its DHCP API, configuration sync, ZTP API and SFTP; `compat/nvcm/nvcm.sh`) or NICo's DHCP
 server. Each runs as it would on a site's management server, with two networks:
@@ -226,6 +242,7 @@ twin cables it again at `up`. values.yaml has NVIDIA Config Manager's edge as an
 | `tap.engine.persistence.enabled`, `.size`, `.storageClass`, `.existingClaim` | `true`, `20Gi`, default class | The engine's image store |
 | `tap.registry`, `tap.registryAuthSecret` | `registry.bud.studio/gpu-foundry`, the first pull secret | Where the twin's switch images come from (`DCTWIN_REGISTRY`) |
 | `tap.containers` | `[]` | `name`, `image`, `args`, `env`, `network` (default `none`), `mounts`, `options`: started in order before the twin, for `attach` |
+| `tap.hosts`, `tap.hostImage` | `[]`, busybox | The management node's hosts the estate attaches by name: bare (`tap.hostImage`, idle) unless `tap.containers` has one of that name |
 | `tap.networks` | `[]` | Engine networks the containers join by name |
 | `tap.files` | `[]` | `name`, and a `secret` or a `configMap`: file sets the containers mount |
 

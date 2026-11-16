@@ -326,6 +326,18 @@ func NVOSPorts(d *model.Device) []*model.Port {
 	return out
 }
 
+// StackLeased reports whether a management port's address is the stack's to give: its network
+// has dhcp: stack. On a site such an interface has neither an address nor a name (its DNS record
+// comes with its lease) until the stack's DHCP server serves it, so the site gateway routes its
+// host name only while it holds a lease.
+func StackLeased(m *model.Model, p *model.Port) bool {
+	if p == nil {
+		return false
+	}
+	n := m.Networks[p.Network]
+	return n != nil && n.DHCP == "stack" && n.Role == "management"
+}
+
 // ExpectedMachine is one entry of stack-inputs/expected-machines.json (D38): what a site's
 // inventory lists for a device with a BMC. NVOSMACs is an NVLink switch tray's NVOS management
 // MACs (D46), absent on every other device: NICo will not manage a switch without them
