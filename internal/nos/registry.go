@@ -180,8 +180,10 @@ func registryAuth(repo string) string {
 		host = "docker.io"
 	}
 	keys := []string{host, "https://" + host, "http://" + host}
+	server := host
 	if host == "docker.io" {
 		keys = append(keys, "https://index.docker.io/v1/", "index.docker.io")
+		server = "https://index.docker.io/v1/" // Docker Hub's, as the Docker CLI names it
 	}
 	for _, k := range keys {
 		a, ok := f.Auths[k]
@@ -192,11 +194,11 @@ func registryAuth(repo string) string {
 		if a.Auth != "" {
 			raw, err := base64.StdEncoding.DecodeString(a.Auth)
 			if err != nil {
-				return ""
+				continue // unreadable: another spelling of the registry may hold a usable login
 			}
 			user, pass, _ = strings.Cut(string(raw), ":")
 		}
-		j, _ := json.Marshal(map[string]string{"username": user, "password": pass, "serveraddress": host})
+		j, _ := json.Marshal(map[string]string{"username": user, "password": pass, "serveraddress": server})
 		return base64.URLEncoding.EncodeToString(j)
 	}
 	return ""

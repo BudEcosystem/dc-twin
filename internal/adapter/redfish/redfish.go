@@ -178,7 +178,7 @@ func (a *Adapter) Start(ctx context.Context, rt *adapter.Runtime) error {
 		rt.Engine.SetEndpoint(d.Path, "redfish", b.addr)
 		rt.Engine.Read(func(m *model.Model) {
 			b.leasedName = twin.StackLeased(m, compile.BMCPort(d))
-			if !b.leasedName || d.Endpoint.SiteIP != "" {
+			if twin.NameRouted(b.leasedName, d.Endpoint.SiteIP) {
 				rt.Net.Route(b.hostname+":443", b.addr)
 			}
 			if d.Endpoint.SiteIP != "" {
@@ -311,12 +311,10 @@ func (a *Adapter) watch(ctx context.Context, ch <-chan schema.Event) {
 					if to != "" {
 						a.rt.Net.Route(to+":443", b.addr)
 					}
-					if b.leasedName {
-						if to != "" {
-							a.rt.Net.Route(b.hostname+":443", b.addr)
-						} else {
-							a.rt.Net.Unroute(b.hostname + ":443")
-						}
+					if twin.NameRouted(b.leasedName, to) {
+						a.rt.Net.Route(b.hostname+":443", b.addr)
+					} else {
+						a.rt.Net.Unroute(b.hostname + ":443")
 					}
 				}
 			}

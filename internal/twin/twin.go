@@ -338,6 +338,13 @@ func StackLeased(m *model.Model, p *model.Port) bool {
 	return n != nil && n.DHCP == "stack" && n.Role == "management"
 }
 
+// NameRouted reports whether the site gateway routes a management interface's host name: always,
+// unless its address is the stack's to give (StackLeased), and then only while it holds a lease.
+// The Redfish, NVUE and NMX-C adapters each route a name by it.
+func NameRouted(stackLeased bool, lease string) bool {
+	return !stackLeased || lease != ""
+}
+
 // ExpectedMachine is one entry of stack-inputs/expected-machines.json (D38): what a site's
 // inventory lists for a device with a BMC. NVOSMACs is an NVLink switch tray's NVOS management
 // MACs (D46), absent on every other device: NICo will not manage a switch without them

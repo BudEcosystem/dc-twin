@@ -41,6 +41,10 @@ spec:
       # the twin opens each switch container's network namespace through /proc/<pid>, so it sees
       # the engine's processes (D82)
       shareProcessNamespace: true
+      # its containers run as root, but the twin's own image runs as its nonroot user where it is
+      # not told otherwise (the assets fetch, the day-0 copy): the volumes stay its group's
+      securityContext:
+        fsGroup: {{ .Values.podSecurityContext.fsGroup | default 65532 }}
       {{- else }}
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
@@ -65,9 +69,19 @@ spec:
               mountPath: /tmp
       {{- end }}
       {{- if $tap }}
+        # the day-0 programs, out of the twin's own image into the directory the engine mounts in
+        # the switches it starts (the image has no shell: the program copies itself)
+        - name: day0
+          image: {{ include "dc-twin.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/opt/dctwin/day0/dctwin-day0", "install-to", "/opt/dctwin-day0"]
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          volumeMounts:
+            - name: day0
+              mountPath: /opt/dctwin-day0
         # The container engine (D82), a sidecar: it starts first and runs as long as the pod. It
-        # serves Podman's Docker-compatible API on a socket the twin shares, copies the day-0
-        # programs out of the twin's image to where the switches mount them from, and starts the
+        # serves Podman's Docker-compatible API on a socket the twin shares, and starts the
         # containers the estate attaches. The twin's state directory is at the same path in both,
         # since the twin hands the engine paths in it to mount into switches.
         - name: engine
@@ -78,6 +92,11 @@ spec:
           args:
             - |
               rm -f /run/dctwin-engine/podman.sock /run/dctwin-engine/ready
+              # a restart of the engine alone: its containers (the twin's switches, the tooling the
+              # twin attached) went with it, so the twin's running estate is gone too; once the
+              # engine is back, the twin is stopped, and the pod starts it again on a fresh one
+              restarted=
+              [ -e /run/dctwin-engine/started ] && restarted=1
               # the image's defaults run containers in the engine's own namespaces, with no
               # cgroups (for Podman in Podman); a switch has its own hostname and memory limit
               printf '[containers]\nnetns="private"\nipcns="private"\nutsns="private"\ncgroupns="private"\ncgroups="enabled"\n' >/tmp/dctwin-engine.conf
@@ -88,10 +107,6 @@ spec:
               # the store outlives the pod: a previous pod's containers (its switches, its tooling)
               # are gone with it, and the tooling is started again below; named volumes are kept
               podman rm -a -f -t 0 >/dev/null 2>&1 || true
-              podman pull -q {{ include "dc-twin.shq" (include "dc-twin.image" .) }} >/dev/null
-              c=$(podman create --entrypoint /none {{ include "dc-twin.shq" (include "dc-twin.image" .) }})
-              podman cp "$c:/opt/dctwin/day0/." /opt/dctwin-day0/
-              podman rm "$c" >/dev/null
               {{- range .Values.tap.networks }}
               podman network exists {{ include "dc-twin.shq" . }} || podman network create {{ include "dc-twin.shq" . }} >/dev/null
               {{- end }}
@@ -119,7 +134,12 @@ spec:
               {{- range .options }} {{ include "dc-twin.shq" . }}{{ end }} {{ include "dc-twin.shq" .image }}
               {{- range .args }} {{ include "dc-twin.shq" . }}{{ end }} >/dev/null
               {{- end }}
-              touch /run/dctwin-engine/ready
+              touch /run/dctwin-engine/started /run/dctwin-engine/ready
+              if [ -n "$restarted" ]; then
+                for p in /proc/[0-9]*; do
+                  [ "$(cat "$p/comm" 2>/dev/null)" = dctwin ] && kill "${p#/proc/}" 2>/dev/null || true
+                done
+              fi
               wait $svc
           {{- if $auth }}
           env:
@@ -304,6 +324,9 @@ spec:
             secretName: {{ $auth }}
         {{- end }}
         {{- range .Values.tap.files }}
+        {{- if not (regexMatch "^[a-z0-9]([-a-z0-9]{0,51}[a-z0-9])?$" (toString .name)) }}
+        {{- fail (printf "tap.files %q: a name of lowercase letters, digits and '-', at most 53 characters (it names a volume)" (toString .name)) }}
+        {{- end }}
         - name: tap-files-{{ .name }}
           {{- if .secret }}
           secret:

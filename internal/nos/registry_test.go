@@ -177,12 +177,13 @@ func TestValidRegistry(t *testing.T) {
 
 // A pull carries the login the auth file holds for the image's registry, as the Docker CLI sends
 // it (X-Registry-Auth), since the Engine API pulls with nothing else; an image of a registry the
-// file has no login for is pulled with none.
+// file has no login for is pulled with none. An entry that cannot be read gives way to another
+// spelling of the same registry.
 func TestRegistryAuth(t *testing.T) {
 	dir := t.TempDir()
 	f := filepath.Join(dir, "auth.json")
 	b64 := base64.StdEncoding.EncodeToString([]byte("robot$x:s3cr:et"))
-	if err := os.WriteFile(f, []byte(`{"auths":{"registry.lab:5000":{"auth":"`+b64+`"},"https://index.docker.io/v1/":{"username":"hub","password":"pw"}}}`), 0o600); err != nil {
+	if err := os.WriteFile(f, []byte(`{"auths":{"registry.lab:5000":{"auth":"`+b64+`"},"docker.io":{"auth":"not base64!"},"https://index.docker.io/v1/":{"username":"hub","password":"pw"}}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("REGISTRY_AUTH_FILE", f)
@@ -204,7 +205,7 @@ func TestRegistryAuth(t *testing.T) {
 	if m := login("registry.lab:5000/dc-twin/dctwin-nos-nvue-frr"); m["username"] != "robot$x" || m["password"] != "s3cr:et" || m["serveraddress"] != "registry.lab:5000" {
 		t.Errorf("registry.lab:5000: %v", m)
 	}
-	if m := login("library/busybox"); m["username"] != "hub" || m["serveraddress"] != "docker.io" {
+	if m := login("library/busybox"); m["username"] != "hub" || m["serveraddress"] != "https://index.docker.io/v1/" {
 		t.Errorf("Docker Hub: %v", m)
 	}
 	if m := login("ghcr.io/budecosystem/x"); m != nil {

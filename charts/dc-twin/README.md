@@ -161,8 +161,11 @@ containers. `substrate: tap` runs it in the pod
 - **The twin's switch images** are pulled from `tap.registry`, logging in with
   `tap.registryAuthSecret` (a `kubernetes.io/dockerconfigjson` Secret; by default the first of
   `imagePullSecrets`).
-- **The day-0 programs** (`dctwin-day0`) are copied out of the twin's image, so an estate leaves
-  `spec.adapters.network.nos.day0Binaries` unset.
+- **The day-0 programs** (`dctwin-day0`) are copied out of the twin's image by an init container,
+  so an estate leaves `spec.adapters.network.nos.day0Binaries` unset.
+- **If the engine restarts on its own**, the switches and tooling it ran are gone with it, so once
+  it is back it stops the twin, and the pod starts the twin again on a fresh estate. On a new pod
+  the engine first removes what an earlier pod left in its store.
 - **The site's day-0 servers** are containers the engine starts before the twin
   (`tap.containers`); the estate's `spec.adapters.network.attach` cables each to a switch port by
   its `container` name. A DHCP and ZTP server has to sit on the switches' management network, so it

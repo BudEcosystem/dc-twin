@@ -92,7 +92,9 @@ type Substrate struct {
 	volumes     []string // the switches' shared volumes, removed after their containers
 	attached    []string
 	// the site gateway's way onto the site's networks (an attach with siteGateway): the host's
-	// namespace, and the prefixes it reaches through its port
+	// namespace, and the prefixes it reaches through its port. siteMu, not mu, guards them: a
+	// dial holds it as long as it is in the namespace, which Close must not close under it
+	siteMu   sync.RWMutex
 	siteNS   netns.NsHandle
 	siteNets []netip.Prefix
 	siteHost string
@@ -1647,10 +1649,13 @@ func (s *Substrate) attach(at *AttachPlan) error {
 		if err != nil {
 			return fmt.Errorf("keeping the network namespace of %s for the site gateway: %w", name, err)
 		}
-		s.mu.Lock()
+		s.siteMu.Lock()
+		if s.siteNS.IsOpen() {
+			s.siteNS.Close() // the host attached again: its namespace is the one just opened
+		}
 		s.siteNS, s.siteHost = h, name
 		s.siteNets = append([]netip.Prefix{at.Address.Masked()}, at.Routes...)
-		s.mu.Unlock()
+		s.siteMu.Unlock()
 	}
 	s.attached = append(s.attached, fmt.Sprintf("%s (%s, %s) at %s:%s", name, at.Interface, at.Address, at.Switch.Config.Hostname, at.Port))
 	return nil
@@ -1668,21 +1673,20 @@ func (s *Substrate) DialSite(addr string, timeout time.Duration) (net.Conn, erro
 	if err != nil || !ip.Is4() {
 		return nil, netsim.ErrNoSiteRoute
 	}
-	s.mu.Lock()
-	ns, nets := s.siteNS, s.siteNets
-	s.mu.Unlock()
-	if !ns.IsOpen() {
+	s.siteMu.RLock()
+	defer s.siteMu.RUnlock()
+	if !s.siteNS.IsOpen() {
 		return nil, netsim.ErrNoSiteRoute
 	}
 	reached := false
-	for _, p := range nets {
+	for _, p := range s.siteNets {
 		reached = reached || p.Contains(ip)
 	}
 	if !reached {
 		return nil, netsim.ErrNoSiteRoute
 	}
 	var c net.Conn
-	if err := inNS(ns, func() error {
+	if err := inNS(s.siteNS, func() error {
 		var derr error
 		c, derr = net.DialTimeout("tcp", addr, timeout)
 		return derr
@@ -2251,11 +2255,13 @@ func (s *Substrate) Close() error {
 	for _, h := range s.hosts {
 		h.f.Close()
 	}
+	s.mu.Unlock()
+	s.siteMu.Lock()
 	if s.siteNS.IsOpen() {
 		s.siteNS.Close()
 		s.siteNS = netns.None()
 	}
-	s.mu.Unlock()
+	s.siteMu.Unlock()
 	if s.st != nil {
 		s.st.Close()
 		s.st.Wait()

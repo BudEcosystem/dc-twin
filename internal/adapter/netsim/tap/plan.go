@@ -759,13 +759,13 @@ func planFactory(p *Plan, m *model.Model, est *schema.Estate, byDev map[*model.D
 	}
 	// a twin in a pod beside its Docker host (the chart's tap substrate) is told where that host
 	// keeps the day-0 programs, as it is told the registry
-	dir := est.Spec.Adapters.Network.NOS.Day0Binaries
+	dir, from := est.Spec.Adapters.Network.NOS.Day0Binaries, "spec.adapters.network.nos.day0Binaries"
 	if dir == "" {
-		dir = os.Getenv("DCTWIN_DAY0_BINARIES")
+		dir, from = os.Getenv("DCTWIN_DAY0_BINARIES"), "DCTWIN_DAY0_BINARIES"
 	}
 	if dir != "" {
 		if !filepath.IsAbs(dir) {
-			return fmt.Errorf("spec.adapters.network.nos.day0Binaries %q: an absolute path on the Docker host", dir)
+			return fmt.Errorf("%s %q: an absolute path on the Docker host", from, dir)
 		}
 		p.Day0Binaries = dir
 	} else if exe, err := os.Executable(); err == nil {

@@ -326,7 +326,7 @@ func (s *trayServer) setNVOS(ip string) {
 // stack's to give (twin.StackLeased), only while it holds a lease.
 func (s *trayServer) routeName() {
 	s.mu.Lock()
-	named := !s.leasedName || s.nvosIP != ""
+	named := twin.NameRouted(s.leasedName, s.nvosIP)
 	s.mu.Unlock()
 	host := hostname(s.dev) + fmt.Sprintf(":%d", Port)
 	if named {

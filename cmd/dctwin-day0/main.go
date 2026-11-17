@@ -8,6 +8,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 
@@ -38,6 +39,47 @@ var programs = map[string]func([]string) int{
 	"sudo": clsys.Sudo,
 	// SONiC's sshd ForceCommand: each SSH command run, then told to the twin
 	"dctwin-ssh-command": clsys.SSHCommand,
+	// copies this binary into a directory: the chart's tap substrate fills the directory its
+	// engine mounts in switches from the twin's own image, which has no shell to copy with
+	"install-to": installTo,
+}
+
+// installTo copies the running binary to <dir>/dctwin-day0, executable.
+func installTo(args []string) int {
+	if len(args) != 1 {
+		fmt.Fprintln(os.Stderr, "usage: dctwin-day0 install-to <dir>")
+		return 2
+	}
+	if err := copyExecutable(filepath.Join(args[0], "dctwin-day0")); err != nil {
+		fmt.Fprintln(os.Stderr, "dctwin-day0 install-to:", err)
+		return 1
+	}
+	return 0
+}
+
+func copyExecutable(dst string) error {
+	self, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	in, err := os.Open(self)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	tmp := dst + ".tmp"
+	out, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o755)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		return err
+	}
+	if err := out.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp, dst)
 }
 
 func main() {

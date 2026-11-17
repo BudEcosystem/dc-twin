@@ -1392,8 +1392,8 @@ sidecar serving Podman's Docker-compatible API on a socket in a shared volume (`
 the twin drives it as it drives a host's, and opens each switch's network namespace through
 `/proc/<pid>`, as `nos.Docker` requires. The twin's state directory is at one path in both,
 because the twin hands the engine paths in it to mount into switches; the day-0 programs, now built
-into the twin's image (`/opt/dctwin/day0`), are copied by the engine to a shared directory the twin
-is told of by `DCTWIN_DAY0_BINARIES` (after the estate's `nos.day0Binaries`, before the directory
+into the twin's image (`/opt/dctwin/day0`), are copied by an init container of that image
+(`dctwin-day0 install-to`, as it has no shell) to a shared directory the twin is told of by `DCTWIN_DAY0_BINARIES` (after the estate's `nos.day0Binaries`, before the directory
 beside the twin's executable). The engine pulls the twin's switch images from a registry (D81)
 with a pull secret's login, which the twin sends with each pull (`X-Registry-Auth`, read from
 `REGISTRY_AUTH_FILE` or Docker's `config.json`) as the Docker CLI does: neither engine's API logs

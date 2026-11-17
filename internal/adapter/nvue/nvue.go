@@ -228,7 +228,7 @@ func (s *server) sync() {
 		}
 		s.routed = want
 	}
-	if named := up && (!s.leasedName || s.siteIP != ""); named != s.hostRouted {
+	if named := up && twin.NameRouted(s.leasedName, s.siteIP); named != s.hostRouted {
 		if named {
 			nw.Route(host, s.addr)
 		} else {

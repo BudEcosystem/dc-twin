@@ -252,7 +252,8 @@ func TestPlanDay0BinariesFromEnvironment(t *testing.T) {
 		t.Fatalf("the estate's over the environment's: %q, %v", p.Day0Binaries, err)
 	}
 	t.Setenv("DCTWIN_DAY0_BINARIES", "day0")
-	if _, err := plan(""); err == nil || !strings.Contains(err.Error(), "an absolute path") {
+	// named as the variable it came from, not as the estate's field
+	if _, err := plan(""); err == nil || !strings.Contains(err.Error(), `DCTWIN_DAY0_BINARIES "day0": an absolute path`) {
 		t.Fatalf("a relative path: %v", err)
 	}
 }
