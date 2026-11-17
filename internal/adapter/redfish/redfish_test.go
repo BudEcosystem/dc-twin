@@ -857,3 +857,43 @@ func TestSupermicroMachineSetupAppliesOnPowerOn(t *testing.T) {
 		t.Fatalf("Bios/SD still pending after the power-on: %v", sd.Attributes)
 	}
 }
+
+// A BMC whose address is the stack's to give (dhcp: stack) has no address or name on the site
+// until the stack's DHCP server leases it one: the gateway routes neither before; both after.
+func TestAStackLeasedBMCIsReachableOnlyOnceLeased(t *testing.T) {
+	reg, err := compile.Registry()
+	if err != nil {
+		t.Fatal(err)
+	}
+	est, _, err := compile.LoadEstate("../../../examples/estates/nvl72-nico.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tw, err := twin.UpEstate(est, "", reg, twin.Options{StateDir: t.TempDir(), Adapters: []string{"redfish"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(tw.Down)
+	a := tw.Adapter("redfish").(*rfa.Adapter)
+	d := dev(tw, "site-1/hall-a/a03/compute-tray-01")
+	_, host, ok := a.BMC(d.Path)
+	if !ok {
+		t.Fatal("no BMC")
+	}
+	if _, ok := tw.Net.Resolve(host + ":443"); ok {
+		t.Fatalf("%s is routed before the stack leased it an address", host)
+	}
+	tw.Engine.SetLease(d.Path, &model.Lease{IP: "10.30.3.21", Server: "10.90.2.10"}, schema.EventSource{Class: "stack"})
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		_, byName := tw.Net.Resolve(host + ":443")
+		_, byAddr := tw.Net.Resolve("10.30.3.21:443")
+		if byName && byAddr {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("after its lease: by name %v, by address %v", byName, byAddr)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}

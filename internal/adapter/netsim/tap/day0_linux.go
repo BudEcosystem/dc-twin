@@ -232,7 +232,7 @@ func (s *Substrate) prepareDay0(sp *SwitchPlan) ([]string, error) {
 	}
 	bin := s.plan.Day0Binaries
 	if bin == "" {
-		return nil, fmt.Errorf("switch %s: the twin's day-0 programs (dctwin-day0) were not found: build them (go build -o <dir>/dctwin-day0 ./cmd/dctwin-day0) and set spec.adapters.network.nos.day0Binaries to <dir>", sp.Device.Path)
+		return nil, fmt.Errorf("switch %s: the twin's day-0 programs (dctwin-day0) were not found: build them (go build -o <dir>/dctwin-day0 ./cmd/dctwin-day0) and set spec.adapters.network.nos.day0Binaries, or DCTWIN_DAY0_BINARIES, to <dir>", sp.Device.Path)
 	}
 	return []string{dir + ":" + nos.Day0Dir + ":ro", bin + ":" + nos.Day0Mount + ":ro"}, nil
 }

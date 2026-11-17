@@ -100,6 +100,11 @@ func NewDocker() (*Docker, error) {
 }
 
 func (d *Docker) call(ctx context.Context, method, path string, body, out any) ([]byte, error) {
+	return d.callWith(ctx, method, path, nil, body, out)
+}
+
+// callWith is call with more request headers.
+func (d *Docker) callWith(ctx context.Context, method, path string, hdr http.Header, body, out any) ([]byte, error) {
 	var rd io.Reader
 	if body != nil {
 		b, err := json.Marshal(body)
@@ -114,6 +119,9 @@ func (d *Docker) call(ctx context.Context, method, path string, body, out any) (
 	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
+	}
+	for k, v := range hdr {
+		req.Header[k] = v
 	}
 	resp, err := d.c.Do(req)
 	if err != nil {

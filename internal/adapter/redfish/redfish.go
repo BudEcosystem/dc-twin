@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/BudEcosystem/dc-twin/internal/adapter"
+	"github.com/BudEcosystem/dc-twin/internal/compile"
 	"github.com/BudEcosystem/dc-twin/internal/engine"
 	"github.com/BudEcosystem/dc-twin/internal/identity"
 	"github.com/BudEcosystem/dc-twin/internal/model"
@@ -62,6 +63,9 @@ type bmc struct {
 	backend  backend
 	hostname string
 	addr     string
+	// leasedName: the BMC's address is the stack's to give (dhcp: stack), so the site has no
+	// name for it either until it has a lease: its hostname is routed only while it has one
+	leasedName bool
 	// dpus are the host's DPU sub-devices in component order, which the dialect's dpus patterns
 	// bind the captured DPU resources to (structure, so read once).
 	dpus []*model.Device
@@ -172,8 +176,11 @@ func (a *Adapter) Start(ctx context.Context, rt *adapter.Runtime) error {
 		a.bmcs[d.Path] = b
 		a.dialects[d.Dialect]++
 		rt.Engine.SetEndpoint(d.Path, "redfish", b.addr)
-		rt.Net.Route(b.hostname+":443", b.addr)
-		rt.Engine.Read(func(*model.Model) {
+		rt.Engine.Read(func(m *model.Model) {
+			b.leasedName = twin.StackLeased(m, compile.BMCPort(d))
+			if twin.NameRouted(b.leasedName, d.Endpoint.SiteIP) {
+				rt.Net.Route(b.hostname+":443", b.addr)
+			}
 			if d.Endpoint.SiteIP != "" {
 				rt.Net.Route(d.Endpoint.SiteIP+":443", b.addr)
 			}
@@ -300,8 +307,14 @@ func (a *Adapter) watch(ctx context.Context, ch <-chan schema.Event) {
 					if from, _ := ev.State.From.(string); from != "" {
 						a.rt.Net.Unroute(from + ":443")
 					}
-					if to, _ := ev.State.To.(string); to != "" {
+					to, _ := ev.State.To.(string)
+					if to != "" {
 						a.rt.Net.Route(to+":443", b.addr)
+					}
+					if twin.NameRouted(b.leasedName, to) {
+						a.rt.Net.Route(b.hostname+":443", b.addr)
+					} else {
+						a.rt.Net.Unroute(b.hostname + ":443")
 					}
 				}
 			}

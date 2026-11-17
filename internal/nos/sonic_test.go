@@ -6,6 +6,7 @@ import (
 	"net/netip"
 	"os"
 	"os/exec"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -364,6 +365,55 @@ func TestSonicPinsMatchTheE2EScript(t *testing.T) {
 	for _, pin := range []string{SonicVSImage, SonicRelayImage, SonicRelayArtifact, SonicRelaySHA256, SonicBGPImage, SonicBGPArtifact, SonicBGPSHA256, SonicGNMIImage, SonicGNMIArtifact, SonicGNMISHA256} {
 		if !strings.Contains(string(b), pin) {
 			t.Errorf("scripts/linux-substrate-e2e.sh does not pin %s", pin)
+		}
+	}
+}
+
+// scripts/publish-images.sh publishes what scripts/linux-substrate-e2e.sh builds and fetches, so a
+// host given the registry pulls every image the script would otherwise build: the same images
+// from the same contexts, SONiC's at the same pins, and .github/workflows/images.yml runs it when
+// any of their contexts changes.
+func TestPublishedImagesMatchTheE2EScript(t *testing.T) {
+	read := func(p string) string {
+		b, err := os.ReadFile("../../" + p)
+		if err != nil {
+			t.Skipf("%s is not beside the package: %v", p, err)
+		}
+		return string(b)
+	}
+	e2e, publish, workflow := read("scripts/linux-substrate-e2e.sh"), read("scripts/publish-images.sh"), read(".github/workflows/images.yml")
+	// image <tag> "$root/<context>/Containerfile" "$root/<context>"
+	built := regexp.MustCompile(`image ([^ ]+) "\$root/([^"]+)/Containerfile" "\$root/([^"]+)"`).FindAllStringSubmatch(e2e, -1)
+	if len(built) < 5 {
+		t.Fatalf("found %d images the e2e script builds; its image lines have changed shape", len(built))
+	}
+	for _, m := range built {
+		tag, ctx, trigger := m[1], m[3], "- "+m[3]+"/**"
+		if tag == `"$runner"` {
+			// the runner's tag is its Containerfile's hash, and it is built from that file alone
+			if !strings.Contains(e2e, `runner=dctwin-linuxnet-e2e:cf-$(sha256 "$root/test/linuxnet/Containerfile" | cut -c1-12)`) {
+				t.Fatalf("the e2e script's runner tag is no longer its Containerfile's hash")
+			}
+			tag, ctx = `dctwin-linuxnet-e2e:cf-$(sha256 "$root/test/linuxnet/Containerfile" | cut -c1-12)`, m[2]+"/Containerfile"
+			trigger = "- " + ctx
+		}
+		if !regexp.MustCompile(`"` + regexp.QuoteMeta(tag+" "+ctx) + `[ "]`).MatchString(publish) {
+			t.Errorf("scripts/publish-images.sh does not publish %s from %s", tag, ctx)
+		}
+		if !strings.Contains(workflow, trigger) {
+			t.Errorf(".github/workflows/images.yml does not run on a change to %s", ctx)
+		}
+	}
+	// and nothing published that the e2e script does not build
+	for _, m := range regexp.MustCompile(`(?m)^  "(dctwin-[^ ]+) ([^ "]+)`).FindAllStringSubmatch(publish, -1) {
+		if !strings.Contains(e2e, "image "+m[1]+` "$root/`+m[2]+"/") && !strings.Contains(m[1], "sonic") && !strings.HasPrefix(m[1], "dctwin-linuxnet-e2e:") {
+			t.Errorf("scripts/publish-images.sh publishes %s, which the e2e script does not build from %s", m[1], m[2])
+		}
+	}
+	for _, pin := range []string{SonicVSImage, SonicVSVersion, SonicRelayImage, SonicRelayArtifact, SonicRelaySHA256, SonicBGPImage, SonicBGPArtifact,
+		SonicBGPSHA256, SonicGNMIImage, SonicGNMIArtifact, SonicGNMISHA256, SonicLLDPImage, SonicLLDPArtifact, SonicLLDPSHA256} {
+		if !strings.Contains(publish, pin) {
+			t.Errorf("scripts/publish-images.sh does not pin %s", pin)
 		}
 	}
 }

@@ -91,6 +91,13 @@ type Substrate struct {
 	docker      *nos.Docker
 	volumes     []string // the switches' shared volumes, removed after their containers
 	attached    []string
+	// the site gateway's way onto the site's networks (an attach with siteGateway): the host's
+	// namespace, and the prefixes it reaches through its port. siteMu, not mu, guards them: a
+	// dial holds it as long as it is in the namespace, which Close must not close under it
+	siteMu   sync.RWMutex
+	siteNS   netns.NsHandle
+	siteNets []netip.Prefix
+	siteHost string
 	// ca issues the TLS material of real switches' management interfaces (the estate CA); nil
 	// leaves them without (a gNMI server then listens on its loopback only)
 	ca       *netsim.Net
@@ -271,7 +278,7 @@ func New(ctx context.Context, a twin.NetworkArgs) (netsim.L2, error) {
 	if log == nil {
 		log = slog.Default()
 	}
-	s := &Substrate{plan: plan, eng: a.Engine, log: log, ns: netns.None(), nextNIC: 1, ports: map[string]*port{}, byDev: map[string]*port{},
+	s := &Substrate{plan: plan, eng: a.Engine, log: log, ns: netns.None(), siteNS: netns.None(), nextNIC: 1, ports: map[string]*port{}, byDev: map[string]*port{},
 		bridges: map[string]*bridge{}, hosts: map[string]*hostPort{}, byPath: map[string]*nosSwitch{}, ca: a.Net, stateDir: a.StateDir, kernel: map[string]error{}}
 	s.ctx, s.cancel = context.WithCancel(ctx)
 	if err := s.start(); err != nil {
@@ -914,6 +921,7 @@ func (s *Substrate) startSwitches() error {
 	ctx, cancel := context.WithTimeout(s.ctx, 10*time.Minute)
 	defer cancel()
 	canRun := map[string]error{}
+	ensured := map[string]bool{}
 	for _, sp := range s.plan.Switches {
 		e := sp.NOS
 		images := []string{sp.Image}
@@ -924,9 +932,20 @@ func (s *Substrate) startSwitches() error {
 			images = append(images, sc.Image)
 		}
 		for _, img := range images {
-			if !d.HasImage(ctx, img) {
-				return fmt.Errorf("switch %s: the image %s for nos %s is not present on the Docker host: %s", sp.Device.Path, img, e.Name, e.Obtain)
+			if ensured[img] {
+				continue
 			}
+			// present, or pulled from the registry the twin's own images are published to
+			from, err := d.Ensure(ctx, img, s.plan.Registry, e.Platform)
+			switch {
+			case errors.Is(err, nos.ErrNotPresent) && nos.Own(img) && s.plan.Registry == "":
+				return fmt.Errorf("switch %s: the image %s for nos %s is not present on the Docker host: %s, or set spec.adapters.network.nos.registry (DCTWIN_REGISTRY) to pull it", sp.Device.Path, img, e.Name, e.Obtain)
+			case err != nil:
+				return fmt.Errorf("switch %s: the image %s for nos %s: %w (%s)", sp.Device.Path, img, e.Name, err, e.Obtain)
+			case from != "":
+				s.log.Info("pulled a switch image", "image", img, "from", from)
+			}
+			ensured[img] = true
 		}
 		if sp.Emulated {
 			err, done := canRun[sp.Image]
@@ -1624,8 +1643,57 @@ func (s *Substrate) attach(at *AttachPlan) error {
 	if name == "" {
 		name = "netns " + at.Netns
 	}
+	if at.SiteGateway {
+		// keep the namespace: the handle above is closed on return
+		h, err := netns.GetFromPath(fmt.Sprintf("/proc/self/fd/%d", int(target)))
+		if err != nil {
+			return fmt.Errorf("keeping the network namespace of %s for the site gateway: %w", name, err)
+		}
+		s.siteMu.Lock()
+		if s.siteNS.IsOpen() {
+			s.siteNS.Close() // the host attached again: its namespace is the one just opened
+		}
+		s.siteNS, s.siteHost = h, name
+		s.siteNets = append([]netip.Prefix{at.Address.Masked()}, at.Routes...)
+		s.siteMu.Unlock()
+	}
 	s.attached = append(s.attached, fmt.Sprintf("%s (%s, %s) at %s:%s", name, at.Interface, at.Address, at.Switch.Config.Hostname, at.Port))
 	return nil
+}
+
+// DialSite connects to an address on the site's networks from the siteGateway host's namespace,
+// as a management server on them does (netsim.SiteDialer): the socket is made there, so its
+// traffic leaves through the host's port on the switch, by the host's routes.
+func (s *Substrate) DialSite(addr string, timeout time.Duration) (net.Conn, error) {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return nil, netsim.ErrNoSiteRoute
+	}
+	ip, err := netip.ParseAddr(host)
+	if err != nil || !ip.Is4() {
+		return nil, netsim.ErrNoSiteRoute
+	}
+	s.siteMu.RLock()
+	defer s.siteMu.RUnlock()
+	if !s.siteNS.IsOpen() {
+		return nil, netsim.ErrNoSiteRoute
+	}
+	reached := false
+	for _, p := range s.siteNets {
+		reached = reached || p.Contains(ip)
+	}
+	if !reached {
+		return nil, netsim.ErrNoSiteRoute
+	}
+	var c net.Conn
+	if err := inNS(s.siteNS, func() error {
+		var derr error
+		c, derr = net.DialTimeout("tcp", addr, timeout)
+		return derr
+	}); err != nil {
+		return nil, err
+	}
+	return c, nil
 }
 
 // waitSwitches waits until every switch has run its start-up script, its relay container (where
@@ -2188,6 +2256,12 @@ func (s *Substrate) Close() error {
 		h.f.Close()
 	}
 	s.mu.Unlock()
+	s.siteMu.Lock()
+	if s.siteNS.IsOpen() {
+		s.siteNS.Close()
+		s.siteNS = netns.None()
+	}
+	s.siteMu.Unlock()
 	if s.st != nil {
 		s.st.Close()
 		s.st.Wait()

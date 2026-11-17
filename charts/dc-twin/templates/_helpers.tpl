@@ -71,3 +71,16 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- define "dc-twin.tokenKey" -}}
 {{- if .Values.control.token.existingSecret }}{{ .Values.control.token.key }}{{ else }}token{{ end }}
 {{- end }}
+
+{{- define "dc-twin.tap" -}}
+{{- if eq .Values.substrate "tap" }}true{{ else if ne .Values.substrate "loopback" }}{{ fail (printf "substrate %q: loopback or tap" .Values.substrate) }}{{ end }}
+{{- end }}
+
+{{- define "dc-twin.engineAuthSecret" -}}
+{{- if .Values.tap.registryAuthSecret }}{{ .Values.tap.registryAuthSecret }}{{ else if .Values.imagePullSecrets }}{{ (first .Values.imagePullSecrets).name }}{{ end }}
+{{- end }}
+
+{{- /* a word for the engine's shell, quoted: any value, single quotes included */ -}}
+{{- define "dc-twin.shq" -}}
+'{{ replace "'" "'\\''" (toString .) }}'
+{{- end }}

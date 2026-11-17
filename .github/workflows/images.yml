@@ -1,0 +1,72 @@
+# The twin's own images, published to registry.bud.studio/gpu-foundry (Harbor) so a host pulls them
+# rather than building or fetching them (spec.adapters.network.nos.registry, DCTWIN_REGISTRY;
+# scripts/linux-substrate-e2e.sh's REGISTRY), and the twin itself as charts/dc-twin runs it.
+# scripts/publish-images.sh does the work: the images this repository builds, for amd64 and arm64;
+# SONiC's, whose build artifacts expire; and the twin, as dc-twin:sha-<commit> and the chart's
+# appVersion. A tag is published once; a changed image under a published tag fails the job, saying
+# to give it a new tag.
+#
+# Set up once in the repository's settings: the secrets BUD_REGISTRY_USERNAME and
+# BUD_REGISTRY_PASSWORD, a Harbor robot account that can push to the project; and, to publish
+# elsewhere, the variable IMAGE_REGISTRY (<host>/<project>).
+name: images
+on:
+  push:
+    branches: [main]
+    paths:
+      - internal/adapter/dhcp/testdata/kea/**
+      - test/linuxnet/Containerfile
+      - test/linuxnet/nos/**
+      - test/linuxnet/nos-nvue/**
+      - test/linuxnet/nos-hbn/**
+      - test/linuxnet/ansible/**
+      - compat/netbox-ansible/**
+      # the twin itself (the Dockerfile's inputs, and the chart's appVersion)
+      - Dockerfile
+      - go.mod
+      - go.sum
+      - cmd/**
+      - internal/**
+      - packs/**
+      - stacks/**
+      - policies/**
+      - console/**
+      - examples/**
+      - charts/dc-twin/Chart.yaml
+      - scripts/publish-images.sh
+      - .github/workflows/images.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+env:
+  REGISTRY: ${{ vars.IMAGE_REGISTRY || 'registry.bud.studio/gpu-foundry' }}
+# one publish at a time: two would race to push the same new tags
+concurrency:
+  group: images
+  cancel-in-progress: false
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180 # arm64's images build under QEMU
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - name: The registry's host, and its login
+        env:
+          USERNAME: ${{ secrets.BUD_REGISTRY_USERNAME }}
+          PASSWORD: ${{ secrets.BUD_REGISTRY_PASSWORD }}
+        run: |
+          if [ -z "$USERNAME" ] || [ -z "$PASSWORD" ]; then
+            echo "::error::set the repository secrets BUD_REGISTRY_USERNAME and BUD_REGISTRY_PASSWORD (a robot account that can push to $REGISTRY)"
+            exit 1
+          fi
+          echo "REGISTRY_HOST=${REGISTRY%%/*}" >> "$GITHUB_ENV"
+          command -v skopeo >/dev/null || { sudo apt-get update -q && sudo apt-get install -yq skopeo; }
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY_HOST }}
+          username: ${{ secrets.BUD_REGISTRY_USERNAME }}
+          password: ${{ secrets.BUD_REGISTRY_PASSWORD }}
+      - name: Publish what is not published yet
+        run: scripts/publish-images.sh all

@@ -283,6 +283,29 @@ func TestPlanNOSMemory(t *testing.T) {
 	}
 }
 
+// spec.adapters.network.nos.registry is where a missing switch image is pulled from; unset, the
+// DCTWIN_REGISTRY environment variable; the estate's wins over the environment's.
+func TestPlanRegistry(t *testing.T) {
+	est := loadEstate(t, "tap-nos.yaml")
+	m := compileModel(t, est)
+	t.Setenv("DCTWIN_REGISTRY", "")
+	if p, err := BuildPlan(m, est, nil, "aarch64"); err != nil || p.Registry != "" {
+		t.Fatalf("none: %q, %v", p.Registry, err)
+	}
+	t.Setenv("DCTWIN_REGISTRY", "registry.lab:5000/dc-twin")
+	if p, err := BuildPlan(m, est, nil, "aarch64"); err != nil || p.Registry != "registry.lab:5000/dc-twin" {
+		t.Fatalf("from the environment: %q, %v", p.Registry, err)
+	}
+	est.Spec.Adapters.Network.NOS.Registry = "ghcr.io/budecosystem"
+	if p, err := BuildPlan(m, est, nil, "aarch64"); err != nil || p.Registry != "ghcr.io/budecosystem" {
+		t.Fatalf("the estate's over the environment's: %q, %v", p.Registry, err)
+	}
+	est.Spec.Adapters.Network.NOS.Registry = "https://ghcr.io/budecosystem"
+	if _, err := BuildPlan(m, est, nil, "aarch64"); err == nil || !strings.Contains(err.Error(), "spec.adapters.network.nos.registry") {
+		t.Fatalf("a URL: %v", err)
+	}
+}
+
 // spec.adapters.network.nos.cumulusVersion is every generic/nvue-frr switch's build, which its
 // NVUE's grammar and ZTP's version follow; unset, the build is NVUE's default.
 func TestPlanCumulusVersion(t *testing.T) {
@@ -562,5 +585,36 @@ func TestPlanHBN(t *testing.T) {
 		if !strings.Contains(f.FRR, want) {
 			t.Errorf("leaf frr.conf lacks %q:\n%s", want, f.FRR)
 		}
+	}
+}
+
+// An attach with siteGateway is the site gateway's way onto the site's networks; at most one is.
+func TestPlanSiteGateway(t *testing.T) {
+	b, err := os.ReadFile("../../../../examples/estates/dsx-day0-gb300.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	est := &schema.Estate{}
+	if err := schema.Decode(b, est); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("DCTWIN_DAY0_BINARIES", "/opt/dctwin-day0")
+	m := compileModel(t, est)
+	p, err := BuildPlan(m, est, nil, "x86_64")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var hosts []string
+	for _, ap := range p.Attach {
+		if ap.SiteGateway {
+			hosts = append(hosts, ap.Container)
+		}
+	}
+	if len(hosts) != 1 || hosts[0] != "site-tooling" {
+		t.Fatalf("the site gateway's host: %v", hosts)
+	}
+	est.Spec.Adapters.Network.Attach[0].SiteGateway = true
+	if _, err := BuildPlan(m, est, nil, "x86_64"); err == nil || !strings.Contains(err.Error(), "at most one host") {
+		t.Fatalf("two hosts: %v", err)
 	}
 }

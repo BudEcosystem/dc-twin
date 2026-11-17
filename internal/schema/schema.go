@@ -123,6 +123,11 @@ type NOSOptions struct {
 	Runtime string `json:"runtime,omitempty"`
 	// Image replaces the registry's image for every switch (a locally built tag).
 	Image string `json:"image,omitempty"`
+	// Registry is where the twin's own images (its NOSes' and their sidecars', named with no
+	// registry: dctwin-nos-nvue-frr:bookworm) are pulled from when the Docker host does not have
+	// one: <registry>/<name>:<tag>, then tagged as the twin names it (registry.bud.studio/gpu-foundry). Unset,
+	// the DCTWIN_REGISTRY environment variable; unset too, a missing image is an error.
+	Registry string `json:"registry,omitempty"`
 	// Underlay is the IPv4 prefix fabric links' /31s are numbered from (default 10.255.0.0/16).
 	Underlay string `json:"underlay,omitempty"`
 	// Memory is every NOS container's memory limit, with no swap beyond it (bytes, or k, m, g:
@@ -181,6 +186,11 @@ type Attachment struct {
 	// Serves are prefixes the host answers for besides its address (services on another of its
 	// interfaces): the switch routes them to it and its BGP carries them across the fabric.
 	Serves []string `json:"serves,omitempty"`
+	// SiteGateway makes the host the site gateway's way onto the site's networks: a CONNECT to an
+	// address in its own subnet or its Routes, which no estate endpoint answers (a real switch's
+	// SSH, NVUE or gNMI, a tool's API), is dialled from the host's network namespace, as a
+	// management server reaches them. At most one host.
+	SiteGateway bool `json:"siteGateway,omitempty"`
 }
 
 type FidelitySpec struct {
