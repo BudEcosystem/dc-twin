@@ -146,6 +146,9 @@ type trayServer struct {
 	// management port (D46), which NICo's nvlink-manager dials. The BMC's address stays routed
 	// for clients configured with it.
 	nvosPort, nvosIP string
+	// leasedName: NVOS's address is the stack's to give, so its host name is routed only while
+	// it holds a lease
+	leasedName bool
 }
 
 // Start compiles the interface definition and serves every NVLink domain's controller.
@@ -213,13 +216,14 @@ func (s *trayServer) start() error {
 	s.route("", s.siteIP)
 	if ps := twin.NVOSPorts(s.dev); len(ps) > 0 {
 		s.nvosPort = ps[0].Ref
+		a.rt.Engine.Read(func(m *model.Model) { s.leasedName = twin.StackLeased(m, ps[0]) })
 		for _, ev := range a.rt.Engine.Events(0, func(e schema.Event) bool {
 			return e.State != nil && e.State.Field == "lease" && e.Path == s.nvosPort
 		}) {
 			s.setNVOS(fmt.Sprint(ev.State.To))
 		}
 	}
-	a.rt.Net.Route(hostname(s.dev)+fmt.Sprintf(":%d", Port), s.addr)
+	s.routeName()
 	creds := credentials.NewTLS(&tls.Config{MinVersion: tls.VersionTLS12, GetCertificate: s.certificate})
 	s.gs = grpc.NewServer(grpc.Creds(creds),
 		grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{MinTime: 5 * time.Second, PermitWithoutStream: true}))
@@ -314,6 +318,21 @@ func (s *trayServer) setNVOS(ip string) {
 	}
 	if ip != "" {
 		s.a.rt.Net.Route(fmt.Sprintf("%s:%d", ip, Port), s.addr)
+	}
+	s.routeName()
+}
+
+// routeName routes NVOS's host name to this tray's NMX-C: always, or, when NVOS's address is the
+// stack's to give (twin.StackLeased), only while it holds a lease.
+func (s *trayServer) routeName() {
+	s.mu.Lock()
+	named := twin.NameRouted(s.leasedName, s.nvosIP)
+	s.mu.Unlock()
+	host := hostname(s.dev) + fmt.Sprintf(":%d", Port)
+	if named {
+		s.a.rt.Net.Route(host, s.addr)
+	} else {
+		s.a.rt.Net.Unroute(host)
 	}
 }
 

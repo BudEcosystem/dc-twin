@@ -2,9 +2,12 @@ package nos
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"net"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -169,5 +172,70 @@ func TestValidRegistry(t *testing.T) {
 		if err := ValidRegistry(bad); err == nil {
 			t.Errorf("%q accepted", bad)
 		}
+	}
+}
+
+// A pull carries the login the auth file holds for the image's registry, as the Docker CLI sends
+// it (X-Registry-Auth), since the Engine API pulls with nothing else; an image of a registry the
+// file has no login for is pulled with none. An entry that cannot be read gives way to another
+// spelling of the same registry.
+func TestRegistryAuth(t *testing.T) {
+	dir := t.TempDir()
+	f := filepath.Join(dir, "auth.json")
+	b64 := base64.StdEncoding.EncodeToString([]byte("robot$x:s3cr:et"))
+	if err := os.WriteFile(f, []byte(`{"auths":{"registry.lab:5000":{"auth":"`+b64+`"},"docker.io":{"auth":"not base64!"},"https://index.docker.io/v1/":{"username":"hub","password":"pw"}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("REGISTRY_AUTH_FILE", f)
+	login := func(repo string) map[string]string {
+		a := registryAuth(repo)
+		if a == "" {
+			return nil
+		}
+		j, err := base64.URLEncoding.DecodeString(a)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var m map[string]string
+		if err := json.Unmarshal(j, &m); err != nil {
+			t.Fatal(err)
+		}
+		return m
+	}
+	if m := login("registry.lab:5000/dc-twin/dctwin-nos-nvue-frr"); m["username"] != "robot$x" || m["password"] != "s3cr:et" || m["serveraddress"] != "registry.lab:5000" {
+		t.Errorf("registry.lab:5000: %v", m)
+	}
+	if m := login("library/busybox"); m["username"] != "hub" || m["serveraddress"] != "https://index.docker.io/v1/" {
+		t.Errorf("Docker Hub: %v", m)
+	}
+	if m := login("ghcr.io/budecosystem/x"); m != nil {
+		t.Errorf("a registry with no login: %v", m)
+	}
+	t.Setenv("REGISTRY_AUTH_FILE", filepath.Join(dir, "none.json"))
+	if m := login("registry.lab:5000/x"); m != nil {
+		t.Errorf("no auth file: %v", m)
+	}
+
+	// the header reaches the Engine
+	sock := filepath.Join(dir, "e.sock")
+	l, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got string
+	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Get("X-Registry-Auth")
+		_, _ = w.Write([]byte("{\"status\":\"Download complete\"}\n"))
+	})}
+	go func() { _ = srv.Serve(l) }()
+	t.Cleanup(func() { _ = srv.Close() })
+	d := &Docker{Socket: sock, c: &http.Client{Transport: &http.Transport{
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) { return net.Dial("unix", sock) }}}}
+	t.Setenv("REGISTRY_AUTH_FILE", f)
+	if err := d.Pull(context.Background(), "registry.lab:5000/dc-twin/x:1", ""); err != nil {
+		t.Fatal(err)
+	}
+	if got == "" || got != registryAuth("registry.lab:5000/dc-twin/x") {
+		t.Errorf("X-Registry-Auth %q", got)
 	}
 }

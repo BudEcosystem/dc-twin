@@ -1,4 +1,6 @@
 {{- $cm := include "dc-twin.estateConfigMap" . }}
+{{- $tap := include "dc-twin.tap" . }}
+{{- $auth := include "dc-twin.engineAuthSecret" . }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -35,10 +37,22 @@ spec:
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      {{- if $tap }}
+      # the twin opens each switch container's network namespace through /proc/<pid>, so it sees
+      # the engine's processes (D82)
+      shareProcessNamespace: true
+      # its containers run as root, but the twin's own image runs as its nonroot user where it is
+      # not told otherwise (the assets fetch, the day-0 copy): the volumes stay its group's
+      securityContext:
+        fsGroup: {{ .Values.podSecurityContext.fsGroup | default 65532 }}
+      {{- else }}
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
-      {{- if .Values.assets.fetch }}
+      {{- end }}
+      {{- if or .Values.assets.fetch $tap }}
       initContainers:
+      {{- end }}
+      {{- if .Values.assets.fetch }}
         - name: assets
           image: {{ include "dc-twin.image" . }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
@@ -53,6 +67,113 @@ spec:
               mountPath: /var/lib/dctwin/assets
             - name: tmp
               mountPath: /tmp
+      {{- end }}
+      {{- if $tap }}
+        # the day-0 programs, out of the twin's own image into the directory the engine mounts in
+        # the switches it starts (the image has no shell: the program copies itself)
+        - name: day0
+          image: {{ include "dc-twin.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/opt/dctwin/day0/dctwin-day0", "install-to", "/opt/dctwin-day0"]
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          volumeMounts:
+            - name: day0
+              mountPath: /opt/dctwin-day0
+        # The container engine (D82), a sidecar: it starts first and runs as long as the pod. It
+        # serves Podman's Docker-compatible API on a socket the twin shares, and starts the
+        # containers the estate attaches. The twin's state directory is at the same path in both,
+        # since the twin hands the engine paths in it to mount into switches.
+        - name: engine
+          image: "{{ .Values.tap.engine.image.repository }}:{{ .Values.tap.engine.image.tag }}"
+          imagePullPolicy: {{ .Values.tap.engine.image.pullPolicy }}
+          restartPolicy: Always
+          command: ["/bin/sh", "-ec"]
+          args:
+            - |
+              rm -f /run/dctwin-engine/podman.sock /run/dctwin-engine/ready
+              # a restart of the engine alone: its containers (the twin's switches, the tooling the
+              # twin attached) went with it, so the twin's running estate is gone too; once the
+              # engine is back, the twin is stopped, and the pod starts it again on a fresh one
+              restarted=
+              [ -e /run/dctwin-engine/started ] && restarted=1
+              # the image's defaults run containers in the engine's own namespaces, with no
+              # cgroups (for Podman in Podman); a switch has its own hostname and memory limit
+              printf '[containers]\nnetns="private"\nipcns="private"\nutsns="private"\ncgroupns="private"\ncgroups="enabled"\n' >/tmp/dctwin-engine.conf
+              export CONTAINERS_CONF_OVERRIDE=/tmp/dctwin-engine.conf
+              podman system service --time=0 unix:///run/dctwin-engine/podman.sock &
+              svc=$!
+              until [ -S /run/dctwin-engine/podman.sock ]; do sleep 0.2; done
+              # the store outlives the pod: a previous pod's containers (its switches, its tooling)
+              # are gone with it, and the tooling is started again below; named volumes are kept
+              podman rm -a -f -t 0 >/dev/null 2>&1 || true
+              {{- range .Values.tap.networks }}
+              podman network exists {{ include "dc-twin.shq" . }} || podman network create {{ include "dc-twin.shq" . }} >/dev/null
+              {{- end }}
+              {{- $named := dict }}
+              {{- range .Values.tap.containers }}
+              {{- $_ := set $named .name true }}
+              {{- end }}
+              {{- range .Values.tap.hosts }}
+              {{- if not (hasKey $named .) }}
+              podman run -d --replace --name {{ include "dc-twin.shq" . }} --network none {{ include "dc-twin.shq" $.Values.tap.hostImage }} sleep infinity >/dev/null
+              {{- end }}
+              {{- end }}
+              {{- $sets := dict }}
+              {{- range .Values.tap.files }}
+              {{- $_ := set $sets .name true }}
+              {{- end }}
+              {{- range .Values.tap.containers }}
+              {{- $c := . }}
+              podman run -d --replace --name {{ include "dc-twin.shq" .name }} --network {{ include "dc-twin.shq" (default "none" .network) }}
+              {{- range $k, $v := .env }} -e {{ include "dc-twin.shq" (printf "%s=%s" $k $v) }}{{ end }}
+              {{- range .mounts }}
+              {{- $set := regexFind "^[^/:]*" . }}
+              {{- if not (hasKey $sets $set) }}{{ fail (printf "tap.containers %s: mount %q: %q is not in tap.files" $c.name . $set) }}{{ end }} -v {{ include "dc-twin.shq" (printf "/etc/dctwin/tap-files/%s" .) }}
+              {{- end }}
+              {{- range .options }} {{ include "dc-twin.shq" . }}{{ end }} {{ include "dc-twin.shq" .image }}
+              {{- range .args }} {{ include "dc-twin.shq" . }}{{ end }} >/dev/null
+              {{- end }}
+              touch /run/dctwin-engine/started /run/dctwin-engine/ready
+              if [ -n "$restarted" ]; then
+                for p in /proc/[0-9]*; do
+                  [ "$(cat "$p/comm" 2>/dev/null)" = dctwin ] && kill "${p#/proc/}" 2>/dev/null || true
+                done
+              fi
+              wait $svc
+          {{- if $auth }}
+          env:
+            - name: REGISTRY_AUTH_FILE
+              value: /etc/dctwin/engine-auth/.dockerconfigjson
+          {{- end }}
+          startupProbe:
+            exec:
+              command: ["test", "-f", "/run/dctwin-engine/ready"]
+            periodSeconds: 2
+            failureThreshold: 900
+          resources:
+            {{- toYaml .Values.tap.engine.resources | nindent 12 }}
+          securityContext:
+            privileged: true
+          volumeMounts:
+            - name: engine-run
+              mountPath: /run/dctwin-engine
+            - name: engine-store
+              mountPath: /var/lib/containers
+            - name: day0
+              mountPath: /opt/dctwin-day0
+            - name: state
+              mountPath: /var/lib/dctwin/state
+            {{- if $auth }}
+            - name: engine-auth
+              mountPath: /etc/dctwin/engine-auth
+              readOnly: true
+            {{- end }}
+            {{- range .Values.tap.files }}
+            - name: tap-files-{{ .name }}
+              mountPath: /etc/dctwin/tap-files/{{ .name }}
+              readOnly: true
+            {{- end }}
       {{- end }}
       containers:
         - name: dctwin
@@ -88,6 +209,21 @@ spec:
               value: /var/lib/dctwin/state
             - name: DCTWIN_ASSETS
               value: /var/lib/dctwin/assets
+            {{- if $tap }}
+            - name: DOCKER_HOST
+              value: unix:///run/dctwin-engine/podman.sock
+            - name: DCTWIN_DAY0_BINARIES
+              value: /opt/dctwin-day0
+            {{- with .Values.tap.registry }}
+            - name: DCTWIN_REGISTRY
+              value: {{ . | quote }}
+            {{- end }}
+            {{- if $auth }}
+            # the login the twin sends with each pull (X-Registry-Auth), as the Docker CLI does
+            - name: REGISTRY_AUTH_FILE
+              value: /etc/dctwin/engine-auth/.dockerconfigjson
+            {{- end }}
+            {{- end }}
             {{- with .Values.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -115,8 +251,27 @@ spec:
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
           securityContext:
+            {{- if $tap }}
+            # the substrate makes namespaces, TAPs, bridges and VRFs, and opens the switches'; it
+            # names its namespaces in /run/netns, as ip netns does
+            privileged: true
+            runAsUser: 0
+            runAsGroup: 0
+            runAsNonRoot: false
+            readOnlyRootFilesystem: false
+            {{- else }}
             {{- toYaml .Values.securityContext | nindent 12 }}
+            {{- end }}
           volumeMounts:
+            {{- if $tap }}
+            - name: engine-run
+              mountPath: /run/dctwin-engine
+            {{- if $auth }}
+            - name: engine-auth
+              mountPath: /etc/dctwin/engine-auth
+              readOnly: true
+            {{- end }}
+            {{- end }}
             - name: state
               mountPath: /var/lib/dctwin/state
             - name: assets
@@ -151,6 +306,39 @@ spec:
             items:
               - key: {{ include "dc-twin.tokenKey" . }}
                 path: token
+        {{- if $tap }}
+        - name: engine-run
+          emptyDir: {}
+        - name: day0
+          emptyDir: {}
+        - name: engine-store
+          {{- if .Values.tap.engine.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ default (printf "%s-engine" (include "dc-twin.fullname" .)) .Values.tap.engine.persistence.existingClaim }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+        {{- if $auth }}
+        - name: engine-auth
+          secret:
+            secretName: {{ $auth }}
+        {{- end }}
+        {{- range .Values.tap.files }}
+        {{- if not (regexMatch "^[a-z0-9]([-a-z0-9]{0,51}[a-z0-9])?$" (toString .name)) }}
+        {{- fail (printf "tap.files %q: a name of lowercase letters, digits and '-', at most 53 characters (it names a volume)" (toString .name)) }}
+        {{- end }}
+        - name: tap-files-{{ .name }}
+          {{- if .secret }}
+          secret:
+            secretName: {{ .secret }}
+          {{- else if .configMap }}
+          configMap:
+            name: {{ .configMap }}
+          {{- else }}
+          {{- fail (printf "tap.files %s: name a secret or a configMap" .name) }}
+          {{- end }}
+        {{- end }}
+        {{- end }}
         {{- if $cm }}
         - name: estate
           configMap:

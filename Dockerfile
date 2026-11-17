@@ -17,11 +17,15 @@ COPY packs packs
 COPY stacks stacks
 COPY policies policies
 RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags="-s -w" -o /out/dctwin ./cmd/dctwin
+# the day-0 programs a factory switch runs (18), which the chart's tap substrate copies out to the
+# Docker host beside the twin; not beside dctwin, whose directory is not the Docker host's
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags="-s -w" -o /out/day0/dctwin-day0 ./cmd/dctwin-day0
 # the state and assets directories, owned by the nonroot user the image runs as
 RUN mkdir -p /out/var/lib/dctwin/state /out/var/lib/dctwin/assets
 
 FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=build /out/dctwin /usr/local/bin/dctwin
+COPY --from=build /out/day0 /opt/dctwin/day0
 COPY --from=build --chown=65532:65532 /out/var/lib/dctwin /var/lib/dctwin
 COPY console /opt/dctwin/console
 COPY examples /opt/dctwin/examples

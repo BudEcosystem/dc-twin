@@ -1384,3 +1384,37 @@ it (its content changes with every commit, so its version is what names a releas
 and SONiC's pinned build can expire. **Reversed if:** the images move to content-addressed tags
 (then any changed content is a new tag by construction), or the twin is only ever run where it is
 built.
+
+### D82 — The chart runs the tap substrate in a privileged pod, with its engine beside the twin
+*Built (2026-11-16).* `charts/dc-twin` with `substrate: tap` runs an estate with real NOSes and
+day 0 (18) in Kubernetes. The pod is privileged and shares its process namespace. Its engine is a
+sidecar serving Podman's Docker-compatible API on a socket in a shared volume (`DOCKER_HOST`), so
+the twin drives it as it drives a host's, and opens each switch's network namespace through
+`/proc/<pid>`, as `nos.Docker` requires. The twin's state directory is at one path in both,
+because the twin hands the engine paths in it to mount into switches; the day-0 programs, now built
+into the twin's image (`/opt/dctwin/day0`), are copied by an init container of that image
+(`dctwin-day0 install-to`, as it has no shell) to a shared directory the twin is told of by `DCTWIN_DAY0_BINARIES` (after the estate's `nos.day0Binaries`, before the directory
+beside the twin's executable). The engine pulls the twin's switch images from a registry (D81)
+with a pull secret's login, which the twin sends with each pull (`X-Registry-Auth`, read from
+`REGISTRY_AUTH_FILE` or Docker's `config.json`) as the Docker CLI does: neither engine's API logs
+in with anything else, Podman's included, though its own CLI reads its auth file. The site's day-0 servers are containers the engine starts before the twin, attached
+by name as on a host: DHCP and ZTP happen on a switch's management network, which no other pod is
+on. Each is a management server's two networks: the switch network through the attach (its
+`routes` the site's networks), and its backend on an engine network whose default route leaves
+through the pod, so the tooling's backend runs in the cluster; files, flags and networks are the
+chart's (`tap.files`, `options`, `tap.networks`), and the engine clears a previous pod's
+containers when it starts, since its store outlives the pod. Software in the cluster reaches the
+site's networks through the site gateway: an attach marked `siteGateway` is its way on, and a
+CONNECT that no estate endpoint answers, to an address in that host's subnet or routes, is dialled
+from the host's network namespace (the socket made there, `netsim.SiteDialer`), as a management
+server on the OOB network reaches a switch at its lease, so the gateway stays closed to anything
+else. The line between the twin and the software under test is the site's own: what a site has
+before day 0 (the switches, the aggregation switch, the management node's NICs as `tap.hosts`, the
+gateway) is the twin's; the DHCP and ZTP servers, their configuration and everything after are the
+tooling's, in its own values file over the twin's release. A device on a `dhcp: stack` management
+network is not routed by host name before its lease (a BMC's Redfish, NVOS's NVUE and NMX-C):
+otherwise software would reach a BMC the site has given no address or name. **Why:** GPU Foundry, the software under test, runs in a cluster and is integrated against a
+twin at a URL; day 0 was otherwise only on a Linux host with the e2e script. **Amends:** D34 (the
+loopback substrate is the chart's default, no longer its only one). **Reversed if:** a cluster
+network can put a pod on a switch's management segment (Multus or a CNI the twin drives), so the
+day-0 servers run as their own pods; or the engine is replaced by the node's containerd.

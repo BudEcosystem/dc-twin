@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/netip"
 	"sync"
+	"time"
 )
 
 // L2 is a substrate that gives modelled ports a link layer: the TAP substrate (D20), Linux
@@ -36,6 +37,17 @@ type L2 interface {
 	Report() L2Report
 	Close() error
 }
+
+// SiteDialer is a substrate that reaches the site's own networks from a host on them (an attach
+// with siteGateway): the site gateway dials an address no estate endpoint answers through it.
+type SiteDialer interface {
+	// DialSite connects to addr ("ip:port") from that host's namespace; ErrNoSiteRoute when
+	// there is no such host or the address is not on the networks it reaches.
+	DialSite(addr string, timeout time.Duration) (net.Conn, error)
+}
+
+// ErrNoSiteRoute is an address the site gateway has no way onto.
+var ErrNoSiteRoute = errors.New("netsim: no site route")
 
 // L2Report is what the substrate says about itself in the fidelity report (07).
 type L2Report struct {

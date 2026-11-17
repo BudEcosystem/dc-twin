@@ -22,6 +22,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"math/big"
@@ -366,12 +367,20 @@ func (n *Net) serveConnect(w http.ResponseWriter, r *http.Request) {
 			target += ":80"
 		}
 	}
-	local, ok := n.Resolve(target)
-	if !ok {
-		http.Error(w, "dc-twin site gateway: no estate endpoint or stack service (siteServices) at "+target, http.StatusBadGateway)
+	var up net.Conn
+	var err error
+	if local, ok := n.Resolve(target); ok {
+		up, err = net.DialTimeout("tcp", local, 5*time.Second)
+	} else if sd, ok := n.L2.(SiteDialer); ok {
+		// not the twin's own: the site's, reached from the host on its networks (siteGateway)
+		up, err = sd.DialSite(target, 5*time.Second)
+	} else {
+		err = ErrNoSiteRoute
+	}
+	if errors.Is(err, ErrNoSiteRoute) {
+		http.Error(w, "dc-twin site gateway: no estate endpoint or stack service (siteServices) at "+target+", and no siteGateway host reaches it", http.StatusBadGateway)
 		return
 	}
-	up, err := net.DialTimeout("tcp", local, 5*time.Second)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return

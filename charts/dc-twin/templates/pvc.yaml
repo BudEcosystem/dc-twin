@@ -19,3 +19,21 @@ spec:
     requests:
       storage: {{ .Values.assets.persistence.size }}
 {{- end }}
+{{- if and (include "dc-twin.tap" .) .Values.tap.engine.persistence.enabled (not .Values.tap.engine.persistence.existingClaim) }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "dc-twin.fullname" . }}-engine
+  labels:
+    {{- include "dc-twin.labels" . | nindent 4 }}
+spec:
+  accessModes:
+    {{- toYaml .Values.tap.engine.persistence.accessModes | nindent 4 }}
+  {{- with .Values.tap.engine.persistence.storageClass }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.tap.engine.persistence.size }}
+{{- end }}

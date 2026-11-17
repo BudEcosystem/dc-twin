@@ -3,10 +3,14 @@ package nos
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -88,7 +92,11 @@ func (d *Docker) Pull(ctx context.Context, ref, platform string) error {
 	if platform != "" {
 		q.Set("platform", platform)
 	}
-	b, err := d.call(ctx, "POST", "/images/create?"+q.Encode(), nil, nil)
+	var hdr http.Header
+	if a := registryAuth(repo); a != "" {
+		hdr = http.Header{"X-Registry-Auth": {a}}
+	}
+	b, err := d.callWith(ctx, "POST", "/images/create?"+q.Encode(), hdr, nil, nil)
 	if err != nil {
 		return err
 	}
@@ -132,4 +140,66 @@ func splitRef(ref string) (repo, tag string) {
 		return ref[:i], ref[i+1:]
 	}
 	return ref, "latest"
+}
+
+// registryAuth is the X-Registry-Auth header for a pull of repo, as the Docker CLI sends it: the
+// Engine API logs in to a registry only with what its client sends (Podman's too, though its own
+// CLI reads its auth file). The credentials are the login the auth file holds for repo's registry:
+// REGISTRY_AUTH_FILE (Podman's, which a kubernetes.io/dockerconfigjson Secret is the form of), else
+// $DOCKER_CONFIG/config.json, else ~/.docker/config.json. "" when there is none; credential helpers
+// are not read.
+func registryAuth(repo string) string {
+	path := os.Getenv("REGISTRY_AUTH_FILE")
+	if path == "" {
+		dir := os.Getenv("DOCKER_CONFIG")
+		if dir == "" {
+			home, err := os.UserHomeDir()
+			if err != nil {
+				return ""
+			}
+			dir = filepath.Join(home, ".docker")
+		}
+		path = filepath.Join(dir, "config.json")
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	var f struct {
+		Auths map[string]struct {
+			Auth     string `json:"auth"`
+			Username string `json:"username"`
+			Password string `json:"password"`
+		} `json:"auths"`
+	}
+	if json.Unmarshal(b, &f) != nil {
+		return ""
+	}
+	host, _, nested := strings.Cut(repo, "/")
+	if !nested || !strings.ContainsAny(host, ".:") && host != "localhost" {
+		host = "docker.io"
+	}
+	keys := []string{host, "https://" + host, "http://" + host}
+	server := host
+	if host == "docker.io" {
+		keys = append(keys, "https://index.docker.io/v1/", "index.docker.io")
+		server = "https://index.docker.io/v1/" // Docker Hub's, as the Docker CLI names it
+	}
+	for _, k := range keys {
+		a, ok := f.Auths[k]
+		if !ok {
+			continue
+		}
+		user, pass := a.Username, a.Password
+		if a.Auth != "" {
+			raw, err := base64.StdEncoding.DecodeString(a.Auth)
+			if err != nil {
+				continue // unreadable: another spelling of the registry may hold a usable login
+			}
+			user, pass, _ = strings.Cut(string(raw), ":")
+		}
+		j, _ := json.Marshal(map[string]string{"username": user, "password": pass, "serveraddress": server})
+		return base64.URLEncoding.EncodeToString(j)
+	}
+	return ""
 }

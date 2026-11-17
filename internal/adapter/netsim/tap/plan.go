@@ -64,8 +64,8 @@ type Plan struct {
 	// (spec.adapters.network.nos.registry, else DCTWIN_REGISTRY; "" for none).
 	Registry string
 	// Day0Binaries is the directory of the twin's day-0 programs on the Docker host, mounted in
-	// every factory switch (spec.adapters.network.nos.day0Binaries, else beside the twin's own
-	// executable); "" when there is none.
+	// every factory switch (spec.adapters.network.nos.day0Binaries, else DCTWIN_DAY0_BINARIES,
+	// else beside the twin's own executable); "" when there is none.
 	Day0Binaries string
 }
 
@@ -177,6 +177,8 @@ type AttachPlan struct {
 	Gateway   netip.Addr
 	// Routes are what the host routes through the port (none: a default route).
 	Routes []netip.Prefix
+	// SiteGateway: the site gateway dials the host's subnet and Routes from its namespace.
+	SiteGateway bool
 }
 
 // kernelProbes are the overlay devices a NOS that provides VRFs creates, and how to make one.
@@ -514,7 +516,15 @@ func BuildPlan(m *model.Model, est *schema.Estate, outputs map[string]string, ho
 		if swIf == "" {
 			return nil, fmt.Errorf("spec.adapters.network.attach[%d]: %s is not a front-panel port %s can carry", i, mp.Ref, sp.NOS.Name)
 		}
-		ap := &AttachPlan{Container: at.Container, Netns: at.Netns, Interface: ifname, Switch: sp, Port: portName, SwitchIf: swIf, Address: addr, Gateway: gw}
+		ap := &AttachPlan{Container: at.Container, Netns: at.Netns, Interface: ifname, Switch: sp, Port: portName, SwitchIf: swIf, Address: addr, Gateway: gw,
+			SiteGateway: at.SiteGateway}
+		if at.SiteGateway {
+			for _, prev := range p.Attach {
+				if prev.SiteGateway {
+					return nil, fmt.Errorf("spec.adapters.network.attach[%d].siteGateway: %s%s is the site gateway's already; at most one host is", i, prev.Container, prev.Netns)
+				}
+			}
+		}
 		svc := nos.Service{Port: portName, Gateway: netip.PrefixFrom(gw, addr.Bits())}
 		for _, r := range at.Routes {
 			pfx, err := netip.ParsePrefix(r)
@@ -747,9 +757,15 @@ func planFactory(p *Plan, m *model.Model, est *schema.Estate, byDev map[*model.D
 	if scale <= 0 {
 		scale = 1
 	}
-	if dir := est.Spec.Adapters.Network.NOS.Day0Binaries; dir != "" {
+	// a twin in a pod beside its Docker host (the chart's tap substrate) is told where that host
+	// keeps the day-0 programs, as it is told the registry
+	dir, from := est.Spec.Adapters.Network.NOS.Day0Binaries, "spec.adapters.network.nos.day0Binaries"
+	if dir == "" {
+		dir, from = os.Getenv("DCTWIN_DAY0_BINARIES"), "DCTWIN_DAY0_BINARIES"
+	}
+	if dir != "" {
 		if !filepath.IsAbs(dir) {
-			return fmt.Errorf("spec.adapters.network.nos.day0Binaries %q: an absolute path on the Docker host", dir)
+			return fmt.Errorf("%s %q: an absolute path on the Docker host", from, dir)
 		}
 		p.Day0Binaries = dir
 	} else if exe, err := os.Executable(); err == nil {

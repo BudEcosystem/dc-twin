@@ -80,6 +80,9 @@ type server struct {
 	siteIP     string // NVOS's address: its management port's lease, as committed
 	routed     string // the site address routed to this server now ("" while NVOS is down)
 	hostRouted bool
+	// leasedName: NVOS's address is the stack's to give (twin.StackLeased), so its host name is
+	// routed only while it holds a lease
+	leasedName bool
 	certs      map[string]*tls.Certificate // by the site address they name ("" for none)
 }
 
@@ -99,6 +102,7 @@ func (a *Adapter) Start(ctx context.Context, rt *adapter.Runtime) error {
 		s := &server{a: a, dev: d, certs: map[string]*tls.Certificate{}}
 		if ps := twin.NVOSPorts(d); len(ps) > 0 {
 			s.port = ps[0].Ref
+			rt.Engine.Read(func(m *model.Model) { s.leasedName = twin.StackLeased(m, ps[0]) })
 		}
 		ln, err := rt.Net.Listen(d.Path, "nvue")
 		if err != nil {
@@ -224,13 +228,13 @@ func (s *server) sync() {
 		}
 		s.routed = want
 	}
-	if up != s.hostRouted {
-		if up {
+	if named := up && twin.NameRouted(s.leasedName, s.siteIP); named != s.hostRouted {
+		if named {
 			nw.Route(host, s.addr)
 		} else {
 			nw.Unroute(host)
 		}
-		s.hostRouted = up
+		s.hostRouted = named
 	}
 }
 

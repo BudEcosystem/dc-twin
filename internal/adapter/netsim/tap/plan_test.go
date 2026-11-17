@@ -587,3 +587,34 @@ func TestPlanHBN(t *testing.T) {
 		}
 	}
 }
+
+// An attach with siteGateway is the site gateway's way onto the site's networks; at most one is.
+func TestPlanSiteGateway(t *testing.T) {
+	b, err := os.ReadFile("../../../../examples/estates/dsx-day0-gb300.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	est := &schema.Estate{}
+	if err := schema.Decode(b, est); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("DCTWIN_DAY0_BINARIES", "/opt/dctwin-day0")
+	m := compileModel(t, est)
+	p, err := BuildPlan(m, est, nil, "x86_64")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var hosts []string
+	for _, ap := range p.Attach {
+		if ap.SiteGateway {
+			hosts = append(hosts, ap.Container)
+		}
+	}
+	if len(hosts) != 1 || hosts[0] != "site-tooling" {
+		t.Fatalf("the site gateway's host: %v", hosts)
+	}
+	est.Spec.Adapters.Network.Attach[0].SiteGateway = true
+	if _, err := BuildPlan(m, est, nil, "x86_64"); err == nil || !strings.Contains(err.Error(), "at most one host") {
+		t.Fatalf("two hosts: %v", err)
+	}
+}

@@ -1,6 +1,7 @@
-# dc-twin: one release runs one estate, in one pod, on the loopback substrate (D34): every device
-# endpoint is a port on the pod's loopback, and software under test reaches the devices through
-# the site gateway.
+# dc-twin: one release runs one estate, in one pod. On the loopback substrate (D34, the default)
+# every device endpoint is a port on the pod's loopback, and software under test reaches the
+# devices through the site gateway. On the tap substrate (D82) the pod is privileged and runs real
+# switch operating systems in a container engine beside the twin, as day 0 (18) needs.
 
 image:
   repository: registry.bud.studio/gpu-foundry/dc-twin
@@ -75,6 +76,76 @@ networkPolicy:
   controlFrom: []
     # - namespaceSelector:
     #     matchLabels: { kubernetes.io/metadata.name: ingress-nginx }
+
+# The network substrate: loopback (D34), unprivileged; or tap (D82), for an estate whose fabrics
+# run a real nos or are brought up by the software under test (fabric.bringUp: factory), with
+# spec.adapters.network.substrate: tap. tap makes the pod privileged: its twin and its engine run
+# as root, with the node's kernel, so give it a node you would give a container host.
+substrate: loopback
+tap:
+  # The container engine the switches run in: Podman's Docker-compatible API, in a sidecar that
+  # shares the pod's process namespace, so the twin can open each switch's network namespace.
+  engine:
+    image:
+      repository: quay.io/podman/stable
+      tag: v5.2.2
+      pullPolicy: IfNotPresent
+    resources: {}
+    # The engine's image store: the switch images (about 1 GB for generic/nvue-frr) are pulled once.
+    persistence:
+      enabled: true
+      existingClaim: ""
+      storageClass: ""
+      accessModes: [ReadWriteOnce]
+      size: 20Gi
+  # Where the engine pulls the twin's own switch images from (DCTWIN_REGISTRY), and the
+  # kubernetes.io/dockerconfigjson Secret it logs in with; "" uses the first of imagePullSecrets.
+  registry: registry.bud.studio/gpu-foundry
+  registryAuthSecret: ""
+  # The site's management node (bootstrap): the hosts the estate's spec.adapters.network.attach
+  # names by `container`, each its NIC on the switch network. A host with no container of that name
+  # below is bare (tap.hostImage, idle): there, cabled, running nothing until the site's tooling is
+  # put on it. The twin's own values name the hosts; the tooling's values list only the containers
+  # it runs, so neither replaces the other's list.
+  hosts: []
+    # - nvcm-edge
+    # - nico-dhcp
+    # - site-tooling
+  hostImage: docker.io/library/busybox:1.36
+  # The site's day-0 tooling (18): containers the engine starts, in this order, before the twin.
+  # The estate's spec.adapters.network.attach cables one to a switch port by its `container` name
+  # when the twin comes up, as the site's DHCP and ZTP servers are on its management network.
+  # (An attach by `netns` is not supported here.) Each container:
+  #   network  none (the default): only what the twin attaches; an engine network (tap.networks),
+  #            with podman's options ("nvcm-net:interface_name=eth1" leaves eth0 to the twin);
+  #            "container:<name>" to share an earlier container's network namespace; "podman",
+  #            the engine's default bridge, which reaches the cluster through the pod
+  #   mounts   "<file set>[/<path>]:<container path>[:ro]", a file of tap.files or a whole set
+  #   options  more `podman run` flags: --cap-add, --sysctl, --hostname, -v <volume>:<path> (a
+  #            named volume lives in the engine's store, so it survives the pod)
+  # A container the twin attached loses its port if it restarts: the twin attaches at `up` only.
+  containers: []
+    # NVIDIA Config Manager's edge, as compat/nvcm/nvcm.sh runs it: Kea on its backend's network as
+    # eth1, the twin's management network as eth0, and its DHCP API, configuration sync, ZTP API
+    # and SFTP in its network namespace
+    # - name: nvcm-edge
+    #   image: registry.bud.studio/gpu-foundry/nvcm-kea:1.4.1
+    #   network: "nvcm-net:interface_name=eth1"
+    #   mounts: ["nvcm/nv-config-manager.ini:/etc/vault/nv-config-manager.ini:ro"]
+    #   options: [--hostname, nvcm-edge, --cap-add, NET_RAW, --cap-add, NET_BIND_SERVICE,
+    #             --sysctl, net.ipv4.ip_unprivileged_port_start=0]
+    # - name: nvcm-ztp
+    #   image: registry.bud.studio/gpu-foundry/nvcm-app:1.4.1
+    #   network: "container:nvcm-edge"
+    #   env: { NV_CONFIG_MANAGER_INI: /etc/nv-config-manager/nv-config-manager.ini, NV_CONFIG_MANAGER_REJECT_IDENTITY_HEADERS: "true" }
+    #   mounts: ["nvcm/nv-config-manager.ini:/etc/nv-config-manager/nv-config-manager.ini:ro"]
+    #   args: [nv-config-manager-ztp-api, --port, "80"]
+  # Engine networks the containers join by name, made if missing.
+  networks: []
+    # - nvcm-net
+  # Files the containers mount: each a Secret or ConfigMap of yours, as a file set by `name`.
+  files: []
+    # - { name: nvcm, secret: nvcm-config }
 
 # Accept vm guests of another architecture under TCG (dctwin up --allow-tcg).
 allowTCG: false

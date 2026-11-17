@@ -1,0 +1,78 @@
+# A DSX OS site's day 0 (18 — Z7d) on GB300 NVL72 racks: dsx-day0's shape, with two NVIDIA GB300
+# NVL72 racks (18 compute trays, 9 NVLink switch trays and 8 power shelves each) in place of its CPU
+# racks, fed through a UPS and a remote power panel per feed, with their InfiniBand scale-out
+# fabric under UFM. Each rack's two management switches leave the factory and are NVIDIA Config
+# Manager's OOB-Leafs, brought up by NVCM's DHCP and ZTP through the OOB aggregation switch, the one
+# switch the twin configures; the trays' and shelves' BMCs lease from NICo's DHCP through the relays
+# NVCM renders on the leaves (VRF OOB, over EVPN to the aggregation switch). Kea (NVCM's edge)
+# attaches at the aggregation switch's eth128, the site's tooling at eth127, NICo's DHCP at eth122
+# (the leaves' management ports take eth123 to eth126).
+apiVersion: dc-twin/v1alpha1
+kind: Estate
+metadata:
+  name: dsx-day0-gb300
+spec:
+  seed: 2027
+  clock: wall
+  timeScale: 0.05
+  packs: [generic@0.1.0, nvidia@0.1.0, liteon@0.1.0]
+  fidelity: { default: model }
+  sites:
+    - name: site-1
+      halls:
+        - name: hall-a
+          rows:
+            - name: a
+              positions: 4
+              racks:
+                - { name: r01, position: 1, format: nvidia/gb300-nvl72, feeds: [A, B] }
+                - { name: r02, position: 2, format: nvidia/gb300-nvl72, feeds: [A, B] }
+                - { name: n01, position: 4, format: generic/network-rack, params: { ufm: nvidia/ufm-appliance, ibRails: 4 }, feeds: [A, B] }
+  networks:
+    oob: { role: management, dhcp: stack, cidr: 10.30.0.0/20, fabric: oob, server: 10.90.0.10 }
+    backend: { role: scale-out, fabric: backend }
+  fabrics:
+    - name: oob
+      template: oob-flat
+      nos: generic/nvue-frr
+      bringUp: factory
+      factory: { install: preinstalled, ztp: enabled, bootTime: 60s, installTime: 2m, plan: given, select: "r01/mgmt-switch-* r02/mgmt-switch-*" }
+    # the trays' ConnectX-8 InfiniBand, four rails of NVIDIA Quantum switches in the network rack, and
+    # UFM (its appliance in n01) managing them: UFM's REST answers at the appliance's management
+    # lease, which the site's DHCP gives it
+    - { name: backend, template: rail-optimised, technology: infiniband, nos: none, manager: nvidia/ufm, params: { rails: 4 }, select: "r0*", placeIn: n01 }
+  stacks: []
+  facility:
+    power:
+      feeds: [{ name: A, capacityW: 600000 }, { name: B, capacityW: 600000 }]
+      # each feed through a UPS to a remote power panel serving every rack: a feed loss rides
+      # through on that UPS's battery for as long as it lasts at the load, then that side of every
+      # rack goes dark and the other side carries it (13)
+      topology:
+        - { name: ups-a, kind: ups, from: A, capacityW: 600000, runtimeS: 300 }
+        - { name: ups-b, kind: ups, from: B, capacityW: 600000, runtimeS: 300 }
+        - { name: rpp-a1, kind: pdu-panel, from: ups-a, capacityW: 600000, serves: ["r0*", "n01"] }
+        - { name: rpp-b1, kind: pdu-panel, from: ups-b, capacityW: 600000, serves: ["r0*", "n01"] }
+    cooling:
+      loops: [{ name: cdu-1, profile: generic/cdu-inrow, racks: [r01, r02], capacityKW: 400 }]
+  adapters:
+    network:
+      substrate: tap
+      nos:
+        cumulusVersion: "5.14.0"
+        images: []
+      # The site's tooling, the slots GPU Foundry fills (charts/dc-twin tap.containers). Each reaches
+      # the management network (10.30.0.0/20), the service networks (10.90.0.0/16) and the
+      # switches' loopbacks through its port, and keeps its default route on its own side: the
+      # cluster, where the tooling's backends (NVCM's, NICo's) run.
+      attach:
+        - { container: nvcm-edge, port: "oob-agg-1:eth128", address: 10.90.0.10/24, gateway: 10.90.0.1, interface: eth0,
+            routes: [10.30.0.0/20, 10.90.0.0/16, 10.255.255.0/24] }
+        # the site gateway reaches the site's networks from here (siteGateway): a switch's SSH,
+        # NVUE and gNMI at its lease or loopback, and the tooling's own APIs, for software in the
+        # cluster, through the gateway as BMCs are
+        - { container: site-tooling, port: "oob-agg-1:eth127", address: 10.90.1.10/24, gateway: 10.90.1.1, interface: probe0,
+            routes: [10.30.0.0/20, 10.90.0.0/16, 10.255.255.0/24], siteGateway: true }
+        # the BMCs' DHCP (NICo's forge-dhcp-server), in VRF OOB on the aggregation switch
+        - { container: nico-dhcp, port: "oob-agg-1:eth122", address: 10.90.2.10/24, gateway: 10.90.2.1, interface: svc0,
+            routes: [10.30.0.0/20, 10.90.0.0/16, 10.255.255.0/24] }
